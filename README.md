@@ -297,7 +297,7 @@ This path works whether Wi-Fi is on or off — only USB matters. If you still se
 
 ## Tech Stack
 
-**Frontend** — React 18 · TypeScript · Tailwind CSS · xterm.js
+**Frontend** — React 19 · TypeScript · Tailwind CSS · xterm.js
 **Backend** — Rust · Tauri 2 · russh · rusqlite · aes-gcm · argon2 · zstd
 
 ## Credits
