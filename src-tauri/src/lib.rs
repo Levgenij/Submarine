@@ -6869,23 +6869,31 @@ async fn open_terminal(app: tauri::AppHandle, state: tauri::State<'_, SshState>,
         }
     };
 
-    let session = session_arc.lock().await;
-    let mut channel = session.channel_open_session().await.map_err(|e| e.to_string())?;
-    
-    // Request PTY
-    channel.request_pty(false, "xterm-256color", cols, rows, 0, 0, &[]).await.map_err(|e| e.to_string())?;
-    channel.request_shell(true).await.map_err(|e| e.to_string())?;
+    // Last-wins watch channel for PTY resizes, registered before the channel
+    // round-trips so an early `resize_terminal` is captured (see
+    // `SshState::register_resize_watch`). The PTY task selects on changes;
+    // bursty resize events (e.g. window drag) collapse to the final value
+    // rather than competing with keystrokes on the data mpsc.
+    let mut resize_rx = state.register_resize_watch(&terminal_id, cols, rows).await;
+    let opened = async {
+        let session = session_arc.lock().await;
+        let channel = session.channel_open_session().await.map_err(|e| e.to_string())?;
+        let size = *resize_rx.borrow_and_update();
+        channel.request_pty(false, "xterm-256color", size.cols, size.rows, 0, 0, &[]).await.map_err(|e| e.to_string())?;
+        channel.request_shell(true).await.map_err(|e| e.to_string())?;
+        Ok::<_, String>(channel)
+    }
+    .await;
+    let mut channel = match opened {
+        Ok(channel) => channel,
+        Err(e) => {
+            state.resize_txs.lock().await.remove(&terminal_id);
+            return Err(e);
+        }
+    };
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<TerminalCommand>(32);
-    // Last-wins watch channel for PTY resizes. The PTY task selects on
-    // changes; bursty resize events (e.g. window drag) collapse to the
-    // final value rather than competing with keystrokes on the data
-    // mpsc. Seed with the initial size so the watch is always populated.
-    let (resize_tx, mut resize_rx) = tokio::sync::watch::channel(
-        crate::ssh_manager::PtySize { cols, rows },
-    );
     state.terminal_txs.lock().await.insert(terminal_id.clone(), tx);
-    state.resize_txs.lock().await.insert(terminal_id.clone(), resize_tx);
 
     let terminal_id_clone = terminal_id.clone();
     let app_clone = app.clone();

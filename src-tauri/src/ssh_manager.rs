@@ -95,6 +95,25 @@ pub struct SshState {
 }
 
 impl SshState {
+    /// Register the resize watch for `terminal_id` BEFORE the SSH round-trips
+    /// that open the channel. xterm's layout usually settles (fonts, panel
+    /// transitions, window-state restore) while `channel_open_session` /
+    /// `request_pty` are still in flight; the `resize_terminal` that fires
+    /// then used to find no sender and was dropped, leaving the PTY one row
+    /// short until the next manual resize. Callers read the size for
+    /// `request_pty` via `borrow_and_update()` so any later send is seen by
+    /// the PTY task's `changed()` and forwarded as `window_change`.
+    pub async fn register_resize_watch(
+        &self,
+        terminal_id: &str,
+        cols: u32,
+        rows: u32,
+    ) -> tokio::sync::watch::Receiver<PtySize> {
+        let (tx, rx) = tokio::sync::watch::channel(PtySize { cols, rows });
+        self.resize_txs.lock().await.insert(terminal_id.to_string(), tx);
+        rx
+    }
+
     pub fn new() -> Self {
         Self {
             fp_txs: Arc::new(Mutex::new(HashMap::new())),
@@ -380,6 +399,33 @@ impl client::Handler for ClientHandler {
             }
         }
         Ok((self, session))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `resize_terminal` that lands while the channel is still being
+    /// negotiated must reach `request_pty` (via `borrow_and_update`), and a
+    /// resize after that point must still wake the PTY task's `changed()`.
+    #[tokio::test]
+    async fn early_resize_is_seen_by_request_pty_and_late_resize_wakes_task() {
+        let resize_txs: Arc<Mutex<HashMap<String, tokio::sync::watch::Sender<PtySize>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let (tx, mut rx) = tokio::sync::watch::channel(PtySize { cols: 80, rows: 24 });
+        resize_txs.lock().await.insert("t1".into(), tx);
+
+        resize_txs.lock().await.get("t1").unwrap()
+            .send(PtySize { cols: 254, rows: 57 }).unwrap();
+        let size = *rx.borrow_and_update();
+        assert_eq!((size.cols, size.rows), (254, 57));
+        assert!(!rx.has_changed().unwrap());
+
+        resize_txs.lock().await.get("t1").unwrap()
+            .send(PtySize { cols: 254, rows: 58 }).unwrap();
+        rx.changed().await.unwrap();
+        assert_eq!(rx.borrow().rows, 58);
     }
 }
 
