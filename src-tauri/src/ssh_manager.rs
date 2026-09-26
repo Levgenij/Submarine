@@ -68,6 +68,21 @@ pub struct PtySize {
     pub rows: u32,
 }
 
+/// What to start on a freshly allocated PTY channel.
+pub enum PtyProgram {
+    /// The user's login shell (`request_shell`).
+    Shell,
+    /// A one-shot command (`exec`), e.g. `docker exec -it ...`.
+    Exec(String),
+}
+
+/// Everything the PTY task needs after `SshState::open_pty_channel`.
+pub struct PtyChannel {
+    pub channel: russh::Channel<client::Msg>,
+    pub commands: mpsc::Receiver<TerminalCommand>,
+    pub resizes: tokio::sync::watch::Receiver<PtySize>,
+}
+
 /// Flush a coalesced batch of PTY output as one `terminal-output-{id}` event.
 ///
 /// The read loops accumulate channel bytes and call this on an ~8ms timer or a
@@ -141,23 +156,58 @@ pub struct SshState {
 }
 
 impl SshState {
-    /// Register the resize watch for `terminal_id` BEFORE the SSH round-trips
-    /// that open the channel. xterm's layout usually settles (fonts, panel
-    /// transitions, window-state restore) while `channel_open_session` /
-    /// `request_pty` are still in flight; the `resize_terminal` that fires
-    /// then used to find no sender and was dropped, leaving the PTY one row
-    /// short until the next manual resize. Callers read the size for
-    /// `request_pty` via `borrow_and_update()` so any later send is seen by
-    /// the PTY task's `changed()` and forwarded as `window_change`.
-    pub async fn register_resize_watch(
+    /// Open an SSH channel with a PTY on `session_id`, start `program` on it
+    /// and register the terminal's command / resize senders.
+    ///
+    /// The resize watch is registered BEFORE the SSH round-trips. xterm's
+    /// layout usually settles (fonts, panel transitions, window-state
+    /// restore) while `channel_open_session` / `request_pty` are still in
+    /// flight; a `resize_terminal` arriving then used to find no sender and
+    /// was dropped, leaving the PTY one row short until the next manual
+    /// resize. `request_pty` reads the size via `borrow_and_update()`, so any
+    /// later send still wakes the PTY task's `changed()` and is forwarded as
+    /// `window_change`. On failure nothing stays registered.
+    pub async fn open_pty_channel(
         &self,
+        session_id: &str,
         terminal_id: &str,
         cols: u32,
         rows: u32,
-    ) -> tokio::sync::watch::Receiver<PtySize> {
-        let (tx, rx) = tokio::sync::watch::channel(PtySize { cols, rows });
-        self.resize_txs.lock().await.insert(terminal_id.to_string(), tx);
-        rx
+        program: PtyProgram,
+    ) -> Result<PtyChannel, String> {
+        let session_arc = self
+            .connections
+            .lock()
+            .await
+            .get(session_id)
+            .map(Arc::clone)
+            .ok_or_else(|| "Session not connected".to_string())?;
+
+        let (resize_tx, mut resizes) = tokio::sync::watch::channel(PtySize { cols, rows });
+        self.resize_txs.lock().await.insert(terminal_id.to_string(), resize_tx);
+
+        let opened = async {
+            let channel = session_arc.lock().await.channel_open_session().await?;
+            let size = *resizes.borrow_and_update();
+            channel.request_pty(false, "xterm-256color", size.cols, size.rows, 0, 0, &[]).await?;
+            match &program {
+                PtyProgram::Shell => channel.request_shell(true).await?,
+                PtyProgram::Exec(cmd) => channel.exec(true, cmd.as_bytes()).await?,
+            }
+            Ok::<_, russh::Error>(channel)
+        }
+        .await;
+        let channel = match opened {
+            Ok(channel) => channel,
+            Err(e) => {
+                self.resize_txs.lock().await.remove(terminal_id);
+                return Err(e.to_string());
+            }
+        };
+
+        let (tx, commands) = mpsc::channel::<TerminalCommand>(32);
+        self.terminal_txs.lock().await.insert(terminal_id.to_string(), tx);
+        Ok(PtyChannel { channel, commands, resizes })
     }
 
     pub fn new() -> Self {
