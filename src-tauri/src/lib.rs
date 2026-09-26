@@ -4,7 +4,7 @@ use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
 use zeroize::{Zeroize, Zeroizing};
 use rand::Rng;
-use rusqlite::{ffi, Connection, DatabaseName};
+use rusqlite::{ffi, Connection, MAIN_DB};
 use rusqlite::serialize::OwnedData;
 use std::ptr::NonNull;
 use std::sync::Mutex as StdMutex;
@@ -258,7 +258,7 @@ fn save_vault_blocking(
     salt: &[u8; SALT_LEN],
     path: &std::path::Path,
 ) -> Result<(), String> {
-    let serialized = conn.serialize(DatabaseName::Main)
+    let serialized = conn.serialize(MAIN_DB)
         .map_err(|e| format!("[DATABASE] SERIALIZE_FAILED: {}", e))?;
     // Compress-then-encrypt. Order matters: compressing AFTER encryption
     // is useless because AES-GCM ciphertext is indistinguishable from
@@ -3227,7 +3227,7 @@ async fn setup_master_db_inner(
         conn = Connection::open_in_memory()
             .map_err(|e| format!("[DATABASE] MEM_INIT_FAILED: {}", e))?;
         let owned = to_sqlite_owned(&decrypted_data)?;
-        conn.deserialize(DatabaseName::Main, owned, false)
+        conn.deserialize(MAIN_DB, owned, false)
             .map_err(|e| format!("[DATABASE] DESERIALIZE_FAILED: {}", e))?;
         // Schema migration for vaults created before the Notes feature shipped.
         // Existing tables are untouched; only the new ones get materialised.
