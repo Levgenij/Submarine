@@ -666,19 +666,12 @@ pub async fn open_container_terminal(
     rows: u32,
     use_sudo: bool,
 ) -> Result<(), String> {
-    use crate::ssh_manager::TerminalCommand;
+    use crate::ssh_manager::{PtyChannel, PtyProgram, TerminalCommand};
     use russh::ChannelMsg;
 
     if !is_safe_name(&container) {
         return Err("invalid container name".into());
     }
-    let session_arc = {
-        let connections = state.connections.lock().await;
-        connections
-            .get(&session_id)
-            .map(Arc::clone)
-            .ok_or_else(|| "Session not connected".to_string())?
-    };
     // Shell auto-detect runs inside the container: prefer bash, fall back to
     // sh, fall back to ash (Alpine). Anything more exotic and the user can
     // jump in via a regular ssh terminal and figure it out.
@@ -690,43 +683,9 @@ pub async fn open_container_terminal(
         docker_cmd
     };
 
-    // Resize watch goes in before the channel round-trips; see
-    // `SshState::register_resize_watch` for the race it closes.
-    let mut resize_rx = state.register_resize_watch(&terminal_id, cols, rows).await;
-    let opened = async {
-        let channel = {
-            let session = session_arc.lock().await;
-            session
-                .channel_open_session()
-                .await
-                .map_err(|e| e.to_string())?
-        };
-        let size = *resize_rx.borrow_and_update();
-        channel
-            .request_pty(false, "xterm-256color", size.cols, size.rows, 0, 0, &[])
-            .await
-            .map_err(|e| e.to_string())?;
-        channel
-            .exec(true, cmd.as_bytes())
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok::<_, String>(channel)
-    }
-    .await;
-    let mut channel = match opened {
-        Ok(channel) => channel,
-        Err(e) => {
-            state.resize_txs.lock().await.remove(&terminal_id);
-            return Err(e);
-        }
-    };
-
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<TerminalCommand>(32);
-    state
-        .terminal_txs
-        .lock()
-        .await
-        .insert(terminal_id.clone(), tx);
+    let PtyChannel { mut channel, commands: mut rx, resizes: mut resize_rx } = state
+        .open_pty_channel(&session_id, &terminal_id, cols, rows, PtyProgram::Exec(cmd))
+        .await?;
 
     let terminal_id_clone = terminal_id.clone();
     let app_clone = app.clone();
