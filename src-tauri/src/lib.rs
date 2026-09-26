@@ -6857,43 +6857,13 @@ async fn disconnect_session(
 async fn open_terminal(app: tauri::AppHandle, state: tauri::State<'_, SshState>, session_id: String, terminal_id: String, cols: u32, rows: u32) -> Result<(), String> {
     use russh::ChannelMsg;
     use tauri::Emitter;
-    use std::sync::Arc;
-    use crate::ssh_manager::TerminalCommand;
+    use crate::ssh_manager::{PtyChannel, PtyProgram, TerminalCommand};
 
-    let session_arc = {
-        let mut connections = state.connections.lock().await;
-        if let Some(sess) = connections.get_mut(&session_id) {
-            Arc::clone(sess)
-        } else {
-            return Err("Session not connected".into());
-        }
-    };
-
-    // Last-wins watch channel for PTY resizes, registered before the channel
-    // round-trips so an early `resize_terminal` is captured (see
-    // `SshState::register_resize_watch`). The PTY task selects on changes;
-    // bursty resize events (e.g. window drag) collapse to the final value
-    // rather than competing with keystrokes on the data mpsc.
-    let mut resize_rx = state.register_resize_watch(&terminal_id, cols, rows).await;
-    let opened = async {
-        let session = session_arc.lock().await;
-        let channel = session.channel_open_session().await.map_err(|e| e.to_string())?;
-        let size = *resize_rx.borrow_and_update();
-        channel.request_pty(false, "xterm-256color", size.cols, size.rows, 0, 0, &[]).await.map_err(|e| e.to_string())?;
-        channel.request_shell(true).await.map_err(|e| e.to_string())?;
-        Ok::<_, String>(channel)
-    }
-    .await;
-    let mut channel = match opened {
-        Ok(channel) => channel,
-        Err(e) => {
-            state.resize_txs.lock().await.remove(&terminal_id);
-            return Err(e);
-        }
-    };
-
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<TerminalCommand>(32);
-    state.terminal_txs.lock().await.insert(terminal_id.clone(), tx);
+    // The PTY task selects on `resize_rx` (last-wins watch) in parallel with
+    // the keystroke mpsc, so bursty resize events (e.g. window drag) collapse
+    // to the final value rather than competing with typed bytes.
+    let PtyChannel { mut channel, commands: mut rx, resizes: mut resize_rx } =
+        state.open_pty_channel(&session_id, &terminal_id, cols, rows, PtyProgram::Shell).await?;
 
     let terminal_id_clone = terminal_id.clone();
     let app_clone = app.clone();
