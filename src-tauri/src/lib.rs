@@ -144,20 +144,17 @@ fn derive_key(password: &str, salt_bytes: &[u8]) -> Result<[u8; 32], String> {
 
 fn encrypt_with_key(plaintext: &[u8], key: &[u8; 32]) -> Result<(Vec<u8>, [u8; NONCE_LEN]), String> {
     let cipher = Aes256Gcm::new(key.into());
-    let nonce_bytes: [u8; NONCE_LEN] = rand::thread_rng().gen();
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = cipher.encrypt(nonce, plaintext)
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    rand::rng().fill_bytes(&mut nonce_bytes);
+    let ciphertext = cipher.encrypt(&Nonce::from(nonce_bytes), plaintext)
         .map_err(|e| format!("[CRYPTO] ENCRYPT_FAILED: {}", e))?;
     Ok((ciphertext, nonce_bytes))
 }
 
 fn decrypt_with_key(ciphertext: &[u8], nonce_bytes: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
-    if nonce_bytes.len() != NONCE_LEN {
-        return Err("[CRYPTO] NONCE_LEN_INVALID".into());
-    }
+    let nonce = Nonce::try_from(nonce_bytes).map_err(|_| "[CRYPTO] NONCE_LEN_INVALID".to_string())?;
     let cipher = Aes256Gcm::new(key.into());
-    let nonce = Nonce::from_slice(nonce_bytes);
-    cipher.decrypt(nonce, ciphertext)
+    cipher.decrypt(&nonce, ciphertext)
         .map_err(|e| format!("[CRYPTO] DECRYPT_FAILURE: Possible wrong key or corrupted data. Details: {}", e))
 }
 
@@ -302,7 +299,7 @@ const SYNCED_TABLES: &[&str] = &[
 /// (see `app_temp_root`).
 fn new_entity_uuid() -> String {
     let mut bytes = [0u8; 16];
-    rand::thread_rng().fill(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     hex::encode(bytes)
 }
 
@@ -327,7 +324,7 @@ fn get_or_create_dek(conn: &Connection) -> Result<([u8; 32], bool), String> {
         // Malformed row (shouldn't happen) — fall through and mint a fresh one.
     }
     let mut d = [0u8; 32];
-    rand::thread_rng().fill(&mut d);
+    rand::rng().fill_bytes(&mut d);
     conn.execute(
         "INSERT INTO sync_meta(key,value) VALUES('dek',?1)
          ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -346,7 +343,7 @@ fn sync_device_node_id(app: &tauri::AppHandle) -> String {
     use tauri::Manager as _;
     let fresh = || {
         let mut b = [0u8; 8];
-        rand::thread_rng().fill(&mut b);
+        rand::rng().fill_bytes(&mut b);
         hex::encode(b)
     };
     let Ok(dir) = app.path().app_data_dir() else { return fresh() };
@@ -1561,7 +1558,7 @@ async fn setup_identity(
     }
     let kp = identity::generate_keypair();
     let mut salt = [0u8; 16];
-    rand::thread_rng().fill(&mut salt);
+    rand::rng().fill_bytes(&mut salt);
     let wrapped = identity::wrap_secret(&enc_passphrase, &salt, &kp.secret)?;
     cloud::publish_identity(&app, &cloud, &hex::encode(kp.public), &wrapped, &hex::encode(salt)).await?;
     cloud.set_identity(kp.public, kp.secret).await;
@@ -1582,7 +1579,7 @@ async fn reset_identity(
     }
     let kp = identity::generate_keypair();
     let mut salt = [0u8; 16];
-    rand::thread_rng().fill(&mut salt);
+    rand::rng().fill_bytes(&mut salt);
     let wrapped = identity::wrap_secret(&enc_passphrase, &salt, &kp.secret)?;
     cloud::publish_identity(&app, &cloud, &hex::encode(kp.public), &wrapped, &hex::encode(salt)).await?;
     cloud.set_identity(kp.public, kp.secret).await;
@@ -1983,7 +1980,7 @@ async fn rotate_share_dek(
 ) -> Result<(), String> {
     let (my_pub, _) = cloud.identity().await.ok_or("[SHARE] IDENTITY_LOCKED")?;
     let mut fresh = [0u8; 32];
-    rand::thread_rng().fill(&mut fresh);
+    rand::rng().fill_bytes(&mut fresh);
 
     // Re-seal to the owner FIRST. If this is the step that fails, nobody's grant
     // has changed yet and the old key is still universally valid — a clean no-op
@@ -3387,7 +3384,7 @@ async fn setup_master_db_inner(
             return Err("[CRYPTO] WEAK_MASTER_PASSWORD: choose at least 8 characters — this password protects every saved credential.".into());
         }
         let mut fresh = [0u8; SALT_LEN];
-        rand::thread_rng().fill(&mut fresh);
+        rand::rng().fill_bytes(&mut fresh);
         salt_bytes = fresh;
         // Same reasoning as the unlock path above — keep the async runtime
         // unblocked during the Argon2 derivation on fresh-profile creation.
@@ -3549,7 +3546,7 @@ async fn create_profile(
         let conn_g = db_state.conn.lock().map_err(|_| "[STATE] LOCK_CONN")?;
         let conn = conn_g.as_ref().ok_or("[STATE] DB_NOT_OPEN")?;
         let mut pid = [0u8; 16];
-        rand::thread_rng().fill(&mut pid);
+        rand::rng().fill_bytes(&mut pid);
         let pid_hex = hex::encode(pid); // 32 hex chars — fits the server's 32-char partition column
         // DO NOTHING (never overwrite): a fresh vault has neither key, but this
         // must never repartition a profile if it somehow re-runs.
@@ -3570,11 +3567,8 @@ async fn create_profile(
 
 #[tauri::command]
 async fn generate_ssh_key(state: tauri::State<'_, DbState>, name: String) -> Result<(), String> {
-    // ssh-key 0.7 is on rand_core 0.10 (no OsRng) while the vault crypto still
-    // sits on rand 0.8; seed the key from the OS CSPRNG we already have
-    // instead of pulling a second rand major into the tree.
     let mut seed = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+    rand::rng().fill_bytes(&mut seed);
     let keypair = Ed25519Keypair::from(Ed25519PrivateKey::from_bytes(&seed));
     let priv_key = PrivateKey::from(keypair);
     let pub_ssh = priv_key.public_key().to_openssh()
@@ -5152,7 +5146,7 @@ async fn connect_jump_host(
     let (fp_tx, fp_rx) = tokio::sync::oneshot::channel();
     let jump_nonce: String = {
         let mut bytes = [0u8; 16];
-        rand::thread_rng().fill(&mut bytes);
+        rand::rng().fill_bytes(&mut bytes);
         hex::encode(bytes)
     };
     fp_txs.lock().await.insert(jump_nonce.clone(), fp_tx);
@@ -5360,7 +5354,7 @@ async fn initiate_connection(
     // = 128 bits of entropy, plenty for a single-use guard.
     let connect_nonce: String = {
         let mut bytes = [0u8; 16];
-        rand::thread_rng().fill(&mut bytes);
+        rand::rng().fill_bytes(&mut bytes);
         hex::encode(bytes)
     };
     // NB: the fp_txs insert is deliberately deferred until AFTER the DB
@@ -8759,7 +8753,7 @@ fn app_temp_root() -> &'static std::path::PathBuf {
     static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     ROOT.get_or_init(|| {
         let mut bytes = [0u8; 12];
-        rand::thread_rng().fill(&mut bytes);
+        rand::rng().fill_bytes(&mut bytes);
         let root = std::env::temp_dir().join(format!("submarine-{}", hex::encode(bytes)));
         let _ = std::fs::create_dir_all(&root);
         #[cfg(unix)]
