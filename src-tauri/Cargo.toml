@@ -139,5 +139,5 @@ zeroize = { version = "1.8", features = ["zeroize_derive"] }
 # ---------------------------------------------------------------------------
 [target.'cfg(not(target_os = "android"))'.dependencies]
 tauri-plugin-window-state = "2"
-rfd = "0.14"
+rfd = "0.17"
 open = "5.1"
