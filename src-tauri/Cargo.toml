@@ -64,7 +64,7 @@ tokio = { version = "1", features = ["full"] }
 # TCP-level keepalive on the SSH transport sockets (poor-network resilience).
 # Already in the tree transitively via tokio — a direct dep adds no new crates.
 socket2 = "0.6"
-rusqlite = { version = "0.31", features = ["bundled", "backup", "serialize", "functions"] }
+rusqlite = { version = "0.40", features = ["bundled", "backup", "serialize", "functions"] }
 argon2 = "0.5"
 aes-gcm = "0.10"
 # E2E profile sharing: X25519 sealed-box (ECIES) so a profile's data key can be
@@ -76,7 +76,7 @@ x25519-dalek = { version = "2", features = ["getrandom", "static_secrets"] }
 hkdf = "0.12"
 rand = "0.8"
 rand_core = { version = "0.6", features = ["getrandom"] }
-directories = "5.0"
+directories = "6.0"
 # russh >= 0.45 is pure Rust for the whole algorithm set (RSA host keys, all
 # DH groups, HMAC-SHA1), so the old OpenSSL-backed `full-ssh-algos` feature and
 # its Perl build requirement are gone. `ring` is picked as the crypto backend
@@ -89,14 +89,14 @@ ssh-key = { version = "=0.7.0-rc.11", features = ["alloc", "encryption", "ed2551
 tokio-socks = "0.5"
 async-http-proxy = { version = "1.2", features = ["runtime-tokio"] }
 russh-sftp = "3"
-notify = "6.1.1"
+notify = "8.2"
 # Debounces filesystem events so we don't try to upload a file mid-write.
 # Mirror watcher uses this — events for the same path within 500ms collapse
 # to a single action, which both eliminates partial uploads and keeps
 # rapid-fire editor saves (e.g. vim's swap-then-rename pattern) from
-# generating spurious traffic. Pairs cleanly with the `notify` 6.x crate
+# generating spurious traffic. Pairs cleanly with the `notify` 8.x crate
 # we already use elsewhere.
-notify-debouncer-mini = "0.4"
+notify-debouncer-mini = "0.7"
 # Used by the mirror module to stamp downloaded files with the remote's
 # mtime. Without it, every freshly-downloaded file has local mtime = now,
 # which would make the next dry-run treat the local copy as "newer" and
@@ -139,5 +139,5 @@ zeroize = { version = "1.8", features = ["zeroize_derive"] }
 # ---------------------------------------------------------------------------
 [target.'cfg(not(target_os = "android"))'.dependencies]
 tauri-plugin-window-state = "2"
-rfd = "0.14"
+rfd = "0.17"
 open = "5.1"
