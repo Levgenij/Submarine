@@ -115,6 +115,14 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   const [recentOpen, setRecentOpen] = useState(false);
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
+  // One list() at a time. A call that arrives mid-flight stores its path in
+  // pendingPathRef and waits; the in-flight call runs that path next, so a
+  // refresh after rename/delete/upload is not dropped. The overlay blocks
+  // clicks until the chain finishes.
+  const listingRef = useRef(false);
+  const pendingPathRef = useRef<string | null>(null);
+  const waitersRef = useRef<Array<() => void>>([]);
+  const lastOkRef = useRef(false);
   // Multi-selection lives as a Set of paths. Single-click replaces, Ctrl/⌘-
   // click toggles a row in/out, Shift-click extends from the last-clicked
   // anchor. lastSelectedPathRef remembers that anchor across renders.
@@ -191,22 +199,65 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     });
   };
 
-  const fetch = async (path: string) => {
-    setLoading(true);
-    try {
-      const result = await provider.list(path);
-      setEntries(result.entries);
-      setCurrentPath(result.currentPath);
-      setTempInput(result.currentPath);
-      setSelected(new Set());
-      lastSelectedPathRef.current = null;
-      onPathChange?.(result.currentPath);
-      pushRecent(result.currentPath);
-    } catch (err: any) {
-      notify(`List failed: ${err}`, "error");
-    } finally {
-      setLoading(false);
+  // `silent` skips the error toast. Used for the saved initial path, which
+  // falls through to home when the directory is gone.
+  const fetch = async (path: string, silent = false): Promise<boolean> => {
+    if (listingRef.current) {
+      pendingPathRef.current = path;
+      await new Promise<void>((resolve) => {
+        waitersRef.current.push(resolve);
+      });
+      return lastOkRef.current;
     }
+
+    listingRef.current = true;
+    setContextMenu(null);
+    setRecentOpen(false);
+    setLoading(true);
+    let target: string | null = path;
+    let ok = false;
+    try {
+      while (target !== null) {
+        const requested = target;
+        pendingPathRef.current = null;
+        try {
+          const result = await provider.list(requested);
+          const newer = pendingPathRef.current;
+          if (newer !== null) {
+            target = newer;
+            pendingPathRef.current = null;
+            continue;
+          }
+          setEntries(result.entries);
+          setCurrentPath(result.currentPath);
+          setTempInput(result.currentPath);
+          setSelected(new Set());
+          lastSelectedPathRef.current = null;
+          onPathChange?.(result.currentPath);
+          pushRecent(result.currentPath);
+          ok = true;
+        } catch (err: any) {
+          const newer = pendingPathRef.current;
+          if (newer !== null) {
+            target = newer;
+            pendingPathRef.current = null;
+            continue;
+          }
+          if (!silent || requested !== path) notify(`List failed: ${err}`, "error");
+          ok = false;
+        }
+        target = pendingPathRef.current;
+        pendingPathRef.current = null;
+      }
+    } finally {
+      listingRef.current = false;
+      lastOkRef.current = ok;
+      setLoading(false);
+      const waiters = waitersRef.current;
+      waitersRef.current = [];
+      for (const resolve of waiters) resolve();
+    }
+    return ok;
   };
 
   // Initial load: try the caller-supplied `initialPath` first (the
@@ -215,35 +266,22 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // the user with an error screen.
   useEffect(() => {
     (async () => {
-      const tryFetch = async (path: string) => {
-        const result = await provider.list(path);
-        setEntries(result.entries);
-        setCurrentPath(result.currentPath);
-        setTempInput(result.currentPath);
-        setSelected(new Set());
-      lastSelectedPathRef.current = null;
-        onPathChange?.(result.currentPath);
-        pushRecent(result.currentPath);
-      };
-      setLoading(true);
+      if (initialPath) {
+        const ok = await fetch(initialPath, true);
+        if (ok) return;
+      }
       try {
-        if (initialPath) {
-          try { await tryFetch(initialPath); return; }
-          catch { /* fall through to home */ }
-        }
         const home = await provider.homePath();
-        await tryFetch(home);
+        await fetch(home);
       } catch (err: any) {
         notify(`Failed to load: ${err}`, "error");
-      } finally {
-        setLoading(false);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider]);
 
   useImperativeHandle(ref, () => ({
-    refresh: () => fetch(currentPathRef.current),
+    refresh: async () => { await fetch(currentPathRef.current); },
     currentDir: () => currentPathRef.current,
   }), []);
 
@@ -804,10 +842,11 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     <div
       data-fs-pane={provider.id}
       data-fs-current-path={currentPath}
+      aria-busy={loading}
       className="flex-1 flex flex-col h-full bg-[#09090b] p-1.5 gap-1.5 overflow-hidden relative select-none"
     >
       {disabled && (
-        <div className="absolute inset-0 z-30 bg-black/55 backdrop-blur-[1px] flex items-center justify-center text-zinc-300 text-xs font-mono uppercase">
+        <div className="absolute inset-0 z-[80] bg-black/55 backdrop-blur-[1px] flex items-center justify-center text-zinc-300 text-xs font-mono uppercase">
           <span className="px-3 py-1.5 bg-red-500/15 border border-red-500/30 rounded text-red-300">
             Session disconnected
           </span>
@@ -1469,6 +1508,15 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                 <button onClick={submitModal} className="px-3 h-7 rounded bg-indigo-500 text-white font-bold hover:bg-indigo-600">Apply</button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {loading && !disabled && (
+        <div className="absolute inset-0 z-[60] bg-black/50 backdrop-blur-[1px] flex items-center justify-center cursor-wait">
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#121214] border border-white/10 text-zinc-200 text-[11px] font-mono shadow-2xl">
+            <RefreshCw size={13} className="animate-spin text-indigo-300" />
+            Loading…
           </div>
         </div>
       )}
