@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import {
-  Folder, File, ArrowUp, RefreshCw, Trash2, Edit3, Shield,
+  Folder, FolderUp, File, ArrowUp, RefreshCw, Trash2, Edit3, Shield,
   X, ChevronUp, ChevronDown, Plus, MoreVertical, FolderSearch,
   Download, Upload, ExternalLink, Move, CheckSquare, Square, Search,
 } from "lucide-react";
@@ -248,6 +248,17 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   }), []);
 
   const goUp = () => fetch(provider.parentPath(currentPath));
+
+  // WinSCP-style ".." row. Hidden at a filesystem root, where parentPath is
+  // the same place (remote "/") or a drive root ("C:\"). Not a real entry:
+  // it never joins `entries`, so select-all, delete, drag, and transfer
+  // cannot target it.
+  const atFilesystemRoot = (path: string): boolean => {
+    if (!path || path === "/") return true;
+    const trimmed = path.replace(/[\\/]+$/, "");
+    return trimmed === "" || /^[a-zA-Z]:$/.test(trimmed);
+  };
+  const showParent = currentPath.length > 0 && !atFilesystemRoot(currentPath);
 
   // ---- selection -------------------------------------------------------------
 
@@ -1128,8 +1139,30 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
              }}>
           {loading && sortedEntries.length === 0 ? (
             <div className="text-center py-14 text-zinc-400">Loading…</div>
-          ) : sortedEntries.length === 0 ? (
-            <div className="text-center py-14 text-zinc-500">Empty</div>
+          ) : (
+            <>
+          {showParent && (
+            <div
+              onDoubleClick={(e) => { e.stopPropagation(); goUp(); }}
+              title="Parent directory"
+              className={`grid ${
+                showPerms
+                  ? "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_65px_115px_85px]"
+                  : "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_75px_125px]"
+              } gap-1.5 px-2.5 py-1 border-l-2 border-transparent cursor-pointer transition-colors items-center text-zinc-200 hover:bg-white/5 hover:text-white`}
+            >
+              <div />
+              <div className="flex items-center gap-2 min-w-0 pr-1">
+                <FolderUp size={12} className="text-indigo-300 shrink-0" />
+                <div className="truncate text-zinc-100 text-[11px]">..</div>
+              </div>
+              <div className="hidden sm:block" />
+              <div className="hidden sm:block" />
+              {showPerms && <div className="hidden sm:block" />}
+            </div>
+          )}
+          {sortedEntries.length === 0 ? (
+            showParent ? null : <div className="text-center py-14 text-zinc-500">Empty</div>
           ) : (
             sortedEntries.map((entry) => {
               const isSel = selected.has(entry.path);
@@ -1223,6 +1256,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
               </div>
               );
             })
+          )}
+            </>
           )}
         </div>
       </div>
