@@ -6,8 +6,10 @@ import {
   Folder, FolderUp, File, ArrowUp, RefreshCw, Trash2, Edit3, Shield,
   X, ChevronUp, ChevronDown, Plus, MoreVertical, FolderSearch,
   Download, Upload, ExternalLink, Move, CheckSquare, Square, Search,
+  Terminal, Link,
 } from "lucide-react";
 import { FileEntry, FileProvider } from "../fs/types";
+import { mergePermissions, permissionOctal, safeLeafName, shellSingleQuote } from "../fs/dirContext";
 import { useConfirm, useOverwritePrompt, OverwriteChoice } from "../ui/confirm";
 import { IS_ANDROID } from "../util/platform";
 
@@ -89,6 +91,10 @@ export interface FilePanelProps {
    * download lands there directly instead of popping a folder picker.
    */
   getOppositeDir?: () => string | undefined;
+  /** Focused PTY for this session. Stays set while SFTP hides the terminal. */
+  terminalId?: string;
+  /** Compact layout: close the SFTP pane so the terminal that just received `cd` is visible. */
+  onRevealTerminal?: () => void;
 }
 
 export interface FilePanelHandle {
@@ -104,6 +110,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   initialPath,
   onPathChange,
   getOppositeDir,
+  terminalId,
+  onRevealTerminal,
 }, ref) => {
   const [currentPath, setCurrentPath] = useState("");
   // Last five distinct directories visited in this panel, MRU first. Lives
@@ -140,7 +148,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   const [nameFilter, setNameFilter] = useState("");
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; entry: FileEntry } | null>(null);
-  const [modal, setModal] = useState<{ type: "rename" | "mkdir" | "properties" | "move" | "move-bulk"; entry?: FileEntry; v1?: string; v2?: string } | null>(null);
+  const [dirMenu, setDirMenu] = useState<{ x: number; y: number } | null>(null);
+  const [modal, setModal] = useState<{ type: "rename" | "mkdir" | "newfile" | "symlink" | "properties" | "move" | "move-bulk"; entry?: FileEntry; v1?: string; v2?: string } | null>(null);
   const [notification, setNotification] = useState<{ msg: string; type: "info" | "success" | "error" } | null>(null);
 
   const [dragOver, setDragOver] = useState(false);
@@ -212,6 +221,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
 
     listingRef.current = true;
     setContextMenu(null);
+    setDirMenu(null);
     setRecentOpen(false);
     setLoading(true);
     let target: string | null = path;
@@ -397,18 +407,19 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // ---- context menu auto-close ------------------------------------------------
 
   useEffect(() => {
-    if (!contextMenu) return;
+    if (!contextMenu && !dirMenu) return;
     const onWindowMouseDown = (ev: MouseEvent) => {
       const target = ev.target as Node | null;
       if (target && menuRef.current?.contains(target)) return;
       setContextMenu(null);
+      setDirMenu(null);
     };
     const timer = setTimeout(() => window.addEventListener("mousedown", onWindowMouseDown), 50);
     return () => {
       clearTimeout(timer);
       window.removeEventListener("mousedown", onWindowMouseDown);
     };
-  }, [contextMenu]);
+  }, [contextMenu, dirMenu]);
 
   const openMenu = (e: React.MouseEvent, entry: FileEntry) => {
     e.preventDefault();
@@ -423,6 +434,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       setSelected(new Set([entry.path]));
       lastSelectedPathRef.current = entry.path;
     }
+    setDirMenu(null);
     setContextMenu({ x: Math.max(4, x), y: Math.max(4, y), entry });
   };
 
@@ -535,6 +547,35 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   const submitModal = async () => {
     if (!modal) return;
     const { type, entry, v1, v2 } = modal;
+    if (type === "mkdir" || type === "newfile" || type === "symlink") {
+      const label = type === "mkdir" ? "folder" : type === "newfile" ? "file" : "link";
+      if (!safeLeafName(v1 || "")) {
+        notify(`Failed: Invalid ${label} name`, "error");
+        return;
+      }
+      if (type === "symlink" && !(v2 || "").trim()) {
+        notify("Failed: Link target is required", "error");
+        return;
+      }
+    }
+    if (type === "properties") {
+      if (!v1 || Number.isNaN(parseInt(v1, 8))) {
+        notify("Failed: Invalid octal mode", "error");
+        return;
+      }
+      const uidText = (v2 || "").trim();
+      if (uidText && entry && provider.chown) {
+        const uid = parseInt(uidText, 10);
+        if (Number.isNaN(uid)) {
+          notify("Failed: Invalid owner UID", "error");
+          return;
+        }
+        if (uid !== entry.uid && entry.gid == null) {
+          notify("Failed: Group is unavailable", "error");
+          return;
+        }
+      }
+    }
     try {
       if (type === "rename" && entry && v1) {
         const destDir = provider.parentPath(entry.path);
@@ -571,15 +612,28 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           notify(items.length === 1 ? `Moved ${items[0].name} → ${dest}` : `Moved ${count} of ${items.length} items → ${dest}`, "success");
         }
       } else if (type === "mkdir" && v1) {
-        await provider.mkdir(provider.joinPath(currentPath, v1));
-        notify(`Created ${v1}`, "success");
+        const name = safeLeafName(v1)!;
+        await provider.mkdir(provider.joinPath(currentPath, name));
+        notify(`Created ${name}`, "success");
+      } else if (type === "newfile" && v1 && sessionId) {
+        const name = safeLeafName(v1)!;
+        await invoke("sftp_create_file", { sessionId, path: provider.joinPath(currentPath, name) });
+        notify(`Created ${name}`, "success");
+      } else if (type === "symlink" && v1 && sessionId) {
+        const name = safeLeafName(v1)!;
+        await invoke("sftp_create_symlink", {
+          sessionId,
+          path: provider.joinPath(currentPath, name),
+          target: (v2 || "").trim(),
+        });
+        notify(`Created link ${name}`, "success");
       } else if (type === "properties" && entry && v1 && provider.chmod) {
-        const mode = parseInt(v1, 8);
-        if (isNaN(mode)) throw new Error("Invalid octal mode");
-        await provider.chmod(entry.path, mode);
-        if (v2 && provider.chown) {
-          const uid = parseInt(v2);
-          if (!isNaN(uid)) await provider.chown(entry.path, uid, entry.gid ?? 0);
+        const edited = parseInt(v1, 8);
+        await provider.chmod(entry.path, mergePermissions(entry.permissions, edited));
+        const uidText = (v2 || "").trim();
+        if (uidText && provider.chown && entry.gid != null) {
+          const uid = parseInt(uidText, 10);
+          if (uid !== entry.uid) await provider.chown(entry.path, uid, entry.gid);
         }
         notify("Properties updated", "success");
       }
@@ -867,6 +921,61 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
 
   const isRemote = provider.id === "remote";
   const showPerms = isRemote; // local entries don't carry perms here
+
+  const openDirProperties = async () => {
+    if (!sessionId || !currentPath) return;
+    const meta = await invoke<{ permissions?: number; uid?: number; gid?: number }>("sftp_stat", {
+      sessionId,
+      path: currentPath,
+    });
+    const trimmed = currentPath.replace(/[\\/]+$/, "");
+    const name = trimmed.split(/[\\/]/).pop() || currentPath;
+    setModal({
+      type: "properties",
+      entry: {
+        name,
+        path: currentPath,
+        isDir: true,
+        size: 0,
+        permissions: meta.permissions,
+        uid: meta.uid,
+        gid: meta.gid,
+      },
+      v1: permissionOctal(meta.permissions),
+      v2: meta.uid?.toString(),
+    });
+  };
+
+  const openDirInTerminal = async () => {
+    if (!currentPath) return;
+    if (!terminalId) {
+      notify("No terminal is open for this session", "error");
+      return;
+    }
+    const line = `cd ${shellSingleQuote(currentPath)}\r`;
+    const data = Array.from(new TextEncoder().encode(line));
+    await invoke("write_terminal_data", { terminalId, data });
+    onRevealTerminal?.();
+  };
+
+  const onListBackgroundMenu = (e: React.MouseEvent) => {
+    if (disabled || loading) return;
+    if (selected.size > 0) {
+      const anchor = entries.find((en) => selected.has(en.path));
+      if (anchor) openMenu(e, anchor);
+      else e.preventDefault();
+      return;
+    }
+    if (!isRemote) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const menuW = 220;
+    const menuH = 200;
+    const x = Math.min(e.clientX, window.innerWidth - menuW - 4);
+    const y = Math.min(e.clientY, window.innerHeight - menuH - 4);
+    setContextMenu(null);
+    setDirMenu({ x: Math.max(4, x), y: Math.max(4, y) });
+  };
 
   return (
     <div
@@ -1195,7 +1304,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           )}
         </div>
 
-        <div className="min-w-full p-1 font-mono text-[11px]"
+        <div className="min-w-full flex-1 p-1 font-mono text-[11px]"
+             onContextMenu={onListBackgroundMenu}
              onClick={(e) => {
                // Click landed on the bare list background (not on a row, since
                // rows stopPropagation via their own onClick chain implicitly
@@ -1445,7 +1555,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             <Move size={11} /><span>{multi ? `Move (${acting.length}) to…` : "Move to…"}</span>
           </button>
           {!multi && provider.chmod && (
-            <button onClick={() => { setContextMenu(null); setModal({ type: "properties", entry: contextMenu.entry, v1: (contextMenu.entry.permissions ? (contextMenu.entry.permissions & 0o777).toString(8) : "755"), v2: contextMenu.entry.uid?.toString() }); }}
+            <button onClick={() => { setContextMenu(null); setModal({ type: "properties", entry: contextMenu.entry, v1: permissionOctal(contextMenu.entry.permissions), v2: contextMenu.entry.uid?.toString() }); }}
               className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
               <Shield size={11} /><span>Properties</span>
             </button>
@@ -1462,6 +1572,54 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         document.body
       )}
 
+      {dirMenu && createPortal(
+        <div
+          ref={menuRef}
+          className="fixed z-[9999] min-w-[210px] bg-[#161619] border border-white/10 rounded-lg shadow-2xl p-1 font-mono text-[11px] text-zinc-200"
+          style={{ left: dirMenu.x, top: dirMenu.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={() => { setDirMenu(null); setModal({ type: "newfile", v1: "" }); }}
+            className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white"
+          >
+            <File size={11} className="text-zinc-300" /><span>New File</span>
+          </button>
+          <button
+            onClick={() => { setDirMenu(null); setModal({ type: "mkdir", v1: "" }); }}
+            className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white"
+          >
+            <Plus size={11} className="text-indigo-300" /><span>New Folder</span>
+          </button>
+          <button
+            onClick={() => { setDirMenu(null); setModal({ type: "symlink", v1: "", v2: "" }); }}
+            className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white"
+          >
+            <Link size={11} className="text-sky-300" /><span>New Symbolic Link</span>
+          </button>
+          <div className="h-px bg-white/5 my-1" />
+          <button
+            onClick={() => {
+              setDirMenu(null);
+              void openDirInTerminal().catch((err) => notify(String(err), "error"));
+            }}
+            className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white"
+          >
+            <Terminal size={11} className="text-emerald-300" /><span>Open in Terminal</span>
+          </button>
+          <button
+            onClick={() => {
+              setDirMenu(null);
+              void openDirProperties().catch((err) => notify(String(err), "error"));
+            }}
+            className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white"
+          >
+            <Shield size={11} /><span>Folder Properties</span>
+          </button>
+        </div>,
+        document.body
+      )}
+
       {/* Modal */}
       {modal && (
         <div className="fixed inset-0 z-[9998] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4" onClick={() => setModal(null)}>
@@ -1470,7 +1628,9 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             <div className="flex items-center justify-between mb-3">
               <span className="font-black uppercase tracking-wider text-zinc-300">
                 {modal.type === "rename" ? "Rename" :
-                 modal.type === "mkdir" ? "New Directory" :
+                 modal.type === "mkdir" ? "New Folder" :
+                 modal.type === "newfile" ? "New File" :
+                 modal.type === "symlink" ? "New Symbolic Link" :
                  modal.type === "move" ? "Move to…" :
                  modal.type === "move-bulk" ? `Move ${selected.size} items to…` : "Properties"}
               </span>
@@ -1552,6 +1712,23 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                       <input type="text" value={modal.v2 || ""} onChange={(e) => setModal({ ...modal, v2: e.target.value })}
                         className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px]" />
                     </div>
+                  </div>
+                </>
+              ) : modal.type === "symlink" ? (
+                <>
+                  <div>
+                    <label className="text-[10px] text-zinc-400 block mb-1">Link name</label>
+                    <input type="text" autoFocus value={modal.v1 || ""}
+                      onChange={(e) => setModal({ ...modal, v1: e.target.value })}
+                      onKeyDown={(e) => e.key === "Enter" && submitModal()}
+                      className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-zinc-400 block mb-1">Target</label>
+                    <input type="text" value={modal.v2 || ""}
+                      onChange={(e) => setModal({ ...modal, v2: e.target.value })}
+                      onKeyDown={(e) => e.key === "Enter" && submitModal()}
+                      className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />
                   </div>
                 </>
               ) : (
