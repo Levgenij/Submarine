@@ -785,6 +785,36 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   })();
   const filteredOut = nameFilter.trim() ? entries.length - sortedEntries.length : 0;
 
+  // Current-directory totals for the status bar. Size sums regular files
+  // only: a directory row's `size` is its own inode, not the files inside
+  // it, and we do not walk children. The ".." row is not in `entries`.
+  const dirStats = (() => {
+    let folderCount = 0;
+    let fileCount = 0;
+    let totalBytes = 0;
+    let selectedBytes = 0;
+    let selectedCount = 0;
+    for (const entry of sortedEntries) {
+      const isSelected = selected.has(entry.path);
+      if (isSelected) selectedCount++;
+      if (entry.isDir) {
+        folderCount++;
+        continue;
+      }
+      fileCount++;
+      totalBytes += entry.size || 0;
+      if (isSelected) selectedBytes += entry.size || 0;
+    }
+    return {
+      folderCount,
+      fileCount,
+      totalBytes,
+      totalCount: sortedEntries.length,
+      selectedBytes,
+      selectedCount,
+    };
+  })();
+
   // ---- select-all -------------------------------------------------------------
   // Toggles the entire visible (sorted) list. Computed AFTER `sortedEntries`
   // so the const TDZ doesn't fire on first render. Cmd/Ctrl+A is the keyboard
@@ -1298,6 +1328,40 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           )}
             </>
           )}
+        </div>
+      </div>
+
+      <div
+        className="shrink-0 h-7 px-2.5 flex items-center justify-between gap-3 rounded-lg border border-white/5 bg-[#121214] font-mono text-[10.5px] text-zinc-500"
+        title="Size counts files in this directory only, not files inside subfolders"
+      >
+        <div className="flex items-center gap-2 min-w-0 truncate">
+          <span className="inline-flex items-center gap-1 shrink-0">
+            <Folder size={11} className="text-indigo-300" />
+            <span className="text-zinc-200">{dirStats.folderCount}</span>
+            {dirStats.folderCount === 1 ? "folder" : "folders"}
+          </span>
+          <span className="inline-flex items-center gap-1 shrink-0">
+            <File size={11} className="text-zinc-500" />
+            <span className="text-zinc-200">{dirStats.fileCount}</span>
+            {dirStats.fileCount === 1 ? "file" : "files"}
+          </span>
+          <span className="w-px h-3 bg-white/10 shrink-0" />
+          <span className="truncate">
+            <span className="text-zinc-200">{dirStats.totalCount}</span>
+            {dirStats.totalCount === 1 ? " item" : " items"}
+          </span>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <span>
+            Selected{" "}
+            <span className="text-zinc-100">{dirStats.selectedCount} · {formatSize(dirStats.selectedBytes)}</span>
+          </span>
+          <span className="w-px h-3 bg-white/10" />
+          <span>
+            Total size{" "}
+            <span className="text-zinc-100">{formatSize(dirStats.totalBytes)}</span>
+          </span>
         </div>
       </div>
 
