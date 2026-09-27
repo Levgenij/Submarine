@@ -6966,9 +6966,12 @@ async fn write_terminal_data(state: tauri::State<'_, SshState>, terminal_id: Str
     // experience because the shared map guard is a global gate.
     // mpsc::Sender is cheap to clone.
     let tx = state.terminal_txs.lock().await.get(&terminal_id).cloned();
-    if let Some(tx) = tx {
-        let _ = tx.send(TerminalCommand::Data(data)).await;
-    }
+    let Some(tx) = tx else {
+        return Err("Terminal is not connected".into());
+    };
+    tx.send(TerminalCommand::Data(data))
+        .await
+        .map_err(|_| "Terminal is not connected".to_string())?;
     Ok(())
 }
 
@@ -7747,6 +7750,70 @@ async fn sftp_create_dir(
     let sftp = get_sftp_session(&state, &session_id).await?;
     sftp.create_dir(path).await.map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Empty regular file. EXCLUDE so an existing path is not truncated.
+#[tauri::command]
+async fn sftp_create_file(
+    state: tauri::State<'_, SshState>,
+    session_id: String,
+    path: String,
+) -> Result<(), String> {
+    use russh_sftp::protocol::OpenFlags;
+    let sftp = get_sftp_session(&state, &session_id).await?;
+    let file = sftp
+        .open_with_flags(
+            path,
+            OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    file.close().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// OpenSSH reads the first SSH_FXP_SYMLINK string as the target and the
+/// second as the new link. russh writes the first argument first.
+fn openssh_symlink_args(link_path: String, target: String) -> (String, String) {
+    (target, link_path)
+}
+
+/// `path` is the new link, `target` is what it points at.
+#[tauri::command]
+async fn sftp_create_symlink(
+    state: tauri::State<'_, SshState>,
+    session_id: String,
+    path: String,
+    target: String,
+) -> Result<(), String> {
+    let sftp = get_sftp_session(&state, &session_id).await?;
+    let (first, second) = openssh_symlink_args(path, target);
+    sftp.symlink(first, second).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct SftpStatResult {
+    permissions: Option<u32>,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    size: Option<u64>,
+}
+
+#[tauri::command]
+async fn sftp_stat(
+    state: tauri::State<'_, SshState>,
+    session_id: String,
+    path: String,
+) -> Result<SftpStatResult, String> {
+    let sftp = get_sftp_session(&state, &session_id).await?;
+    let meta = sftp.metadata(&path).await.map_err(|e| e.to_string())?;
+    Ok(SftpStatResult {
+        permissions: meta.permissions,
+        uid: meta.uid,
+        gid: meta.gid,
+        size: meta.size,
+    })
 }
 
 #[tauri::command]
@@ -10495,7 +10562,7 @@ pub fn run() {
             android_quick_dirs, android_default_local_dir,
             parse_ssh_config,
             parse_client_import,
-            sftp_list_dir, sftp_create_dir, sftp_remove_file, sftp_remove_dir,
+            sftp_list_dir, sftp_create_dir, sftp_create_file, sftp_create_symlink, sftp_stat, sftp_remove_file, sftp_remove_dir,
             sftp_rename, sftp_set_permissions, sftp_set_owner,
             sftp_download_file, sftp_download_dir, sftp_upload_file, sftp_upload_dir, sftp_cancel_transfer, sftp_open_remote_file,
             local_open_file, local_open_in_explorer, sftp_prepare_drag,
@@ -10528,6 +10595,13 @@ mod tests {
         ] {
             assert!(!is_safe_dir_entry_name(bad), "should reject {:?}", bad);
         }
+    }
+
+    #[test]
+    fn openssh_symlink_puts_target_on_the_wire_first() {
+        let (first, second) = super::openssh_symlink_args("/tmp/link".into(), "../target".into());
+        assert_eq!(first, "../target");
+        assert_eq!(second, "/tmp/link");
     }
 
     #[test]
