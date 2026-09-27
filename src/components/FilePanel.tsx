@@ -136,6 +136,18 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // anchor. lastSelectedPathRef remembers that anchor across renders.
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const lastSelectedPathRef = useRef<string | null>(null);
+  // Remote "open in editor" downloads the file first. While that runs, the
+  // row's highlight fills left-to-right. One slot per path, so opening a
+  // second file does not steal the first file's bar.
+  // Bumped on every open attempt. A completion timer from the previous
+  // attempt must not clear the bar for a newer open of the same path.
+  const openGenRef = useRef(0);
+  const openGenByPathRef = useRef(new Map<string, number>());
+  // Remote paths whose open-in-editor download is still inside `invoke`.
+  // A second request for one of these is ignored until that call returns.
+  const openingPathsRef = useRef<Set<string>>(new Set());
+  const [openProgress, setOpenProgress] = useState<Record<string, { bytes: number; total: number }>>({});
+  const [openJobs, setOpenJobs] = useState<{ transferId: string; name: string }[]>([]);
   const [sort, setSort] = useState<SortState>({ column: "name", asc: true });
 
   const [tempInput, setTempInput] = useState("");
@@ -151,6 +163,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   const [dirMenu, setDirMenu] = useState<{ x: number; y: number } | null>(null);
   const [modal, setModal] = useState<{ type: "rename" | "mkdir" | "newfile" | "symlink" | "properties" | "move" | "move-bulk"; entry?: FileEntry; v1?: string; v2?: string } | null>(null);
   const [notification, setNotification] = useState<{ msg: string; type: "info" | "success" | "error" } | null>(null);
+  const notifyTimerRef = useRef<number | null>(null);
 
   const [dragOver, setDragOver] = useState(false);
   const dropTargetRef = useRef<HTMLDivElement | null>(null);
@@ -170,8 +183,23 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // ---- helpers ----------------------------------------------------------------
 
   const notify = (msg: string, type: "info" | "success" | "error" = "info") => {
+    if (notifyTimerRef.current != null) {
+      window.clearTimeout(notifyTimerRef.current);
+      notifyTimerRef.current = null;
+    }
     setNotification({ msg, type });
-    setTimeout(() => setNotification(null), 4000);
+    notifyTimerRef.current = window.setTimeout(() => {
+      notifyTimerRef.current = null;
+      setNotification(null);
+    }, 4000);
+  };
+
+  const cancelOpenDownload = (id: string) => {
+    const send = () => invoke("sftp_cancel_transfer", { transferId: id }).catch(() => {});
+    send();
+    // The flag is registered at the start of the command. A click that
+    // lands before that insert is a no-op, so send once more.
+    window.setTimeout(send, 100);
   };
 
   const formatRights = (isDir: boolean, perm?: number) => {
@@ -500,6 +528,43 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     return () => { if (unlisten) unlisten(); };
   }, [sessionId]);
 
+  // Open-in-editor download progress. Rust streams `sftp-open-{id}` while
+  // `sftp_open_remote_file` copies the remote file into the temp dir.
+  useEffect(() => {
+    if (!sessionId || provider.id !== "remote") return;
+    let alive = true;
+    let unlisten: (() => void) | null = null;
+    listen<{ path: string; bytes: number; total: number; status: string }>(
+      `sftp-open-${sessionId}`,
+      (event) => {
+        const payload = event.payload;
+        if (!payload?.path || payload.status === "error") return;
+        setOpenProgress((prev) => {
+          const cur = prev[payload.path];
+          if (!cur) return prev;
+          return {
+            ...prev,
+            [payload.path]: {
+              bytes: payload.bytes ?? 0,
+              // Keep the listing size when the server omits the stat.
+              total: payload.total > 0 ? payload.total : cur.total,
+            },
+          };
+        });
+      },
+    ).then((fn) => {
+      if (!alive) {
+        fn();
+        return;
+      }
+      unlisten = fn;
+    });
+    return () => {
+      alive = false;
+      if (unlisten) unlisten();
+    };
+  }, [sessionId, provider.id]);
+
   // ---- OS-level drag-drop into this pane --------------------------------------
   // Tauri 2 routes OS file drops through `tauri://drag-drop`; HTML5 drop events
   // fire too but their `File.path` is empty inside Tauri. We listen globally and
@@ -790,12 +855,56 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // every change. Backed by the existing `sftp_open_remote_file` command.
   const liveEditEntry = async (entry: FileEntry) => {
     if (!sessionId || entry.isDir) return;
-    try {
-      notify(`Opening ${entry.name} in default editor…`, "info");
-      await invoke("sftp_open_remote_file", { sessionId, remotePath: entry.path });
-    } catch (err: any) {
-      notify(`Open failed: ${err}`, "error");
+    if (openingPathsRef.current.has(entry.path)) {
+      notify(`${entry.name} is already downloading`, "info");
+      return;
     }
+    openingPathsRef.current.add(entry.path);
+    const transferId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const gen = ++openGenRef.current;
+    openGenByPathRef.current.set(entry.path, gen);
+    setSelected(new Set([entry.path]));
+    lastSelectedPathRef.current = entry.path;
+    setOpenProgress((prev) => ({
+      ...prev,
+      [entry.path]: { bytes: 0, total: entry.size || 0 },
+    }));
+    setOpenJobs((cur) => [...cur, { transferId, name: entry.name }]);
+    const clearOpen = () => {
+      if (openGenByPathRef.current.get(entry.path) !== gen) return;
+      openGenByPathRef.current.delete(entry.path);
+      setOpenProgress((prev) => {
+        if (!(entry.path in prev)) return prev;
+        const next = { ...prev };
+        delete next[entry.path];
+        return next;
+      });
+    };
+    const clearOpenJob = () => {
+      setOpenJobs((cur) => cur.filter((job) => job.transferId !== transferId));
+    };
+    try {
+      await invoke("sftp_open_remote_file", { sessionId, remotePath: entry.path, transferId });
+    } catch (err: any) {
+      clearOpen();
+      clearOpenJob();
+      const message = String(err);
+      if (message === "cancelled" || message.endsWith("cancelled")) notify("Open cancelled", "info");
+      else if (message === "already downloading" || message.endsWith("already downloading")) {
+        notify(`${entry.name} is already downloading`, "info");
+      } else notify(`Open failed: ${err}`, "error");
+      return;
+    } finally {
+      openingPathsRef.current.delete(entry.path);
+    }
+    clearOpenJob();
+    setOpenProgress((prev) => {
+      const cur = prev[entry.path];
+      if (!cur || openGenByPathRef.current.get(entry.path) !== gen) return prev;
+      const total = cur.total || entry.size || 1;
+      return { ...prev, [entry.path]: { bytes: total, total } };
+    });
+    window.setTimeout(clearOpen, 280);
   };
 
   // Local: open file in default OS application.
@@ -992,15 +1101,34 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         </div>
       )}
 
-      {notification && (
+      {(notification || openJobs.length > 0) && (
         // Bottom-right of the pane, not top-right — top-right used to sit
         // on top of the path-bar header and obscure the first row of
         // entries on a short pane. Bottom keeps the file list visible.
-        <div className={`absolute bottom-3 right-3 z-50 max-w-[80%] px-3 py-1.5 rounded-lg border text-[11px] font-mono shadow-2xl backdrop-blur-md animate-in fade-in slide-in-from-bottom-4 duration-300 ${
-          notification.type === "success" ? "bg-emerald-950/90 border-emerald-500/30 text-emerald-400" :
-          notification.type === "error"   ? "bg-rose-950/90 border-rose-500/30 text-rose-400" :
-                                            "bg-indigo-950/90 border-indigo-500/30 text-indigo-400"
-        }`}>{notification.msg}</div>
+        // The open-job row is its own element so a later notify() cannot
+        // take the cancel button with it.
+        <div className="absolute bottom-3 right-3 z-50 flex flex-col items-end gap-1.5 max-w-[80%]">
+          {notification && (
+            <div className={`px-3 py-1.5 rounded-lg border text-[11px] font-mono shadow-2xl backdrop-blur-md animate-in fade-in slide-in-from-bottom-4 duration-300 ${
+              notification.type === "success" ? "bg-emerald-950/90 border-emerald-500/30 text-emerald-400" :
+              notification.type === "error"   ? "bg-rose-950/90 border-rose-500/30 text-rose-400" :
+                                                "bg-indigo-950/90 border-indigo-500/30 text-indigo-400"
+            }`}>{notification.msg}</div>
+          )}
+          {openJobs.map((job) => (
+            <div key={job.transferId} className="px-3 py-1.5 rounded-lg border text-[11px] font-mono shadow-2xl backdrop-blur-md bg-indigo-950/90 border-indigo-500/30 text-indigo-400 flex items-center gap-2">
+              <span className="min-w-0">Opening {job.name} in default editor…</span>
+              <button
+                type="button"
+                title="Cancel"
+                onClick={() => cancelOpenDownload(job.transferId)}
+                className="shrink-0 p-0.5 rounded hover:bg-white/15 text-zinc-300 hover:text-rose-300"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
       )}
 
       {/* Header */}
@@ -1345,6 +1473,10 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           ) : (
             sortedEntries.map((entry) => {
               const isSel = selected.has(entry.path);
+              const opening = openProgress[entry.path];
+              const openPct = opening && opening.total > 0
+                ? Math.min(100, (opening.bytes / opening.total) * 100)
+                : null;
               return (
               <div
                 key={entry.path}
@@ -1363,16 +1495,31 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                 }}
                 data-fs-row-path={entry.path}
                 data-fs-row-isdir={entry.isDir ? "1" : "0"}
-                className={`group grid ${
+                className={`group isolate relative overflow-hidden grid ${
                   showPerms
                     ? "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_65px_115px_85px]"
                     : "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_75px_125px]"
                 } gap-1.5 px-2.5 py-1 border-l-2 cursor-pointer transition-colors items-center ${
-                  isSel
+                  opening
+                    ? "border-indigo-400 text-indigo-100 font-bold"
+                    : isSel
                     ? "bg-indigo-950/40 border-indigo-400 text-indigo-100 font-bold"
                     : "border-transparent text-zinc-200 hover:bg-white/5 hover:text-white"
                 }`}
               >
+                {opening && (
+                  <>
+                    <div className="absolute inset-0 -z-10 bg-indigo-950/25 pointer-events-none" />
+                    {openPct === null ? (
+                      <div className="absolute inset-y-0 left-0 -z-10 w-1/3 bg-indigo-400/50 pointer-events-none open-progress-indeterminate" />
+                    ) : (
+                      <div
+                        className="absolute inset-y-0 left-0 -z-10 bg-indigo-400/45 pointer-events-none transition-[width] duration-150 ease-linear"
+                        style={{ width: `${openPct === 0 ? 0 : Math.max(openPct, 1.5)}%` }}
+                      />
+                    )}
+                  </>
+                )}
                 {/* Per-row checkbox. Its 22px column is always reserved, so the
                     box appearing never shifts the row's content sideways. Hidden
                     at rest, revealed on row hover or whenever a selection is
