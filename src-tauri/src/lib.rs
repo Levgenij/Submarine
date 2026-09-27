@@ -8839,30 +8839,199 @@ fn safe_temp_leaf_name(remote_path: &str) -> Result<String, String> {
     Ok(raw.to_string())
 }
 
+fn open_flight_key(session_id: &str, remote_path: &str) -> String {
+    format!("{session_id}\n{remote_path}")
+}
+
+/// `true` when this caller owns the slot. A second caller for the same
+/// session and remote path gets `false` and must not touch the temp file.
+fn claim_open_slot(slots: &mut std::collections::HashSet<String>, key: String) -> bool {
+    slots.insert(key)
+}
+
+fn open_in_flight() -> &'static StdMutex<std::collections::HashSet<String>> {
+    static SET: std::sync::OnceLock<StdMutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    SET.get_or_init(|| StdMutex::new(std::collections::HashSet::new()))
+}
+
+fn lock_open_in_flight() -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
+    open_in_flight().lock().unwrap_or_else(|err| err.into_inner())
+}
+
+/// One directory per open, never `session/<leaf>`. A later open of the same
+/// name must not truncate the file an editor watcher is already syncing.
+fn open_staging_file(session_dir: &std::path::Path, staging_name: &str, leaf: &str) -> std::path::PathBuf {
+    session_dir.join(staging_name).join(leaf)
+}
+
+fn discard_open_staging(file: &std::path::Path) {
+    let _ = std::fs::remove_file(file);
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::remove_dir(dir);
+    }
+}
+
+/// Gate in front of `open::that`. Once this returns `Ok`, the editor launch
+/// is the next step; a cancel click before that must not start it.
+fn open_launch_permitted(cancelled: bool) -> Result<(), &'static str> {
+    if cancelled {
+        Err("cancelled")
+    } else {
+        Ok(())
+    }
+}
+
 #[tauri::command]
 async fn sftp_open_remote_file(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, SshState>,
     session_id: String,
     remote_path: String,
+    transfer_id: String,
 ) -> Result<(), String> {
     use tauri::Emitter;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Register before any slow await so the toast's cancel button can flip
+    // the flag while the SFTP channel is still coming up.
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancels_map = Arc::clone(&state.transfer_cancels);
+    cancels_map.lock().await.insert(transfer_id.clone(), Arc::clone(&cancel));
+    struct CancelGuard {
+        map: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>>,
+        id: String,
+    }
+    impl Drop for CancelGuard {
+        fn drop(&mut self) {
+            if let Ok(mut g) = self.map.try_lock() {
+                g.remove(&self.id);
+            }
+        }
+    }
+    let _guard = CancelGuard { map: Arc::clone(&cancels_map), id: transfer_id };
+
+    let flight_key = open_flight_key(&session_id, &remote_path);
+    {
+        let mut slots = lock_open_in_flight();
+        if !claim_open_slot(&mut slots, flight_key.clone()) {
+            return Err("already downloading".into());
+        }
+    }
+    struct InFlightGuard { key: String }
+    impl Drop for InFlightGuard {
+        fn drop(&mut self) {
+            lock_open_in_flight().remove(&self.key);
+        }
+    }
+    let _in_flight = InFlightGuard { key: flight_key };
 
     let sftp = get_sftp_session(&state, &session_id).await?;
     let filename = safe_temp_leaf_name(&remote_path)?;
 
-    // Read file data
-    let data = sftp.read(&remote_path).await.map_err(|e| format!("Failed to read remote file: {}", e))?;
+    // Size up front so the file-row progress bar can show a percentage.
+    // Some servers omit it; the UI then falls back to an indeterminate sweep.
+    let total = match sftp.metadata(&remote_path).await {
+        Ok(m) => m.size.unwrap_or(0),
+        Err(_) => 0,
+    };
+    let event_name = format!("sftp-open-{}", session_id);
+    let path_for_emit = remote_path.clone();
+    let emit_progress = |bytes: u64, status: &str| {
+        let _ = app_handle.emit(
+            &event_name,
+            serde_json::json!({
+                "path": path_for_emit,
+                "bytes": bytes,
+                "total": total,
+                "status": status,
+            }),
+        );
+    };
 
     // Per-session subdirectory so we can sweep everything cleanly on
     // disconnect rather than leaving loose `submarine_sftp_*` files in the global
     // temp dir. The directory is also a smaller blast radius for any path-
     // related shenanigans (each editor sees only files from one session).
     let session_temp_dir = session_sftp_dir(&session_id);
-    std::fs::create_dir_all(&session_temp_dir)
-        .map_err(|e| format!("Failed to create temp dir: {}", e))?;
-    let temp_file_path = session_temp_dir.join(&filename);
-    std::fs::write(&temp_file_path, &data).map_err(|e| format!("Failed to write temporary file: {}", e))?;
+    let mut staging_bytes = [0u8; 8];
+    rand::rng().fill_bytes(&mut staging_bytes);
+    let staging_name = hex::encode(staging_bytes);
+    let temp_file_path = open_staging_file(&session_temp_dir, &staging_name, &filename);
+    if let Some(dir) = temp_file_path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("Failed to create temp dir: {}", e))?;
+    }
+
+    // Stream to disk instead of `sftp.read` (which buffers the whole file).
+    // A multi-hundred-MB log otherwise sits in RAM with no progress until
+    // the editor finally opens.
+    if cancel.load(Ordering::Relaxed) {
+        discard_open_staging(&temp_file_path);
+        return Err("cancelled".into());
+    }
+    emit_progress(0, "progress");
+    let mut remote_file = sftp
+        .open(&remote_path)
+        .await
+        .map_err(|e| {
+            discard_open_staging(&temp_file_path);
+            format!("Failed to read remote file: {}", e)
+        })?;
+    let mut local_file = tokio::fs::File::create(&temp_file_path)
+        .await
+        .map_err(|e| {
+            discard_open_staging(&temp_file_path);
+            format!("Failed to write temporary file: {}", e)
+        })?;
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut transferred: u64 = 0;
+    let mut last_report = std::time::Instant::now();
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            drop(local_file);
+            discard_open_staging(&temp_file_path);
+            emit_progress(transferred, "cancelled");
+            return Err("cancelled".into());
+        }
+        let n = match remote_file.read(&mut buf).await {
+            Ok(n) => n,
+            Err(e) => {
+                drop(local_file);
+                discard_open_staging(&temp_file_path);
+                emit_progress(transferred, "error");
+                return Err(format!("Failed to read remote file: {}", e));
+            }
+        };
+        if n == 0 {
+            break;
+        }
+        if let Err(e) = local_file.write_all(&buf[..n]).await {
+            drop(local_file);
+            discard_open_staging(&temp_file_path);
+            emit_progress(transferred, "error");
+            return Err(format!("Failed to write temporary file: {}", e));
+        }
+        transferred += n as u64;
+        if last_report.elapsed() >= std::time::Duration::from_millis(100) {
+            emit_progress(transferred, "progress");
+            last_report = std::time::Instant::now();
+        }
+    }
+    if let Err(e) = local_file.flush().await {
+        drop(local_file);
+        discard_open_staging(&temp_file_path);
+        emit_progress(transferred, "error");
+        return Err(format!("Failed to write temporary file: {}", e));
+    }
+    drop(local_file);
+    drop(remote_file);
+    if open_launch_permitted(cancel.load(Ordering::Relaxed)).is_err() {
+        discard_open_staging(&temp_file_path);
+        emit_progress(transferred, "cancelled");
+        return Err("cancelled".into());
+    }
+    emit_progress(transferred, "done");
 
     // Open local temp file in system default application. The whole
     // live-edit-in-default-editor feature is desktop-only — Android's
@@ -8871,13 +9040,18 @@ async fn sftp_open_remote_file(
     // depend on. Refuse cleanly so the UI can surface a polite message.
     #[cfg(target_os = "android")]
     {
-        let _ = &temp_file_path;
+        discard_open_staging(&temp_file_path);
         return Err("Live edit in system editor is not available on Android.".into());
     }
     #[cfg(not(target_os = "android"))]
     {
+        if open_launch_permitted(cancel.load(Ordering::Relaxed)).is_err() {
+            discard_open_staging(&temp_file_path);
+            return Err("cancelled".into());
+        }
         let open_res = open::that(&temp_file_path);
         if let Err(e) = open_res {
+            discard_open_staging(&temp_file_path);
             return Err(format!("Failed to open file: {}", e));
         }
     }
@@ -8906,13 +9080,13 @@ async fn sftp_open_remote_file(
             Ok(d) => d,
             Err(e) => {
                 eprintln!("[sftp-live-edit] debouncer init failed: {} — falling back to no autosync", e);
-                let _ = std::fs::remove_file(&temp_file_path_clone);
+                discard_open_staging(&temp_file_path_clone);
                 return;
             }
         };
         if let Err(e) = debouncer.watcher().watch(&temp_file_path_clone, RecursiveMode::NonRecursive) {
             eprintln!("[sftp-live-edit] watch failed: {} — falling back to no autosync", e);
-            let _ = std::fs::remove_file(&temp_file_path_clone);
+            discard_open_staging(&temp_file_path_clone);
             return;
         }
         // Forward bridge: std::mpsc::recv blocks, so it has to live on the
@@ -9021,7 +9195,7 @@ async fn sftp_open_remote_file(
         // — on Windows the editor may still hold a lock on the file, and the
         // worst case is the file persists until the OS cleans temp.
         drop(debouncer);
-        let _ = std::fs::remove_file(&temp_file_path_clone);
+        discard_open_staging(&temp_file_path_clone);
     });
 
     Ok(())
@@ -10556,6 +10730,43 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discard_open_staging_removes_the_dir_when_the_file_was_never_created() {
+        let root = std::env::temp_dir().join(format!("submarine-open-test-{}", std::process::id()));
+        let file = open_staging_file(&root, "staging", "laravel.log");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        assert!(file.parent().unwrap().is_dir());
+        discard_open_staging(&file);
+        assert!(!file.parent().unwrap().exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn second_open_of_the_same_path_is_rejected_while_the_first_is_in_flight() {
+        let mut slots = std::collections::HashSet::new();
+        let key = open_flight_key("session-1", "/var/log/laravel.log");
+        assert!(claim_open_slot(&mut slots, key.clone()));
+        assert!(!claim_open_slot(&mut slots, open_flight_key("session-1", "/var/log/laravel.log")));
+        // A different path, or the same path after the first slot is released, can proceed.
+        assert!(claim_open_slot(&mut slots, open_flight_key("session-1", "/var/log/other.log")));
+        slots.remove(&key);
+        assert!(claim_open_slot(&mut slots, key));
+    }
+
+    #[test]
+    fn open_staging_file_is_not_the_shared_leaf_path() {
+        let session = std::path::Path::new("session");
+        let staged = open_staging_file(session, "abc123", "laravel.log");
+        assert_eq!(staged, session.join("abc123").join("laravel.log"));
+        assert_ne!(staged, session.join("laravel.log"));
+    }
+
+    #[test]
+    fn cancel_before_editor_launch_is_rejected() {
+        assert_eq!(open_launch_permitted(true), Err("cancelled"));
+        assert_eq!(open_launch_permitted(false), Ok(()));
+    }
 
     #[test]
     fn dir_entry_name_rejects_traversal_and_separators() {
