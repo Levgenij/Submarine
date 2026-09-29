@@ -211,11 +211,14 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     return (isDir ? "d" : "-") + r(u) + w(u) + x(u) + r(g) + w(g) + x(g) + r(o) + w(o) + x(o);
   };
 
-  const formatTime = (ts?: number) => {
+  // Remote listings show seconds too, so a fresh upload or save is visibly
+  // newer than the copy that was there a moment ago.
+  const formatTime = (ts?: number, withSeconds = false) => {
     if (!ts) return "-";
     const d = new Date(ts * 1000);
     const pad = (n: number) => n.toString().padStart(2, "0");
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${withSeconds ? `${hm}:${pad(d.getSeconds())}` : hm}`;
   };
 
   const formatSize = (bytes: number) => {
@@ -1402,7 +1405,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             select-all toggle to the right of the address bar. */}
         <div className={`group min-w-full grid ${
           showPerms
-            ? "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_65px_115px_85px]"
+            ? "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_65px_125px_85px]"
             : "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_75px_125px]"
         } gap-1.5 px-2.5 bg-[#161619] border-b border-white/5 font-mono text-[10.5px] text-zinc-300 select-none font-bold shrink-0 sticky top-0 z-10 shadow-md`}>
           {/* Select-all — the 22px column is ALWAYS reserved (both here and in
@@ -1454,7 +1457,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
               title="Parent directory"
               className={`grid ${
                 showPerms
-                  ? "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_65px_115px_85px]"
+                  ? "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_65px_125px_85px]"
                   : "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_75px_125px]"
               } gap-1.5 px-2.5 py-1 border-l-2 border-transparent cursor-pointer transition-colors items-center text-zinc-200 hover:bg-white/5 hover:text-white`}
             >
@@ -1497,7 +1500,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                 data-fs-row-isdir={entry.isDir ? "1" : "0"}
                 className={`group isolate relative overflow-hidden grid ${
                   showPerms
-                    ? "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_65px_115px_85px]"
+                    ? "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_65px_125px_85px]"
                     : "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_75px_125px]"
                 } gap-1.5 px-2.5 py-1 border-l-2 cursor-pointer transition-colors items-center ${
                   opening
@@ -1558,7 +1561,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                     <div className="sm:hidden truncate text-[10px] text-zinc-500 font-mono">
                       {[
                         entry.isDir ? null : formatSize(entry.size),
-                        formatTime(entry.modified),
+                        formatTime(entry.modified, isRemote),
                         showPerms ? formatRights(entry.isDir, entry.permissions) : null,
                       ].filter(Boolean).join(" · ")}
                     </div>
@@ -1568,7 +1571,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                   {entry.isDir ? "" : formatSize(entry.size)}
                 </div>
                 <div className="hidden sm:block text-right text-[9.5px] text-zinc-400 truncate">
-                  {formatTime(entry.modified)}
+                  {formatTime(entry.modified, isRemote)}
                 </div>
                 {showPerms && (
                   <div className="hidden sm:flex text-right text-[10.5px] text-zinc-300 font-mono opacity-90 items-center justify-end gap-1">
