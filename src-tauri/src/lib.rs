@@ -8858,8 +8858,8 @@ fn lock_open_in_flight() -> std::sync::MutexGuard<'static, std::collections::Has
     open_in_flight().lock().unwrap_or_else(|err| err.into_inner())
 }
 
-/// One directory per open, never `session/<leaf>`. A later open of the same
-/// name must not truncate the file an editor watcher is already syncing.
+/// One directory per remote path, never `session/<leaf>`, so two remote files
+/// with the same name do not share an editor copy.
 fn open_staging_file(session_dir: &std::path::Path, staging_name: &str, leaf: &str) -> std::path::PathBuf {
     session_dir.join(staging_name).join(leaf)
 }
@@ -8881,6 +8881,287 @@ fn open_launch_permitted(cancelled: bool) -> Result<(), &'static str> {
     }
 }
 
+/// State of an editor copy that has (or had) a save watcher. `synced` is the
+/// hash of the bytes last known to be on the server; the lock is held while
+/// the copy is uploaded or replaced, so the two never interleave.
+/// `interrupted` is set once an upload has truncated the remote file and is
+/// cleared only when that upload has finished, so the upload is repeated
+/// even if the copy equals `synced` again. It is not set while the remote
+/// file is still intact (local file missing, SFTP session not open).
+struct LiveEdit {
+    synced: [u8; 32],
+    interrupted: bool,
+    watching: bool,
+}
+
+impl LiveEdit {
+    /// The server now holds exactly `hash`: after a finished upload, or after
+    /// a download that was read completely and installed as the editor copy.
+    /// Either way an earlier interrupted upload no longer matters.
+    fn server_has(&mut self, hash: [u8; 32]) {
+        self.synced = hash;
+        self.interrupted = false;
+    }
+}
+
+type LiveEditEntry = Arc<tokio::sync::Mutex<LiveEdit>>;
+
+fn live_edits() -> &'static StdMutex<std::collections::HashMap<std::path::PathBuf, LiveEditEntry>> {
+    static MAP: std::sync::OnceLock<StdMutex<std::collections::HashMap<std::path::PathBuf, LiveEditEntry>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
+}
+
+fn lock_live_edits() -> std::sync::MutexGuard<'static, std::collections::HashMap<std::path::PathBuf, LiveEditEntry>> {
+    live_edits().lock().unwrap_or_else(|err| err.into_inner())
+}
+
+/// Overwrite the remote file in place, streaming from the editor copy.
+/// Truncating keeps the server's permissions/ownership and works when only
+/// the file (not its directory) is writable. Returns the hash of the bytes
+/// that were sent. The local file is opened first, so an unreadable copy
+/// never truncates the remote file. `edit.interrupted` is raised right after
+/// the truncating open succeeds and lowered when the file is closed. Uses the shared cached SFTP session on
+/// purpose: requests are multiplexed by id, so a long write does not block
+/// other operations (see "Reviewed and rejected" in docs/agent/live-edit.md).
+async fn upload_editor_copy(
+    ssh: &SshState,
+    session_id: &str,
+    remote_path: &str,
+    live: &std::path::Path,
+    edit: &mut LiveEdit,
+) -> Result<(), String> {
+    use russh_sftp::protocol::OpenFlags;
+    use sha2::{Digest, Sha256};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut local = tokio::fs::File::open(live)
+        .await
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+    let sftp = get_sftp_session(ssh, session_id).await?;
+    let mut remote_file = sftp
+        .open_with_flags(remote_path, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE)
+        .await
+        .map_err(|e| format!("Failed to open remote file: {}", e))?;
+    edit.interrupted = true;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        let n = local
+            .read(&mut buf)
+            .await
+            .map_err(|e| format!("Failed to read file: {}", e))?;
+        if n == 0 {
+            break;
+        }
+        remote_file
+            .write_all(&buf[..n])
+            .await
+            .map_err(|e| format!("Failed to write to remote: {}", e))?;
+        hasher.update(&buf[..n]);
+    }
+    remote_file
+        .shutdown()
+        .await
+        .map_err(|e| format!("Failed to close remote file: {}", e))?;
+    edit.server_has(hasher.finalize().into());
+    Ok(())
+}
+
+/// Hash of the editor copy, read in chunks. `None` when the name is
+/// momentarily absent (a save that replaces the file).
+async fn editor_copy_hash(live: &std::path::Path) -> Result<Option<[u8; 32]>, String> {
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncReadExt;
+    let mut file = match tokio::fs::File::open(live).await {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("Failed to read file: {}", e)),
+    };
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .await
+            .map_err(|e| format!("Failed to read file: {}", e))?;
+        if n == 0 {
+            return Ok(Some(hasher.finalize().into()));
+        }
+        hasher.update(&buf[..n]);
+    }
+}
+
+/// Upload the editor copy if it differs from what the server has.
+/// `Ok(true)` when something was uploaded. The local copy is never touched.
+async fn sync_editor_copy(
+    ssh: &SshState,
+    session_id: &str,
+    remote_path: &str,
+    live: &std::path::Path,
+    edit: &mut LiveEdit,
+) -> Result<bool, String> {
+    if !upload_needed(editor_copy_hash(live).await?, edit)? {
+        return Ok(false);
+    }
+    upload_editor_copy(ssh, session_id, remote_path, live, edit).await?;
+    Ok(true)
+}
+
+/// Whether the editor copy must be sent. After an interrupted upload it must,
+/// even when it equals `synced`; a missing copy then is an error so the retry
+/// goes on instead of looking finished.
+fn upload_needed(hash: Option<[u8; 32]>, edit: &LiveEdit) -> Result<bool, String> {
+    match hash {
+        Some(hash) => Ok(edit.interrupted || hash != edit.synced),
+        None if edit.interrupted => {
+            Err("The editor copy is missing and the last upload did not finish".to_string())
+        }
+        None => Ok(false),
+    }
+}
+
+/// True when the editor copy holds bytes the server does not have (or an
+/// upload of it did not finish). A copy that is gone has nothing to keep; one
+/// that exists but cannot be read is kept rather than assumed sent.
+async fn copy_has_unsent_changes(path: &std::path::Path, edit: &LiveEdit) -> bool {
+    match editor_copy_hash(path).await {
+        Ok(Some(hash)) => edit.interrupted || hash != edit.synced,
+        Ok(None) => false,
+        Err(_) => true,
+    }
+}
+
+/// A stream that ends before the size the server reported is cut short. One
+/// that is longer is fine: a log can grow while it is being read, and some
+/// files (`/proc`) report size 0.
+fn download_is_short(expected: u64, transferred: u64) -> bool {
+    transferred < expected
+}
+
+/// Stream the remote file into `part` and return its hash and size.
+/// A stream that ends before the size the server reported is an error, and a
+/// file whose size the server does not report is refused: the next save would
+/// truncate the remote file to whatever an unverified download delivered.
+async fn download_to_part(
+    sftp: &russh_sftp::client::SftpSession,
+    remote_path: &str,
+    part: &std::path::Path,
+    cancel: &std::sync::atomic::AtomicBool,
+    emit: &impl Fn(u64, u64, &str),
+) -> Result<([u8; 32], u64), String> {
+    use sha2::{Digest, Sha256};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use std::sync::atomic::Ordering;
+
+    // Size up front so the file-row progress bar can show a percentage.
+    // Some servers omit it; the UI then falls back to an indeterminate sweep.
+    let stat_size = sftp.metadata(remote_path).await.ok().and_then(|m| m.size);
+    let total = stat_size.unwrap_or(0);
+    let mut transferred: u64 = 0;
+    let result: Result<[u8; 32], String> = async {
+        emit(0, total, "progress");
+        let mut remote_file = sftp
+            .open(remote_path)
+            .await
+            .map_err(|e| format!("Failed to read remote file: {}", e))?;
+        // If the path stat gave no size, ask the open handle.
+        let expected = match stat_size {
+            Some(size) => size,
+            None => remote_file
+                .metadata()
+                .await
+                .ok()
+                .and_then(|m| m.size)
+                .ok_or("Remote file size is unavailable; refusing an unverified download")?,
+        };
+        let mut local_file = tokio::fs::File::create(part)
+            .await
+            .map_err(|e| format!("Failed to write temporary file: {}", e))?;
+        let mut buf = vec![0u8; 256 * 1024];
+        let mut hasher = Sha256::new();
+        let mut last_report = std::time::Instant::now();
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err("cancelled".to_string());
+            }
+            let n = remote_file
+                .read(&mut buf)
+                .await
+                .map_err(|e| format!("Failed to read remote file: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            local_file
+                .write_all(&buf[..n])
+                .await
+                .map_err(|e| format!("Failed to write temporary file: {}", e))?;
+            hasher.update(&buf[..n]);
+            transferred += n as u64;
+            if last_report.elapsed() >= std::time::Duration::from_millis(100) {
+                emit(transferred, total, "progress");
+                last_report = std::time::Instant::now();
+            }
+        }
+        local_file
+            .flush()
+            .await
+            .map_err(|e| format!("Failed to write temporary file: {}", e))?;
+        if download_is_short(expected, transferred) {
+            return Err("Download ended before the whole remote file arrived".to_string());
+        }
+        Ok(hasher.finalize().into())
+    }
+    .await;
+    match result {
+        Ok(hash) => Ok((hash, transferred)),
+        Err(e) => {
+            discard_open_staging(part);
+            emit(transferred, total, if e == "cancelled" { "cancelled" } else { "error" });
+            Err(e)
+        }
+    }
+}
+
+/// Watch the editor copy's directory rather than the file: an editor that
+/// saves by replacing the file, and our own re-download, swap the inode.
+/// The 750ms debounce coalesces those swaps into one event.
+fn watch_editor_copy(
+    live: &std::path::Path,
+) -> Result<
+    (
+        notify_debouncer_mini::Debouncer<notify_debouncer_mini::notify::RecommendedWatcher>,
+        tokio::sync::mpsc::Receiver<()>,
+    ),
+    String,
+> {
+    use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebouncedEventKind};
+    let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
+    let name = live.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    let mut debouncer = new_debouncer(
+        std::time::Duration::from_millis(750),
+        move |result: notify_debouncer_mini::DebounceEventResult| {
+            if let Ok(events) = result {
+                if events.iter().any(|ev| {
+                    matches!(ev.kind, DebouncedEventKind::Any | DebouncedEventKind::AnyContinuous)
+                        && ev.path.file_name() == Some(name.as_os_str())
+                }) {
+                    let _ = tx.try_send(());
+                }
+            }
+        },
+    )
+    .map_err(|e| format!("Failed to watch editor file: {}", e))?;
+    debouncer
+        .watcher()
+        .watch(live.parent().unwrap_or(live), RecursiveMode::NonRecursive)
+        .map_err(|e| format!("Failed to watch editor file: {}", e))?;
+    Ok((debouncer, rx))
+}
+
+/// Download the remote file into the editor copy (replacing it if it exists,
+/// including any local change not yet sent) and open it. Saves in the editor
+/// are uploaded by a watcher on the local copy only; the server is never
+/// polled. Flow: `docs/agent/live-edit.md`.
 #[tauri::command]
 async fn sftp_open_remote_file(
     app_handle: tauri::AppHandle,
@@ -8889,8 +9170,8 @@ async fn sftp_open_remote_file(
     remote_path: String,
     transfer_id: String,
 ) -> Result<(), String> {
-    use tauri::Emitter;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tauri::{Emitter, Manager};
+    use sha2::{Digest, Sha256};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     // Register before any slow await so the toast's cancel button can flip
@@ -8929,19 +9210,12 @@ async fn sftp_open_remote_file(
     let sftp = get_sftp_session(&state, &session_id).await?;
     let filename = safe_temp_leaf_name(&remote_path)?;
 
-    // Size up front so the file-row progress bar can show a percentage.
-    // Some servers omit it; the UI then falls back to an indeterminate sweep.
-    let total = match sftp.metadata(&remote_path).await {
-        Ok(m) => m.size.unwrap_or(0),
-        Err(_) => 0,
-    };
     let event_name = format!("sftp-open-{}", session_id);
-    let path_for_emit = remote_path.clone();
-    let emit_progress = |bytes: u64, status: &str| {
+    let emit_progress = |bytes: u64, total: u64, status: &str| {
         let _ = app_handle.emit(
             &event_name,
             serde_json::json!({
-                "path": path_for_emit,
+                "path": remote_path,
                 "bytes": bytes,
                 "total": total,
                 "status": status,
@@ -8950,88 +9224,22 @@ async fn sftp_open_remote_file(
     };
 
     // Per-session subdirectory so we can sweep everything cleanly on
-    // disconnect rather than leaving loose `submarine_sftp_*` files in the global
-    // temp dir. The directory is also a smaller blast radius for any path-
-    // related shenanigans (each editor sees only files from one session).
+    // disconnect. One directory per remote path, so opening the same file
+    // again replaces the same editor copy.
     let session_temp_dir = session_sftp_dir(&session_id);
-    let mut staging_bytes = [0u8; 8];
-    rand::rng().fill_bytes(&mut staging_bytes);
-    let staging_name = hex::encode(staging_bytes);
-    let temp_file_path = open_staging_file(&session_temp_dir, &staging_name, &filename);
+    let mut path_key = hex::encode(Sha256::digest(remote_path.as_bytes()));
+    path_key.truncate(32);
+    let temp_file_path = open_staging_file(&session_temp_dir, &path_key, &filename);
+    // The download lands here first, so a failed or cancelled download
+    // never touches the copy the editor has open.
+    let part_path = temp_file_path.with_file_name(format!("{filename}.part"));
     if let Some(dir) = temp_file_path.parent() {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("Failed to create temp dir: {}", e))?;
     }
-
-    // Stream to disk instead of `sftp.read` (which buffers the whole file).
-    // A multi-hundred-MB log otherwise sits in RAM with no progress until
-    // the editor finally opens.
     if cancel.load(Ordering::Relaxed) {
-        discard_open_staging(&temp_file_path);
         return Err("cancelled".into());
     }
-    emit_progress(0, "progress");
-    let mut remote_file = sftp
-        .open(&remote_path)
-        .await
-        .map_err(|e| {
-            discard_open_staging(&temp_file_path);
-            format!("Failed to read remote file: {}", e)
-        })?;
-    let mut local_file = tokio::fs::File::create(&temp_file_path)
-        .await
-        .map_err(|e| {
-            discard_open_staging(&temp_file_path);
-            format!("Failed to write temporary file: {}", e)
-        })?;
-    let mut buf = vec![0u8; 256 * 1024];
-    let mut transferred: u64 = 0;
-    let mut last_report = std::time::Instant::now();
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            drop(local_file);
-            discard_open_staging(&temp_file_path);
-            emit_progress(transferred, "cancelled");
-            return Err("cancelled".into());
-        }
-        let n = match remote_file.read(&mut buf).await {
-            Ok(n) => n,
-            Err(e) => {
-                drop(local_file);
-                discard_open_staging(&temp_file_path);
-                emit_progress(transferred, "error");
-                return Err(format!("Failed to read remote file: {}", e));
-            }
-        };
-        if n == 0 {
-            break;
-        }
-        if let Err(e) = local_file.write_all(&buf[..n]).await {
-            drop(local_file);
-            discard_open_staging(&temp_file_path);
-            emit_progress(transferred, "error");
-            return Err(format!("Failed to write temporary file: {}", e));
-        }
-        transferred += n as u64;
-        if last_report.elapsed() >= std::time::Duration::from_millis(100) {
-            emit_progress(transferred, "progress");
-            last_report = std::time::Instant::now();
-        }
-    }
-    if let Err(e) = local_file.flush().await {
-        drop(local_file);
-        discard_open_staging(&temp_file_path);
-        emit_progress(transferred, "error");
-        return Err(format!("Failed to write temporary file: {}", e));
-    }
-    drop(local_file);
-    drop(remote_file);
-    if open_launch_permitted(cancel.load(Ordering::Relaxed)).is_err() {
-        discard_open_staging(&temp_file_path);
-        emit_progress(transferred, "cancelled");
-        return Err("cancelled".into());
-    }
-    emit_progress(transferred, "done");
 
     // Open local temp file in system default application. The whole
     // live-edit-in-default-editor feature is desktop-only — Android's
@@ -9040,163 +9248,152 @@ async fn sftp_open_remote_file(
     // depend on. Refuse cleanly so the UI can surface a polite message.
     #[cfg(target_os = "android")]
     {
-        discard_open_staging(&temp_file_path);
         return Err("Live edit in system editor is not available on Android.".into());
     }
     #[cfg(not(target_os = "android"))]
     {
-        if open_launch_permitted(cancel.load(Ordering::Relaxed)).is_err() {
-            discard_open_staging(&temp_file_path);
-            return Err("cancelled".into());
-        }
-        let open_res = open::that(&temp_file_path);
-        if let Err(e) = open_res {
-            discard_open_staging(&temp_file_path);
-            return Err(format!("Failed to open file: {}", e));
-        }
-    }
-
-    // Spawn modification watcher task in background
-    let connections_clone = Arc::clone(&state.connections);
-    let app_handle_clone = app_handle.clone();
-    let session_id_clone = session_id.clone();
-    let remote_path_clone = remote_path.clone();
-    let filename_clone = filename.clone();
-    let temp_file_path_clone = temp_file_path.clone();
-
-    tokio::spawn(async move {
-        // Notify-driven save detection instead of the old 1.5s poll. Wires
-        // the same `notify-debouncer-mini` crate the mirror module uses:
-        //   - std::mpsc::Sender feeds the debouncer (a blocking pool task
-        //     forwards into a tokio mpsc so this async loop can await it)
-        //   - 750ms debounce coalesces an editor's swap-then-rename
-        //     save pattern (vim, vscode) into one upload instead of
-        //     several. The previous polling burned a syscall every
-        //     1.5s for up to 4800 iterations per open file.
-        use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebouncedEventKind};
-        let (raw_tx, raw_rx) = std::sync::mpsc::channel();
-        let (tok_tx, mut tok_rx) = tokio::sync::mpsc::channel::<()>(8);
-        let mut debouncer = match new_debouncer(std::time::Duration::from_millis(750), raw_tx) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("[sftp-live-edit] debouncer init failed: {} — falling back to no autosync", e);
-                discard_open_staging(&temp_file_path_clone);
-                return;
+        let (entry, existed) = {
+            let mut edits = lock_live_edits();
+            match edits.get(&temp_file_path) {
+                Some(entry) => (Arc::clone(entry), true),
+                None => {
+                    let entry: LiveEditEntry =
+                        Arc::new(tokio::sync::Mutex::new(LiveEdit { synced: [0; 32], interrupted: false, watching: false }));
+                    edits.insert(temp_file_path.clone(), Arc::clone(&entry));
+                    (entry, false)
+                }
             }
         };
-        if let Err(e) = debouncer.watcher().watch(&temp_file_path_clone, RecursiveMode::NonRecursive) {
-            eprintln!("[sftp-live-edit] watch failed: {} — falling back to no autosync", e);
-            discard_open_staging(&temp_file_path_clone);
-            return;
+        let mut edit = entry.lock().await;
+        let had_copy = existed && temp_file_path.exists();
+
+        // Reopening always takes the server's version. Local changes that were
+        // not sent yet are discarded by the replace below, by design.
+        let installed: Result<u64, String> = async {
+            let (hash, transferred) =
+                download_to_part(&sftp, &remote_path, &part_path, &cancel, &emit_progress).await?;
+            if open_launch_permitted(cancel.load(Ordering::Relaxed)).is_err() {
+                discard_open_staging(&part_path);
+                emit_progress(transferred, transferred, "cancelled");
+                return Err("cancelled".to_string());
+            }
+            // On Windows the replace fails if the editor holds the file
+            // locked; the old copy stays.
+            if let Err(e) = std::fs::rename(&part_path, &temp_file_path) {
+                discard_open_staging(&part_path);
+                emit_progress(transferred, transferred, "error");
+                return Err(format!(
+                    "Failed to update the local copy (is it locked by the editor?): {}",
+                    e
+                ));
+            }
+            edit.server_has(hash);
+            Ok(transferred)
         }
-        // Forward bridge: std::mpsc::recv blocks, so it has to live on the
-        // blocking pool.
-        tokio::task::spawn_blocking(move || {
-            while let Ok(res) = raw_rx.recv() {
-                if let Ok(events) = res {
-                    if events.iter().any(|ev| matches!(ev.kind, DebouncedEventKind::Any | DebouncedEventKind::AnyContinuous)) {
-                        if tok_tx.blocking_send(()).is_err() { break; }
+        .await;
+        let transferred = match installed {
+            Ok(n) => n,
+            Err(e) => {
+                if !existed {
+                    lock_live_edits().remove(&temp_file_path);
+                }
+                return Err(e);
+            }
+        };
+        emit_progress(transferred, transferred, "done");
+
+        let watcher = if edit.watching {
+            None
+        } else {
+            match watch_editor_copy(&temp_file_path) {
+                Ok(w) => Some(w),
+                Err(e) => {
+                    if !had_copy {
+                        lock_live_edits().remove(&temp_file_path);
+                        discard_open_staging(&temp_file_path);
                     }
+                    return Err(e);
                 }
             }
-        });
+        };
+        if let Err(e) = open::that(&temp_file_path) {
+            if !had_copy {
+                lock_live_edits().remove(&temp_file_path);
+                discard_open_staging(&temp_file_path);
+            }
+            return Err(format!("Failed to open file: {}", e));
+        }
+        let Some((debouncer, mut rx)) = watcher else {
+            return Ok(());
+        };
+        edit.watching = true;
+        drop(edit);
 
-        // Overall 2-hour ceiling so an editor left open forever doesn't
-        // keep the watcher alive past any reasonable session.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2 * 60 * 60);
-        loop {
-            let wait = tokio::time::sleep_until(deadline);
-            tokio::select! {
-                _ = wait => break,
-                maybe = tok_rx.recv() => {
-                    if maybe.is_none() { break; }
-                    if !temp_file_path_clone.exists() { break; }
-                    // Cheap pre-check: if the session is gone we exit the
-                    // watcher entirely instead of looping and spamming
-                    // "Auto-sync failed" toasts on every subsequent save.
-                    {
-                        let connections = connections_clone.lock().await;
-                        if !connections.contains_key(&session_id_clone) {
-                            let _ = app_handle_clone.emit(
-                                &format!("sftp-sync-status-{}", session_id_clone),
-                                serde_json::json!({
-                                    "status": "error",
-                                    "message": format!("Auto-sync stopped — session for {} is gone", filename_clone),
-                                }),
-                            );
-                            break;
+        let connections_clone = Arc::clone(&state.connections);
+        let app_handle_clone = app_handle.clone();
+        tokio::spawn(async move {
+            let _debouncer = debouncer;
+            let status_event = format!("sftp-sync-status-{}", session_id);
+            let report = |status: &str, message: String| {
+                let _ = app_handle_clone.emit(
+                    &status_event,
+                    serde_json::json!({ "status": status, "message": message }),
+                );
+            };
+            // After a failed upload the save is retried until it succeeds.
+            let mut failed = false;
+            let mut last_error = String::new();
+            loop {
+                let trigger = tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(10)), if failed => Some(()),
+                    event = rx.recv() => event,
+                };
+                // A save that replaces the file removes its name for a moment,
+                // so a missing file is not a reason to stop. The watcher ends
+                // when the session is gone (disconnect and profile close also
+                // wipe the directory).
+                if trigger.is_none() {
+                    break;
+                }
+                if !connections_clone.lock().await.contains_key(&session_id) {
+                    report("error", format!("Auto-sync stopped: session for {} is gone", filename));
+                    break;
+                }
+                let ssh = app_handle_clone.state::<SshState>();
+                let mut edit = entry.lock().await;
+                match sync_editor_copy(&ssh, &session_id, &remote_path, &temp_file_path, &mut edit).await {
+                    Ok(uploaded) => {
+                        failed = false;
+                        last_error.clear();
+                        if uploaded {
+                            report("success", format!("Auto-synced {}", filename));
                         }
                     }
-                    let upload_res = async {
-                    let session_arc = {
-                        let connections = connections_clone.lock().await;
-                        connections.get(&session_id_clone).map(|sess| Arc::clone(sess))
-                    };
-
-                    let session_arc = match session_arc {
-                        Some(sess) => sess,
-                        None => return Err("SSH session disconnected".to_string()),
-                    };
-
-                    // Open the SFTP subsystem, then IMMEDIATELY drop the
-                    // session mutex. Holding it across the whole write serialises
-                    // every open_terminal / cold-cache SFTP-bootstrap request on
-                    // the same session behind this one save — visible as a UI
-                    // freeze whenever the user Ctrl-S's a large remote file.
-                    let sftp = {
-                        let session = session_arc.lock().await;
-                        let channel = session.channel_open_session().await.map_err(|e| e.to_string())?;
-                        channel.request_subsystem(true, "sftp").await.map_err(|e| e.to_string())?;
-                        let s = russh_sftp::client::SftpSession::new(channel.into_stream()).await.map_err(|e| e.to_string())?;
-                        drop(session);
-                        s
-                    };
-
-                    use russh_sftp::protocol::OpenFlags;
-                    use tokio::io::AsyncWriteExt;
-                    let content = std::fs::read(&temp_file_path_clone).map_err(|e| format!("Failed to read file: {}", e))?;
-                    // Truncate so shortening the file doesn't leave the old
-                    // tail behind on the server.
-                    let mut remote_file = sftp
-                        .open_with_flags(
-                            &remote_path_clone,
-                            OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
-                        )
-                        .await
-                        .map_err(|e| format!("Failed to open remote file: {}", e))?;
-                    remote_file
-                        .write_all(&content)
-                        .await
-                        .map_err(|e| format!("Failed to write to remote: {}", e))?;
-                    remote_file
-                        .shutdown()
-                        .await
-                        .map_err(|e| format!("Failed to close remote file: {}", e))?;
-                    Ok::<(), String>(())
-                    }.await;
-
-                    if let Err(e) = upload_res {
-                        let _ = app_handle_clone.emit(
-                            &format!("sftp-sync-status-{}", session_id_clone),
-                            serde_json::json!({ "status": "error", "message": format!("Auto-sync failed: {}", e) })
-                        );
-                    } else {
-                        let _ = app_handle_clone.emit(
-                            &format!("sftp-sync-status-{}", session_id_clone),
-                            serde_json::json!({ "status": "success", "message": format!("Auto-synced {}", filename_clone) })
-                        );
+                    Err(e) => {
+                        failed = true;
+                        if e != last_error {
+                            report("error", format!("Auto-sync failed: {}", e));
+                            last_error = e;
+                        }
                     }
                 }
             }
-        }
-        // The watcher exited (timeout, file disappeared, or session gone).
-        // Wipe the temp file so the remote contents aren't left lying around
-        // in OS temp once editing is done. Errors are intentionally ignored
-        // — on Windows the editor may still hold a lock on the file, and the
-        // worst case is the file persists until the OS cleans temp.
-        drop(debouncer);
-        discard_open_staging(&temp_file_path_clone);
-    });
+            // The watcher exited (session gone). Wipe the copy so
+            // remote contents aren't left lying around, but never one that holds
+            // a save the server does not have.
+            let mut edit = entry.lock().await;
+            edit.watching = false;
+            if copy_has_unsent_changes(&temp_file_path, &edit).await {
+                report(
+                    "error",
+                    format!("Auto-sync stopped with unsent changes; kept at {}", temp_file_path.display()),
+                );
+            } else {
+                lock_live_edits().remove(&temp_file_path);
+                discard_open_staging(&temp_file_path);
+            }
+        });
+    }
 
     Ok(())
 }
@@ -10760,6 +10957,72 @@ mod tests {
         let staged = open_staging_file(session, "abc123", "laravel.log");
         assert_eq!(staged, session.join("abc123").join("laravel.log"));
         assert_ne!(staged, session.join("laravel.log"));
+    }
+
+    #[tokio::test]
+    async fn unsent_changes_are_detected_by_hash_and_a_missing_copy_has_none() {
+        use sha2::{Digest, Sha256};
+        let dir = std::env::temp_dir().join(format!("submarine-unsent-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, b"saved").unwrap();
+        let mut edit = LiveEdit { synced: Sha256::digest(b"saved").into(), interrupted: false, watching: false };
+        assert!(!copy_has_unsent_changes(&file, &edit).await);
+        std::fs::write(&file, b"edited").unwrap();
+        assert!(copy_has_unsent_changes(&file, &edit).await);
+        // Unreadable (a directory here) is kept, not treated as sent.
+        assert!(copy_has_unsent_changes(&dir, &edit).await);
+        // An upload that did not finish keeps the copy even when it equals `synced`.
+        std::fs::write(&file, b"saved").unwrap();
+        edit.interrupted = true;
+        assert!(copy_has_unsent_changes(&file, &edit).await);
+        std::fs::remove_file(&file).unwrap();
+        assert!(!copy_has_unsent_changes(&file, &edit).await);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_interrupted_upload_is_repeated_until_it_finishes() {
+        let synced = [1u8; 32];
+        let mut edit = LiveEdit { synced, interrupted: false, watching: false };
+        assert_eq!(upload_needed(Some(synced), &edit), Ok(false));
+        assert_eq!(upload_needed(Some([2u8; 32]), &edit), Ok(true));
+        assert_eq!(upload_needed(None, &edit), Ok(false));
+        edit.interrupted = true;
+        // The user reverted to the last synced bytes: the remote may be truncated, send anyway.
+        assert_eq!(upload_needed(Some(synced), &edit), Ok(true));
+        // The name is briefly absent: keep retrying instead of looking finished.
+        assert!(upload_needed(None, &edit).is_err());
+    }
+
+    #[test]
+    fn a_finished_upload_or_a_full_download_ends_the_interrupted_state() {
+        let mut edit = LiveEdit { synced: [1u8; 32], interrupted: true, watching: false };
+        edit.server_has([2u8; 32]);
+        assert!(!edit.interrupted);
+        assert_eq!(edit.synced, [2u8; 32]);
+        // The copy just installed from the server is not sent back.
+        assert_eq!(upload_needed(Some([2u8; 32]), &edit), Ok(false));
+    }
+
+    #[test]
+    fn a_known_size_rejects_a_short_download_but_not_a_longer_one() {
+        assert!(download_is_short(100, 40));
+        assert!(download_is_short(100, 0));
+        assert!(!download_is_short(100, 100));
+        assert!(!download_is_short(100, 130)); // log grew while reading
+        assert!(!download_is_short(0, 512)); // /proc style size 0
+    }
+
+    #[tokio::test]
+    async fn a_missing_editor_copy_is_not_an_error_and_has_no_hash() {
+        let dir = std::env::temp_dir().join(format!("submarine-hash-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        assert_eq!(editor_copy_hash(&file).await, Ok(None));
+        std::fs::write(&file, b"abc").unwrap();
+        assert!(matches!(editor_copy_hash(&file).await, Ok(Some(_))));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
