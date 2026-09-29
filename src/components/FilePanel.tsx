@@ -10,8 +10,10 @@ import {
 } from "lucide-react";
 import { FileEntry, FileProvider } from "../fs/types";
 import { mergePermissions, permissionOctal, safeLeafName, shellSingleQuote } from "../fs/dirContext";
-import { useConfirm, useOverwritePrompt, OverwriteChoice } from "../ui/confirm";
+import { useConfirm, useOverwritePrompt, OverwriteChoice, OverwritePromptOptions } from "../ui/confirm";
 import { IS_ANDROID } from "../util/platform";
+import { dropQueued, enqueueTransfers, isQueued, queueSignal, startQueued, waitForTurn } from "../fs/transferQueue";
+import { parentPathOf } from "../fs/localProvider";
 
 // Batch overwrite state shared across items in a single download/upload run.
 // Once the user picks "Overwrite all" or "Skip all" the kind is sticky and we
@@ -30,7 +32,10 @@ async function transferWithOverwriteCheck(
   direction: "download" | "upload",
   batchSize: number,
   batch: OverwriteBatch,
-  overwritePrompt: (opts: { name: string; direction: "download" | "upload"; batchSize: number }) => Promise<OverwriteChoice>,
+  overwritePrompt: (opts: OverwritePromptOptions) => Promise<OverwriteChoice>,
+  // Aborted when this item is cancelled from the transfers bar: the prompt
+  // closes, and a choice made for a cancelled item is never latched.
+  signal?: AbortSignal,
 ): Promise<"done" | "skipped" | "cancelled"> {
   if (batch.kind === "overwrite-all") {
     await invokeFn(true);
@@ -43,7 +48,8 @@ async function transferWithOverwriteCheck(
     const msg = String(err);
     if (!msg.startsWith("EXISTS:")) throw err;
     if (batch.kind === "skip-all") return "skipped";
-    const choice = await overwritePrompt({ name, direction, batchSize });
+    const choice = await overwritePrompt({ name, direction, batchSize, signal });
+    if (signal?.aborted) return "skipped";
     if (choice === "cancel") return "cancelled";
     if (choice === "skip") return "skipped";
     if (choice === "skip-all") { batch.kind = "skip-all"; return "skipped"; }
@@ -100,6 +106,8 @@ export interface FilePanelProps {
 export interface FilePanelHandle {
   refresh: () => Promise<void>;
   currentDir: () => string;
+  /** Shows a short notice in this panel's own stack, above its docked bars. */
+  notify: (msg: string, type?: "info" | "success" | "error") => void;
 }
 
 const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
@@ -194,12 +202,10 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     }, 4000);
   };
 
+  // A click that lands before the command registered its flag is kept by
+  // the backend (early cancel), so one send is enough.
   const cancelOpenDownload = (id: string) => {
-    const send = () => invoke("sftp_cancel_transfer", { transferId: id }).catch(() => {});
-    send();
-    // The flag is registered at the start of the command. A click that
-    // lands before that insert is a no-op, so send once more.
-    window.setTimeout(send, 100);
+    invoke("sftp_cancel_transfer", { transferId: id }).catch(() => {});
   };
 
   const formatRights = (isDir: boolean, perm?: number) => {
@@ -324,6 +330,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   useImperativeHandle(ref, () => ({
     refresh: async () => { await fetch(currentPathRef.current); },
     currentDir: () => currentPathRef.current,
+    notify: (msg, type) => notify(msg, type),
   }), []);
 
   const goUp = () => fetch(provider.parentPath(currentPath));
@@ -516,6 +523,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // full text from the backend.
   useEffect(() => {
     if (!sessionId) return;
+    let alive = true;
     let unlisten: (() => void) | null = null;
     listen<{ status: string; message?: string }>(
       `sftp-sync-status-${sessionId}`,
@@ -527,8 +535,19 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           notify(message || "Auto-sync failed", "error");
         }
       },
-    ).then((u) => { unlisten = u; });
-    return () => { if (unlisten) unlisten(); };
+    ).then((u) => {
+      // Unmounted before listen() resolved: a kept listener would show a
+      // second auto-sync notice after the panel is opened again.
+      if (!alive) {
+        u();
+        return;
+      }
+      unlisten = u;
+    });
+    return () => {
+      alive = false;
+      if (unlisten) unlisten();
+    };
   }, [sessionId]);
 
   // Open-in-editor download progress. Rust streams `sftp-open-{id}` while
@@ -568,13 +587,43 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     };
   }, [sessionId, provider.id]);
 
+  // OS drops carry bare paths. Each is looked up in its parent's listing to
+  // tell folders from files (and to get file sizes for the queue). A path
+  // whose parent cannot be listed is sent as a file, as before.
+  const describeDroppedPaths = async (paths: string[]) => {
+    const leaf = (p: string) => p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "file";
+    const byParent = new Map<string, string[]>();
+    for (const p of paths) {
+      const parent = parentPathOf(p, p.includes("\\") ? "\\" : "/");
+      byParent.set(parent, [...(byParent.get(parent) ?? []), p]);
+    }
+    const found = new Map<string, { isDir: boolean; size: number }>();
+    await Promise.all([...byParent].map(async ([parent, group]) => {
+      try {
+        const raw = await invoke<{ name: string; is_dir: boolean; size: number }[]>("local_list_dir", { path: parent });
+        const byName = new Map(raw.map((r) => [r.name, r]));
+        for (const p of group) {
+          const r = byName.get(leaf(p));
+          if (r) found.set(p, { isDir: r.is_dir, size: r.size });
+        }
+      } catch { /* unknown kind: sent as a file */ }
+    }));
+    return paths.map((p) => {
+      const info = found.get(p);
+      return { path: p, name: leaf(p), isDir: info?.isDir ?? false, size: info && !info.isDir ? info.size : undefined };
+    });
+  };
+
   // ---- OS-level drag-drop into this pane --------------------------------------
   // Tauri 2 routes OS file drops through `tauri://drag-drop`; HTML5 drop events
   // fire too but their `File.path` is empty inside Tauri. We listen globally and
   // dispatch only when the cursor landed inside our root.
 
   useEffect(() => {
-    if (!sessionId) return; // local pane doesn't need this
+    // Only the remote pane accepts OS drops: the local pane has a session
+    // id too (for its Upload button), but its current dir is a local path.
+    if (!sessionId || provider.id !== "remote") return;
+    let alive = true;
     let unlisten: (() => void) | null = null;
     listen<{ paths: string[]; position: { x: number; y: number } }>(
       "tauri://drag-drop",
@@ -585,28 +634,41 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         if (!hit || !dropTargetRef.current.contains(hit)) return;
         setDragOver(false);
         const dir = currentPathRef.current;
-        const batch: OverwriteBatch = { kind: "ask" };
-        let cancelled = false;
-        for (const p of paths) {
-          if (cancelled) break;
-          const name = p.split(/[\\/]/).pop() || "file";
-          notify(`Uploading ${name}...`, "info");
-          try {
-            const remote = dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
-            const res = await transferWithOverwriteCheck(
-              (ow) => invoke("sftp_upload_file", { sessionId, localPath: p, remotePath: remote, overwrite: ow }),
-              name, "upload", paths.length, batch, overwritePrompt
-            );
-            if (res === "done") notify(`Uploaded ${name}`, "success");
-            if (res === "cancelled") { cancelled = true; notify("Upload batch cancelled", "info"); }
-          } catch (err: any) {
-            notify(`Upload failed: ${err}`, "error");
-          }
+        const trimmed = dir.replace(/\/+$/, "");
+        // Same batch path as the Upload button, so the whole drop shows in
+        // the transfers bar with the files still waiting as "Queued".
+        const items = await describeDroppedPaths(paths as string[]);
+        const dirCount = items.filter((it) => it.isDir).length;
+        const fileCount = items.length - dirCount;
+        notify(items.length === 1
+          ? `Uploading ${items[0].isDir ? "folder " : ""}${items[0].name}…`
+          : `Uploading ${fileCount} file${fileCount === 1 ? "" : "s"}${dirCount ? ` + ${dirCount} folder${dirCount === 1 ? "" : "s"}` : ""}…`, "info");
+        const { count, cancelled } = await runTransferBatch("upload", items, (it, transferId, overwrite) => {
+          // Folders go to the remote PARENT (sftp_upload_dir adds the name),
+          // files to their full remote path — same as uploadItems.
+          const remotePath = it.isDir ? trimmed || "/" : `${trimmed}/${it.name}`;
+          const cmd = it.isDir ? "sftp_upload_dir" : "sftp_upload_file";
+          return invoke(cmd, { sessionId, localPath: it.path, remotePath, overwrite, transferId });
+        });
+        if (count > 0) {
+          notify(items.length === 1 ? `Uploaded ${items[0].name}` : `Uploaded ${count} of ${items.length} items`, "success");
+        } else if (cancelled) {
+          notify("Upload batch cancelled", "info");
         }
         await fetch(dir);
       }
-    ).then((fn) => { unlisten = fn; });
-    return () => { if (unlisten) unlisten(); };
+    ).then((fn) => {
+      // Unmounted (or session changed) before listen() resolved.
+      if (!alive) {
+        fn();
+        return;
+      }
+      unlisten = fn;
+    });
+    return () => {
+      alive = false;
+      if (unlisten) unlisten();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
@@ -750,6 +812,66 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
 
   // ---- contextual actions -----------------------------------------------------
 
+  // Runs a download/upload batch one item at a time. Every item is queued
+  // first, so the transfers bar lists what is still waiting, and each item
+  // reserves its turn in the session's transfer slot right then, so this
+  // batch and any other one (or a cross-pane drag) never write at the same
+  // time and run in the order the bar lists them. The
+  // slot is held through the overwrite prompt: the EXISTS check and the
+  // write must not be split by another transfer to the same path. Each gets its
+  // transfer id up front and `run` passes it to the backend, so the bar
+  // links the item to its progress events by id and can cancel it before
+  // the first event. An item removed from the bar is skipped, also when that
+  // happens during the overwrite prompt: the prompt closes (queue signal)
+  // without latching an "all" choice, and the retry checks the queue again.
+  const runTransferBatch = async <T extends { name: string; isDir: boolean; size?: number }>(
+    kind: "download" | "upload",
+    items: T[],
+    run: (item: T, transferId: string, overwrite: boolean) => Promise<unknown>,
+  ): Promise<{ count: number; cancelled: boolean }> => {
+    if (!sessionId) return { count: 0, cancelled: false };
+    const batch: OverwriteBatch = { kind: "ask" };
+    const ids = enqueueTransfers(sessionId, items.map((it) => ({
+      name: it.name, kind, size: it.isDir ? undefined : it.size, isDir: it.isDir,
+    })));
+    let count = 0;
+    let cancelled = false;
+    try {
+      for (let i = 0; i < items.length && !cancelled; i++) {
+        const item = items[i];
+        const id = ids[i];
+        // The turn was reserved at enqueue time; null means the item was
+        // removed from the bar before its turn (the slot has moved on).
+        const release = await waitForTurn(id);
+        if (!release) continue;
+        // Removed from the bar while it waited for its turn.
+        if (!startQueued(sessionId, id)) { release(); continue; }
+        try {
+          const res = await transferWithOverwriteCheck(
+            async (overwrite) => {
+              if (!isQueued(sessionId, id)) throw "cancelled";
+              await run(item, id, overwrite);
+            },
+            item.name, kind, items.length, batch, overwritePrompt, queueSignal(id),
+          );
+          if (res === "done") count++;
+          if (res === "cancelled") cancelled = true;
+        } catch (err: any) {
+          // Cancelled from the transfers bar: its row already says so.
+          if (!String(err).endsWith("cancelled")) {
+            notify(`${kind === "download" ? "Download" : "Upload"} failed for ${item.name}: ${err}`, "error");
+          }
+        } finally {
+          dropQueued(sessionId, [id]);
+          release();
+        }
+      }
+    } finally {
+      dropQueued(sessionId, ids);
+    }
+    return { count, cancelled };
+  };
+
   // Remote → local download. Bulk-aware, folder-aware. Destination is
   // whatever the local pane is currently showing (`getOppositeDir`) — that's
   // almost always what the user wants and saves the round-trip through a
@@ -785,24 +907,11 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         ? `Downloading ${items[0].isDir ? "folder " : ""}${items[0].name}…`
         : `Downloading ${fileCount} files${dirCount ? ` + ${dirCount} folder${dirCount === 1 ? "" : "s"}` : ""}…`;
     notify(summary, "info");
-    const batch: OverwriteBatch = { kind: "ask" };
-    let count = 0;
-    let cancelled = false;
-    for (const e of items) {
-      if (cancelled) break;
-      try {
-        const dest = e.isDir ? trimmed : `${trimmed}${sep}${e.name}`;
-        const cmd = e.isDir ? "sftp_download_dir" : "sftp_download_file";
-        const res = await transferWithOverwriteCheck(
-          (ow) => invoke(cmd, { sessionId, remotePath: e.path, localPath: dest, overwrite: ow }),
-          e.name, "download", items.length, batch, overwritePrompt
-        );
-        if (res === "done") count++;
-        if (res === "cancelled") { cancelled = true; }
-      } catch (err: any) {
-        notify(`Download failed for ${e.name}: ${err}`, "error");
-      }
-    }
+    const { count, cancelled } = await runTransferBatch("download", items, (e, transferId, overwrite) => {
+      const dest = e.isDir ? trimmed : `${trimmed}${sep}${e.name}`;
+      const cmd = e.isDir ? "sftp_download_dir" : "sftp_download_file";
+      return invoke(cmd, { sessionId, remotePath: e.path, localPath: dest, overwrite, transferId });
+    });
     if (count > 0) {
       notify(items.length === 1 ? `Downloaded ${items[0].name}` : `Downloaded ${count} of ${items.length} items`, "success");
     } else if (cancelled) {
@@ -826,27 +935,14 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       ? `Uploading ${items[0].isDir ? "folder " : ""}${items[0].name}…`
       : `Uploading ${fileCount} file${fileCount === 1 ? "" : "s"}${dirCount ? ` + ${dirCount} folder${dirCount === 1 ? "" : "s"}` : ""}…`;
     notify(summary, "info");
-    const batch: OverwriteBatch = { kind: "ask" };
-    let count = 0;
-    let cancelled = false;
-    for (const e of items) {
-      if (cancelled) break;
-      try {
-        // For files we pass the remote target as a full file path; for dirs
-        // we pass the remote PARENT and sftp_upload_dir hangs the source
-        // basename underneath it (same convention as sftp_download_dir).
-        const remotePath = e.isDir ? trimmed : `${trimmed}/${e.name}`;
-        const cmd = e.isDir ? "sftp_upload_dir" : "sftp_upload_file";
-        const res = await transferWithOverwriteCheck(
-          (ow) => invoke(cmd, { sessionId, localPath: e.path, remotePath, overwrite: ow }),
-          e.name, "upload", items.length, batch, overwritePrompt
-        );
-        if (res === "done") count++;
-        if (res === "cancelled") { cancelled = true; }
-      } catch (err: any) {
-        notify(`Upload failed for ${e.name}: ${err}`, "error");
-      }
-    }
+    const { count, cancelled } = await runTransferBatch("upload", items, (e, transferId, overwrite) => {
+      // For files we pass the remote target as a full file path; for dirs
+      // we pass the remote PARENT and sftp_upload_dir hangs the source
+      // basename underneath it (same convention as sftp_download_dir).
+      const remotePath = e.isDir ? trimmed : `${trimmed}/${e.name}`;
+      const cmd = e.isDir ? "sftp_upload_dir" : "sftp_upload_file";
+      return invoke(cmd, { sessionId, localPath: e.path, remotePath, overwrite, transferId });
+    });
     if (count > 0) {
       notify(items.length === 1 ? `Uploaded ${items[0].name}` : `Uploaded ${count} of ${items.length} items`, "success");
     } else if (cancelled) {
@@ -1033,6 +1129,11 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
 
   const isRemote = provider.id === "remote";
   const showPerms = isRemote; // local entries don't carry perms here
+  // Every selected row is hidden by the name filter: the bar stays (so the
+  // selection can be cleared) but there is nothing to act on.
+  const noVisibleSelection = dirStats.selectedCount === 0;
+  // Selection-bar button. Taller on a phone so it is an easy tap target.
+  const actionBtn ="h-8 sm:h-7 min-w-8 px-2 sm:px-2.5 rounded-md border flex items-center justify-center gap-1.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed";
 
   const openDirProperties = async () => {
     if (!sessionId || !currentPath) return;
@@ -1101,36 +1202,6 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           <span className="px-3 py-1.5 bg-red-500/15 border border-red-500/30 rounded text-red-300">
             Session disconnected
           </span>
-        </div>
-      )}
-
-      {(notification || openJobs.length > 0) && (
-        // Bottom-right of the pane, not top-right — top-right used to sit
-        // on top of the path-bar header and obscure the first row of
-        // entries on a short pane. Bottom keeps the file list visible.
-        // The open-job row is its own element so a later notify() cannot
-        // take the cancel button with it.
-        <div className="absolute bottom-3 right-3 z-50 flex flex-col items-end gap-1.5 max-w-[80%]">
-          {notification && (
-            <div className={`px-3 py-1.5 rounded-lg border text-[11px] font-mono shadow-2xl backdrop-blur-md animate-in fade-in slide-in-from-bottom-4 duration-300 ${
-              notification.type === "success" ? "bg-emerald-950/90 border-emerald-500/30 text-emerald-400" :
-              notification.type === "error"   ? "bg-rose-950/90 border-rose-500/30 text-rose-400" :
-                                                "bg-indigo-950/90 border-indigo-500/30 text-indigo-400"
-            }`}>{notification.msg}</div>
-          )}
-          {openJobs.map((job) => (
-            <div key={job.transferId} className="px-3 py-1.5 rounded-lg border text-[11px] font-mono shadow-2xl backdrop-blur-md bg-indigo-950/90 border-indigo-500/30 text-indigo-400 flex items-center gap-2">
-              <span className="min-w-0">Opening {job.name} in default editor…</span>
-              <button
-                type="button"
-                title="Cancel"
-                onClick={() => cancelOpenDownload(job.transferId)}
-                className="shrink-0 p-0.5 rounded hover:bg-white/15 text-zinc-300 hover:text-rose-300"
-              >
-                <X size={12} />
-              </button>
-            </div>
-          ))}
         </div>
       )}
 
@@ -1333,68 +1404,19 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         )}
       </div>
 
-      {/* Bulk action bar — shows for any non-empty selection so the user can
-          send / move / delete with one click without right-clicking. It is a
-          FLOATING overlay (absolute, pinned bottom-center) rather than a flex
-          sibling, so its appearance never pushes the file list down — the rows
-          stay exactly where they are when a selection starts. */}
-      {selected.size > 0 && (
-        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 max-w-[calc(100%-1rem)] flex flex-wrap items-center justify-center gap-1.5 px-2.5 py-1.5 bg-indigo-950/95 border border-indigo-500/40 rounded-lg shadow-2xl shadow-black/50 backdrop-blur-md text-[10.5px] text-indigo-100 font-mono">
-          <span className="font-bold uppercase tracking-wider text-[9.5px] text-indigo-300 shrink-0">
-            {selected.size} selected
-          </span>
-          <div className="flex-1" />
-          {isRemote && (
-            <button
-              onClick={() => downloadItems(sortedEntries.filter(e => selected.has(e.path)))}
-              title={getOppositeDir?.()
-                ? `Download to ${getOppositeDir!()}`
-                : "Pick a destination folder…"}
-              className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25 flex items-center gap-1"
-            >
-              <Download size={10} /> Download
-            </button>
-          )}
-          {!isRemote && (
-            <button
-              onClick={() => uploadItems(sortedEntries.filter(e => selected.has(e.path)))}
-              title={getOppositeDir?.()
-                ? `Upload to ${getOppositeDir!()}`
-                : "Open a remote directory first…"}
-              disabled={!getOppositeDir?.()}
-              className="px-2 py-0.5 rounded bg-sky-500/15 text-sky-300 hover:bg-sky-500/25 flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              <Upload size={10} /> Upload
-            </button>
-          )}
-          <button
-            onClick={() => setModal({ type: "move-bulk", v1: currentPath })}
-            className="px-2 py-0.5 rounded bg-white/5 text-zinc-200 hover:bg-white/10 flex items-center gap-1"
-          >
-            <Move size={10} /> Move…
-          </button>
-          <button
-            onClick={() => removeItems(sortedEntries.filter(e => selected.has(e.path)))}
-            className="px-2 py-0.5 rounded bg-rose-500/15 text-rose-300 hover:bg-rose-500/25 flex items-center gap-1"
-          >
-            <Trash2 size={10} /> Delete
-          </button>
-          <button
-            onClick={() => { setSelected(new Set()); lastSelectedPathRef.current = null; }}
-            className="px-2 py-0.5 rounded bg-white/5 text-zinc-400 hover:bg-white/10 flex items-center gap-1"
-          >
-            <X size={10} /> Clear
-          </button>
-        </div>
-      )}
-
+      {/* File card: the scrolling list, then the docked selection bar. The
+          bar is a flex sibling of the list, so it shortens the list instead
+          of covering the last rows. (The transfers bar lives on the
+          SftpWorkspace root, so it stays visible on the Mirror tab too.) */}
+      <div className={`flex-1 min-h-0 flex flex-col border rounded-lg bg-[#121214] overflow-hidden transition-colors duration-200 shadow-2xl shadow-indigo-950/10 ${dragOver ? "border-indigo-400" : "border-indigo-500/30"}`}>
+      <div className="relative flex-1 min-h-0 flex flex-col">
       {/* List */}
       <div
         ref={dropTargetRef}
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}
         onDrop={onDrop}
-        className={`flex-1 border rounded-lg bg-[#121214] flex flex-col overflow-auto transition-all duration-200 border-indigo-500/30 shadow-2xl shadow-indigo-950/10 ${dragOver ? "border-indigo-400 bg-indigo-950/10" : ""}`}
+        className={`flex-1 min-h-0 flex flex-col overflow-auto transition-colors duration-200 ${dragOver ? "bg-indigo-950/10" : ""}`}
       >
         {/* The select column is conditionally injected — only present when
             there's at least one selected row. With nothing selected the row
@@ -1591,6 +1613,113 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         </div>
       </div>
 
+      {(notification || openJobs.length > 0) && (
+        // Bottom-right of the list area: never over the path bar, and never
+        // over the docked selection bar below the list. The
+        // open-job row is its own element so a later notify() cannot take
+        // the cancel button with it.
+        <div className="absolute bottom-2 right-2 left-2 z-30 flex flex-col items-end gap-1.5 pointer-events-none">
+          {notification && (
+            <div className={`pointer-events-auto max-w-full px-3 py-1.5 rounded-lg border text-[11px] font-mono shadow-2xl backdrop-blur-md animate-in fade-in slide-in-from-bottom-4 duration-300 ${
+              notification.type === "success" ? "bg-emerald-950/90 border-emerald-500/30 text-emerald-400" :
+              notification.type === "error"   ? "bg-rose-950/90 border-rose-500/30 text-rose-400" :
+                                                "bg-indigo-950/90 border-indigo-500/30 text-indigo-400"
+            }`}>{notification.msg}</div>
+          )}
+          {openJobs.map((job) => (
+            <div key={job.transferId} className="pointer-events-auto max-w-full px-3 py-1.5 rounded-lg border text-[11px] font-mono shadow-2xl backdrop-blur-md bg-indigo-950/90 border-indigo-500/30 text-indigo-400 flex items-center gap-2">
+              <span className="min-w-0">Opening {job.name} in default editor…</span>
+              <button
+                type="button"
+                title="Cancel"
+                onClick={() => cancelOpenDownload(job.transferId)}
+                className="shrink-0 p-0.5 rounded hover:bg-white/15 text-zinc-300 hover:text-rose-300"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      </div>
+
+      {/* Selection bar — docked at the bottom of the card for any non-empty
+          selection, so send / move / delete is one click without a
+          right-click. The bar is a size container: when the PANEL (not the
+          window) is narrow the buttons drop their labels (see
+          `.selection-bar` in App.css), and they wrap rather than clip on the
+          narrowest side panel; the title still names the action. The count
+          and size are of the visible selected rows, which is what the
+          actions act on; rows hidden by the name filter are only noted. */}
+      {selected.size > 0 && (
+        <div className="selection-bar shrink-0 flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-1.5 border-t border-indigo-500/25 bg-indigo-950/25 font-mono text-[10.5px]">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 min-w-0">
+            <span className="font-bold text-zinc-100 whitespace-nowrap">{dirStats.selectedCount} selected</span>
+            {dirStats.selectedBytes > 0 && (
+              <>
+                <span className="w-px h-3 bg-white/15 shrink-0" />
+                <span className="text-zinc-400 whitespace-nowrap">{formatSize(dirStats.selectedBytes)}</span>
+              </>
+            )}
+            {selected.size > dirStats.selectedCount && (
+              <span className="text-zinc-500 whitespace-nowrap" title="Selected rows the name filter hides; actions skip them">
+                +{selected.size - dirStats.selectedCount} hidden by filter
+              </span>
+            )}
+          </div>
+          <div className="ml-auto flex flex-wrap justify-end items-center gap-1.5">
+            {isRemote ? (
+              <button
+                onClick={() => downloadItems(sortedEntries.filter(e => selected.has(e.path)))}
+                title={getOppositeDir?.()
+                  ? `Download to ${getOppositeDir!()}`
+                  : "Pick a destination folder…"}
+                disabled={noVisibleSelection}
+                className={`${actionBtn} border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20`}
+              >
+                <Download size={12} /> <span className="selection-bar-label">Download</span>
+              </button>
+            ) : (
+              <button
+                onClick={() => uploadItems(sortedEntries.filter(e => selected.has(e.path)))}
+                title={getOppositeDir?.()
+                  ? `Upload to ${getOppositeDir!()}`
+                  : "Open a remote directory first…"}
+                disabled={noVisibleSelection || !getOppositeDir?.()}
+                className={`${actionBtn} border-sky-500/30 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20`}
+              >
+                <Upload size={12} /> <span className="selection-bar-label">Upload</span>
+              </button>
+            )}
+            <button
+              onClick={() => setModal({ type: "move-bulk", v1: currentPath })}
+              title="Move selected items…"
+              disabled={noVisibleSelection}
+              className={`${actionBtn} border-white/10 bg-white/[0.04] text-zinc-200 hover:bg-white/10`}
+            >
+              <Move size={12} /> <span className="selection-bar-label">Move…</span>
+            </button>
+            <button
+              onClick={() => removeItems(sortedEntries.filter(e => selected.has(e.path)))}
+              title="Delete selected items"
+              disabled={noVisibleSelection}
+              className={`${actionBtn} border-rose-500/30 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20`}
+            >
+              <Trash2 size={12} /> <span className="selection-bar-label">Delete</span>
+            </button>
+            <button
+              onClick={clearSelection}
+              title="Clear selection"
+              className={`${actionBtn} border-white/10 bg-white/[0.04] text-zinc-400 hover:bg-white/10 hover:text-zinc-200`}
+            >
+              <X size={12} /> <span className="selection-bar-label">Clear</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      </div>
+
       <div
         className="shrink-0 h-7 px-2.5 flex items-center justify-between gap-3 rounded-lg border border-white/5 bg-[#121214] font-mono text-[10.5px] text-zinc-500"
         title="Size counts files in this directory only, not files inside subfolders"
@@ -1613,11 +1742,12 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           </span>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <span>
+          {/* On a phone the selection bar already shows this. */}
+          <span className="hidden sm:inline">
             Selected{" "}
             <span className="text-zinc-100">{dirStats.selectedCount} · {formatSize(dirStats.selectedBytes)}</span>
           </span>
-          <span className="w-px h-3 bg-white/10" />
+          <span className="hidden sm:block w-px h-3 bg-white/10" />
           <span>
             Total size{" "}
             <span className="text-zinc-100">{formatSize(dirStats.totalBytes)}</span>
@@ -1782,7 +1912,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                  modal.type === "newfile" ? "New File" :
                  modal.type === "symlink" ? "New Symbolic Link" :
                  modal.type === "move" ? "Move to…" :
-                 modal.type === "move-bulk" ? `Move ${selected.size} items to…` : "Properties"}
+                 modal.type === "move-bulk" ? `Move ${dirStats.selectedCount} items to…` : "Properties"}
               </span>
               <button onClick={() => setModal(null)} className="text-zinc-500 hover:text-white"><X size={12} /></button>
             </div>

@@ -114,6 +114,21 @@ select optgroup {
   100% { transform: translateX(360%); }
 }
 
+/* SFTP selection bar. Sized by the file panel, not the window: the SFTP side
+   panel can be 240px wide on a wide screen. With labels the row needs about
+   520px; below that the buttons show icons only (the title names the
+   action), and the flex row wraps on the narrowest panels. Tailwind 3.4
+   here has no container-query plugin, hence plain CSS. */
+.selection-bar {
+  container-type: inline-size;
+}
+
+@container (max-width: 519px) {
+  .selection-bar-label {
+    display: none;
+  }
+}
+
 /* ==========================================================================
    BULLETPROOF THEMED SCROLLBAR OVERRIDES
    ========================================================================== */

@@ -7910,10 +7910,15 @@ async fn sftp_download_file(
     remote_path: String,
     local_path: String,
     overwrite: Option<bool>,
+    transfer_id: Option<String>,
 ) -> Result<(), String> {
     use tauri::Emitter;
     use tokio::io::AsyncReadExt;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::Ordering;
+
+    // A long download can be stopped from the UI; see register_transfer_cancel.
+    let id = transfer_id.unwrap_or_else(crate::transfer_id);
+    let (cancel, _guard) = register_transfer_cancel(&state, &id).await;
 
     // Overwrite protection: when the caller has NOT explicitly opted in
     // (overwrite==Some(true)), refuse to clobber an existing local file.
@@ -7931,6 +7936,13 @@ async fn sftp_download_file(
     // destination file is being created right now.
     let _guarded_local = guard_local_path(&local_path, true)?;
 
+    // Wait out an editor save, an open or the mirror on this remote file, so
+    // we never read it halfway through a rewrite, and on the local file, so
+    // the mirror cannot rename its copy over the one File::create is writing.
+    // Held until the download ends. Order: remote, then local.
+    let _file_lock = lock_remote_file_cancellable(&session_id, &remote_path, &cancel).await?;
+    let _local_lock = lock_local_file_cancellable(std::path::Path::new(&local_path), &cancel).await?;
+
     let sftp = get_sftp_session(&state, &session_id).await?;
 
     // Stat first so we can report a progress percentage. If the server doesn't
@@ -7945,7 +7957,6 @@ async fn sftp_download_file(
         .and_then(|n| n.to_str())
         .unwrap_or("file")
         .to_string();
-    let id = transfer_id();
     let event_name = format!("sftp-transfer-{}", session_id);
     let emit_progress = |bytes: u64, status: &str, error: Option<String>| {
         let _ = app.emit(
@@ -7958,27 +7969,12 @@ async fn sftp_download_file(
         );
     };
 
-    // Register a cancel flag the user can flip via `sftp_cancel_transfer`.
-    // RAII-removed at the end so the map doesn't pile up across many
-    // sequential transfers.
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancels_map = Arc::clone(&state.transfer_cancels);
-    cancels_map.lock().await.insert(id.clone(), Arc::clone(&cancel));
-    struct CancelGuard {
-        map: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>>,
-        id: String,
+    // Cancelled while starting: stop before File::create truncates a local
+    // file the user chose to overwrite.
+    if cancel.load(Ordering::Relaxed) {
+        emit_progress(0, "cancelled", None);
+        return Err("cancelled".into());
     }
-    impl Drop for CancelGuard {
-        fn drop(&mut self) {
-            // Best-effort cleanup; if the lock is contended we'd rather leak
-            // a slot than block the drop, but in practice this never blocks.
-            if let Ok(mut g) = self.map.try_lock() {
-                g.remove(&self.id);
-            }
-        }
-    }
-    let _guard = CancelGuard { map: Arc::clone(&cancels_map), id: id.clone() };
-
     emit_progress(0, "progress", None);
 
     let mut remote_file = sftp
@@ -8023,7 +8019,12 @@ async fn sftp_download_file(
             last_report = std::time::Instant::now();
         }
     }
-    local_file.flush().await.map_err(|e| format!("flush: {}", e))?;
+    // Every exit emits a terminal event; without one the transfers bar would
+    // show this download as running forever.
+    local_file
+        .flush()
+        .await
+        .map_err(|e| { emit_progress(transferred, "error", Some(e.to_string())); format!("flush: {}", e) })?;
     emit_progress(transferred, "done", None);
     Ok(())
 }
@@ -8042,10 +8043,16 @@ async fn sftp_download_dir(
     remote_path: String,
     local_path: String,
     overwrite: Option<bool>,
+    transfer_id: Option<String>,
 ) -> Result<(), String> {
     use tauri::Emitter;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::Ordering;
+
+    // Registered first so the user can abort while the transfer is starting
+    // and during the enumeration phase (slow on a deep tree with many dirs).
+    let id = transfer_id.unwrap_or_else(crate::transfer_id);
+    let (cancel, _guard) = register_transfer_cancel(&state, &id).await;
 
     // Destination is the PARENT directory. We'll create remote_path's
     // basename underneath it so the user gets `local/{folder}/...`,
@@ -8080,26 +8087,7 @@ async fn sftp_download_dir(
         .to_string();
     let folder_name = if folder_name.is_empty() { "folder".to_string() } else { folder_name };
 
-    let id = transfer_id();
     let event_name = format!("sftp-transfer-{}", session_id);
-
-    // Register cancel flag early so the user can abort even during the
-    // enumeration phase (which can be slow on a deep tree with many dirs).
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancels_map = Arc::clone(&state.transfer_cancels);
-    cancels_map.lock().await.insert(id.clone(), Arc::clone(&cancel));
-    struct CancelGuard {
-        map: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>>,
-        id: String,
-    }
-    impl Drop for CancelGuard {
-        fn drop(&mut self) {
-            if let Ok(mut g) = self.map.try_lock() {
-                g.remove(&self.id);
-            }
-        }
-    }
-    let _guard = CancelGuard { map: Arc::clone(&cancels_map), id: id.clone() };
 
     let id_for_emit = id.clone();
     let name_for_emit = folder_name.clone();
@@ -8206,6 +8194,29 @@ async fn sftp_download_dir(
             }
         }
 
+        // Per-file locks, like a single download (remote, then local): an
+        // editor save or the mirror waits for this file, and we wait for
+        // one of theirs that is running.
+        let _file_lock = match lock_remote_file_cancellable(&session_id, remote_file_path, &cancel).await {
+            Ok(guard) => guard,
+            Err(e) => {
+                emit_progress(transferred, total_bytes, "cancelled", None);
+                return Err(e);
+            }
+        };
+        let _local_lock = match lock_local_file_cancellable(&dest, &cancel).await {
+            Ok(guard) => guard,
+            Err(e) => {
+                emit_progress(transferred, total_bytes, "cancelled", None);
+                return Err(e);
+            }
+        };
+        // Last check before File::create below empties an existing file
+        // (overwrite is confirmed once for the whole folder).
+        if cancel.load(Ordering::Relaxed) {
+            emit_progress(transferred, total_bytes, "cancelled", None);
+            return Err("cancelled".into());
+        }
         let mut remote_file = match sftp.open(remote_file_path).await {
             Ok(f) => f,
             Err(e) => {
@@ -8249,7 +8260,10 @@ async fn sftp_download_dir(
                 last_report = std::time::Instant::now();
             }
         }
-        local_file.flush().await.map_err(|e| format!("flush {}: {}", dest.display(), e))?;
+        local_file.flush().await.map_err(|e| {
+            emit_progress(transferred, total_bytes, "error", Some(format!("flush {}: {}", dest.display(), e)));
+            format!("flush {}: {}", dest.display(), e)
+        })?;
     }
 
     emit_progress(transferred, total_bytes, "done", None);
@@ -8264,11 +8278,24 @@ async fn sftp_upload_file(
     local_path: String,
     remote_path: String,
     overwrite: Option<bool>,
+    transfer_id: Option<String>,
 ) -> Result<(), String> {
     use russh_sftp::protocol::OpenFlags;
     use tauri::Emitter;
     use tokio::io::AsyncWriteExt;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::Ordering;
+
+    // Symmetric to sftp_download_file: registered before the overwrite
+    // check, so a Cancel while the upload is starting is not lost.
+    let id = transfer_id.unwrap_or_else(crate::transfer_id);
+    let (cancel, _guard) = register_transfer_cancel(&state, &id).await;
+
+    // Held from the EXISTS check to the end of the write: an editor save or
+    // the mirror cannot write or replace this remote file alongside us, and
+    // the mirror cannot swap the local source mid-read. Order: remote, then
+    // local.
+    let _file_lock = lock_remote_file_cancellable(&session_id, &remote_path, &cancel).await?;
+    let _local_lock = lock_local_file_cancellable(std::path::Path::new(&local_path), &cancel).await?;
 
     // Overwrite protection: stat the remote target first; refuse if it
     // exists and the caller hasn't explicitly opted in. Same `EXISTS:<path>`
@@ -8293,7 +8320,6 @@ async fn sftp_upload_file(
         .and_then(|n| n.to_str())
         .unwrap_or("file")
         .to_string();
-    let id = transfer_id();
     let event_name = format!("sftp-transfer-{}", session_id);
     let emit_progress = |bytes: u64, status: &str, error: Option<String>| {
         let _ = app.emit(
@@ -8306,24 +8332,12 @@ async fn sftp_upload_file(
         );
     };
 
-    // Symmetric to sftp_download_file: register a cancel flag and clean it
-    // up via RAII so a long-running upload can be stopped from the UI.
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancels_map = Arc::clone(&state.transfer_cancels);
-    cancels_map.lock().await.insert(id.clone(), Arc::clone(&cancel));
-    struct CancelGuard {
-        map: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>>,
-        id: String,
+    // Cancelled while starting: stop before the truncating open below
+    // empties a remote file the user chose to overwrite.
+    if cancel.load(Ordering::Relaxed) {
+        emit_progress(0, "cancelled", None);
+        return Err("cancelled".into());
     }
-    impl Drop for CancelGuard {
-        fn drop(&mut self) {
-            if let Ok(mut g) = self.map.try_lock() {
-                g.remove(&self.id);
-            }
-        }
-    }
-    let _guard = CancelGuard { map: Arc::clone(&cancels_map), id: id.clone() };
-
     emit_progress(0, "progress", None);
 
     // Stream the file from disk in chunks rather than slurping the whole thing
@@ -8371,7 +8385,7 @@ async fn sftp_upload_file(
     remote_file
         .shutdown()
         .await
-        .map_err(|e| format!("Failed to close remote file: {}", e))?;
+        .map_err(|e| { emit_progress(transferred, "error", Some(e.to_string())); format!("Failed to close remote file: {}", e) })?;
     emit_progress(transferred, "done", None);
     Ok(())
 }
@@ -8389,11 +8403,17 @@ async fn sftp_upload_dir(
     local_path: String,
     remote_path: String,
     overwrite: Option<bool>,
+    transfer_id: Option<String>,
 ) -> Result<(), String> {
     use russh_sftp::protocol::OpenFlags;
     use tauri::Emitter;
     use tokio::io::AsyncWriteExt;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::Ordering;
+
+    // Registered first so the user can abort while the upload is starting
+    // and while we're walking a deep tree.
+    let id = transfer_id.unwrap_or_else(crate::transfer_id);
+    let (cancel, _guard) = register_transfer_cancel(&state, &id).await;
 
     // remote_path is the PARENT directory; we hang the basename of
     // local_path underneath it. Matches scp -r / sftp_download_dir.
@@ -8420,26 +8440,7 @@ async fn sftp_upload_dir(
         }
     }
 
-    let id = transfer_id();
     let event_name = format!("sftp-transfer-{}", session_id);
-
-    // Cancel flag registered before the slow enumeration so the user can
-    // abort even while we're walking a deep tree.
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancels_map = Arc::clone(&state.transfer_cancels);
-    cancels_map.lock().await.insert(id.clone(), Arc::clone(&cancel));
-    struct CancelGuard {
-        map: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>>,
-        id: String,
-    }
-    impl Drop for CancelGuard {
-        fn drop(&mut self) {
-            if let Ok(mut g) = self.map.try_lock() {
-                g.remove(&self.id);
-            }
-        }
-    }
-    let _guard = CancelGuard { map: Arc::clone(&cancels_map), id: id.clone() };
 
     let id_for_emit = id.clone();
     let name_for_emit = folder_name.clone();
@@ -8546,6 +8547,28 @@ async fn sftp_upload_dir(
         }
         let remote_full = format!("{}/{}", remote_root.trim_end_matches('/'), rel);
 
+        // Per-file locks, like a single upload (remote, then local): never
+        // TRUNCATE a file an editor save or the mirror is writing, and make
+        // theirs wait for ours.
+        let _file_lock = match lock_remote_file_cancellable(&session_id, &remote_full, &cancel).await {
+            Ok(guard) => guard,
+            Err(e) => {
+                emit_progress(transferred, total_bytes, "cancelled", None);
+                return Err(e);
+            }
+        };
+        let _local_lock = match lock_local_file_cancellable(local_file_path, &cancel).await {
+            Ok(guard) => guard,
+            Err(e) => {
+                emit_progress(transferred, total_bytes, "cancelled", None);
+                return Err(e);
+            }
+        };
+        // Last check before the TRUNCATE open below empties the remote file.
+        if cancel.load(Ordering::Relaxed) {
+            emit_progress(transferred, total_bytes, "cancelled", None);
+            return Err("cancelled".into());
+        }
         let mut local_file = match tokio::fs::File::open(local_file_path).await {
             Ok(f) => f,
             Err(e) => {
@@ -8591,8 +8614,10 @@ async fn sftp_upload_dir(
                 last_report = std::time::Instant::now();
             }
         }
-        remote_file.shutdown().await
-            .map_err(|e| format!("shutdown {}: {}", remote_full, e))?;
+        remote_file.shutdown().await.map_err(|e| {
+            emit_progress(transferred, total_bytes, "error", Some(format!("shutdown {}: {}", remote_full, e)));
+            format!("shutdown {}: {}", remote_full, e)
+        })?;
     }
 
     emit_progress(transferred, total_bytes, "done", None);
@@ -8601,17 +8626,17 @@ async fn sftp_upload_dir(
 
 /// Flip the cancel flag for an in-flight SFTP transfer. The download / upload
 /// loop polls the flag every chunk (every ~256 KiB) and exits with a
-/// "cancelled" status event as soon as it sees true. Unknown ids are a no-op
-/// — by the time the UI's stop button click reaches us the transfer may have
-/// already finished on its own.
+/// "cancelled" status event as soon as it sees true. An unknown id is
+/// remembered (see `early_cancels`): the command may not have registered
+/// yet, and the flag then starts out set. If the transfer had already
+/// finished, the entry just expires.
 #[tauri::command]
 async fn sftp_cancel_transfer(
     state: tauri::State<'_, SshState>,
     transfer_id: String,
 ) -> Result<(), String> {
-    if let Some(flag) = state.transfer_cancels.lock().await.get(&transfer_id) {
-        flag.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
+    let registered = state.transfer_cancels.lock().await;
+    cancel_or_remember(&registered, &mut lock_early_cancels(), &transfer_id, std::time::Instant::now());
     Ok(())
 }
 
@@ -8786,6 +8811,292 @@ fn transfer_id() -> String {
     format!("{}-{}", ts, seq)
 }
 
+/// Per-file locks, one per remote file (session + path) and one per local
+/// file. Everything that reads or writes a file takes the lock of each file
+/// it touches: manual uploads/downloads (also each file inside a folder
+/// transfer), the live-edit save (`upload_editor_copy`) and open, and the
+/// mirror's uploads, downloads and remote deletes (`mirror.rs`). The
+/// frontend's transfer slot only orders UI transfers; the others start in
+/// Rust. Without the lock an editor save could TRUNCATE and write a file a
+/// batch upload is writing (mixed chunks on the server), an open could read
+/// a file a batch is halfway through rewriting, and the mirror could swap
+/// its own copy in under the name a transfer is writing, on either side.
+/// Entries are weak, so a lock nobody holds or waits on is freed.
+///
+/// The locks follow the tree. Locking a path takes a shared (read) lock on
+/// every parent folder, root first, then the exclusive (write) lock on the
+/// path itself. So an operation on a folder (the mirror's soft delete
+/// renames a whole folder into its trash) waits until no transfer holds a
+/// file anywhere below it, and a transfer below it waits until that
+/// operation is done. Operations on siblings still run side by side.
+///
+/// Lock order, to rule out deadlock: live-edit entry, then the remote
+/// path's chain, then the local path's chain, each from the root down.
+/// Nothing takes them the other way round.
+type FileLock = Arc<tokio::sync::RwLock<()>>;
+
+/// Held for one path: shared locks on its parent folders and the exclusive
+/// lock on the path. The path's own lock is released first (field order).
+struct FileLockGuard {
+    _own: tokio::sync::OwnedRwLockWriteGuard<()>,
+    _parents: Vec<tokio::sync::OwnedRwLockReadGuard<()>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum FileLockKey {
+    Remote(String, String),
+    Local(String),
+}
+
+impl FileLockKey {
+    /// The keys of this path's parent folders, root first, then this key.
+    fn chain(&self) -> Vec<FileLockKey> {
+        match self {
+            FileLockKey::Remote(session, path) => path_prefixes(path)
+                .into_iter()
+                .map(|p| FileLockKey::Remote(session.clone(), p))
+                .collect(),
+            FileLockKey::Local(path) => path_prefixes(path).into_iter().map(FileLockKey::Local).collect(),
+        }
+    }
+}
+
+/// "/a/b/c" → ["/", "/a", "/a/b", "/a/b/c"]; "c:/w/f" → ["c:", "c:/w", "c:/w/f"].
+/// Expects a path from `collapse_slashes`.
+fn path_prefixes(path: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut acc = String::new();
+    if path.starts_with('/') {
+        acc.push('/');
+        out.push(acc.clone());
+    }
+    for seg in path.split('/').filter(|s| !s.is_empty()) {
+        if !acc.is_empty() && !acc.ends_with('/') {
+            acc.push('/');
+        }
+        acc.push_str(seg);
+        out.push(acc.clone());
+    }
+    if out.is_empty() {
+        out.push(path.to_string());
+    }
+    out
+}
+
+fn file_locks() -> &'static StdMutex<std::collections::HashMap<FileLockKey, std::sync::Weak<tokio::sync::RwLock<()>>>> {
+    static MAP: std::sync::OnceLock<StdMutex<std::collections::HashMap<FileLockKey, std::sync::Weak<tokio::sync::RwLock<()>>>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
+}
+
+/// Collapses repeated '/' and drops a trailing one (keeping a bare root).
+fn collapse_slashes(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for ch in path.chars() {
+        if ch == '/' && out.ends_with('/') {
+            continue;
+        }
+        out.push(ch);
+    }
+    while out.len() > 1 && out.ends_with('/') {
+        out.pop();
+    }
+    out
+}
+
+/// Same remote file, same key: repeated slashes and a trailing slash do not
+/// make a different lock.
+fn remote_lock_key(session_id: &str, remote_path: &str) -> FileLockKey {
+    FileLockKey::Remote(session_id.to_string(), collapse_slashes(remote_path))
+}
+
+/// Same local file, same key: either separator, repeated separators, and
+/// (on Windows, whose file names are case-insensitive) any letter case.
+fn local_lock_key(local_path: &std::path::Path) -> FileLockKey {
+    let path = collapse_slashes(&local_path.to_string_lossy().replace('\\', "/"));
+    FileLockKey::Local(if cfg!(windows) { path.to_lowercase() } else { path })
+}
+
+fn file_lock(key: FileLockKey) -> FileLock {
+    let mut map = file_locks().lock().unwrap_or_else(|err| err.into_inner());
+    map.retain(|_, weak| weak.strong_count() > 0);
+    if let Some(lock) = map.get(&key).and_then(|weak| weak.upgrade()) {
+        return lock;
+    }
+    let lock: FileLock = Arc::new(tokio::sync::RwLock::new(()));
+    map.insert(key, Arc::downgrade(&lock));
+    lock
+}
+
+/// Takes the path's chain (see `FileLock`): shared on each parent, root
+/// first, then exclusive on the path. With `cancel`, gives up with
+/// "cancelled" when the flag is set while waiting.
+async fn acquire_file_lock(
+    key: FileLockKey,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<FileLockGuard, String> {
+    let chain = key.chain();
+    let (own_key, parent_keys) = chain.split_last().expect("a lock chain ends with its own key");
+    let mut parents = Vec::with_capacity(parent_keys.len());
+    for parent in parent_keys {
+        parents.push(until_cancelled(file_lock(parent.clone()).read_owned(), cancel).await?);
+    }
+    let own = until_cancelled(file_lock(own_key.clone()).write_owned(), cancel).await?;
+    Ok(FileLockGuard { _own: own, _parents: parents })
+}
+
+async fn until_cancelled<F: std::future::Future>(
+    fut: F,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<F::Output, String> {
+    let Some(cancel) = cancel else {
+        return Ok(fut.await);
+    };
+    let cancelled = || cancel.load(std::sync::atomic::Ordering::Relaxed);
+    if cancelled() {
+        return Err("cancelled".to_string());
+    }
+    tokio::pin!(fut);
+    loop {
+        tokio::select! {
+            out = &mut fut => {
+                // The flag is otherwise read only on the 100 ms tick. A
+                // Cancel that landed while we waited, with the lock handed
+                // over before the next tick, must still win: the caller's
+                // next step may be a TRUNCATE or File::create. Dropping
+                // `out` here releases what was just acquired.
+                if cancelled() {
+                    return Err("cancelled".to_string());
+                }
+                return Ok(out);
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                if cancelled() {
+                    return Err("cancelled".to_string());
+                }
+            }
+        }
+    }
+}
+
+/// Waits for the remote path's lock. Used where there is no cancel button
+/// (editor save, mirror); it simply goes after whatever holds the path, a
+/// file below it, or a folder above it.
+async fn lock_remote_file(session_id: &str, remote_path: &str) -> FileLockGuard {
+    acquire_file_lock(remote_lock_key(session_id, remote_path), None)
+        .await
+        .expect("waiting without a cancel flag cannot be cancelled")
+}
+
+/// Waits for the local path's lock (see `lock_remote_file`).
+async fn lock_local_file(local_path: &std::path::Path) -> FileLockGuard {
+    acquire_file_lock(local_lock_key(local_path), None)
+        .await
+        .expect("waiting without a cancel flag cannot be cancelled")
+}
+
+/// Waits for the remote path's lock, giving up with "cancelled" when the
+/// transfer's cancel flag is set meanwhile (the row shows Starting while it
+/// waits, and its Cancel must still work).
+async fn lock_remote_file_cancellable(
+    session_id: &str,
+    remote_path: &str,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<FileLockGuard, String> {
+    acquire_file_lock(remote_lock_key(session_id, remote_path), Some(cancel)).await
+}
+
+/// Local-path counterpart of `lock_remote_file_cancellable`.
+async fn lock_local_file_cancellable(
+    local_path: &std::path::Path,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<FileLockGuard, String> {
+    acquire_file_lock(local_lock_key(local_path), Some(cancel)).await
+}
+
+/// Removes a transfer's cancel flag from `transfer_cancels` when dropped.
+struct TransferCancelGuard {
+    map: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    id: String,
+}
+
+impl Drop for TransferCancelGuard {
+    fn drop(&mut self) {
+        // Best-effort cleanup; if the lock is contended we'd rather leak a
+        // slot than block the drop, but in practice this never blocks.
+        if let Ok(mut g) = self.map.try_lock() {
+            g.remove(&self.id);
+        }
+    }
+}
+
+type TransferCancelMap = std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>;
+
+/// Cancels that arrived for an id no command has registered yet: the
+/// frontend creates the id and can send Cancel while the invoke is still on
+/// its way. The registering command picks the entry up. Entries whose
+/// command never comes (the batch skipped the item, or it had already
+/// finished) are pruned after `EARLY_CANCEL_TTL`.
+const EARLY_CANCEL_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+fn early_cancels() -> &'static StdMutex<std::collections::HashMap<String, std::time::Instant>> {
+    static MAP: std::sync::OnceLock<StdMutex<std::collections::HashMap<String, std::time::Instant>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
+}
+
+/// Flip the flag of a registered transfer, or remember the cancel for when
+/// the command registers. Called with the `transfer_cancels` lock held, so
+/// it cannot interleave with `take_transfer_cancel`.
+fn cancel_or_remember(
+    registered: &TransferCancelMap,
+    early: &mut std::collections::HashMap<String, std::time::Instant>,
+    id: &str,
+    now: std::time::Instant,
+) {
+    early.retain(|_, at| now.duration_since(*at) < EARLY_CANCEL_TTL);
+    match registered.get(id) {
+        Some(flag) => flag.store(true, std::sync::atomic::Ordering::Relaxed),
+        None => {
+            early.insert(id.to_string(), now);
+        }
+    }
+}
+
+/// The flag a starting command registers: already `true` when a Cancel for
+/// this id came in first. Called with the `transfer_cancels` lock held.
+fn take_transfer_cancel(
+    registered: &mut TransferCancelMap,
+    early: &mut std::collections::HashMap<String, std::time::Instant>,
+    id: &str,
+) -> Arc<std::sync::atomic::AtomicBool> {
+    let cancelled = early.remove(id).is_some();
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(cancelled));
+    registered.insert(id.to_string(), Arc::clone(&flag));
+    flag
+}
+
+fn lock_early_cancels() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, std::time::Instant>> {
+    early_cancels().lock().unwrap_or_else(|err| err.into_inner())
+}
+
+/// Registers the cancel flag of one upload/download under `id`. The transfer
+/// commands call this before anything else (overwrite check, SFTP channel).
+/// The frontend passes its own id for batch items, so it can cancel an item
+/// before the first progress event arrives; a Cancel that beats this call
+/// is waiting in `early_cancels` and the flag starts out set.
+async fn register_transfer_cancel(
+    state: &SshState,
+    id: &str,
+) -> (Arc<std::sync::atomic::AtomicBool>, TransferCancelGuard) {
+    let map = Arc::clone(&state.transfer_cancels);
+    let cancel = {
+        let mut registered = map.lock().await;
+        take_transfer_cancel(&mut registered, &mut lock_early_cancels(), id)
+    };
+    (cancel, TransferCancelGuard { map, id: id.to_string() })
+}
+
 /// Process-global, UNPREDICTABLE temp root for SFTP live-edit / drag staging,
 /// created once with a random name (and 0700 on Unix). The old code used a
 /// fully predictable `submarine_sftp_<session_id>` directory directly in the
@@ -8918,18 +9229,23 @@ fn lock_live_edits() -> std::sync::MutexGuard<'static, std::collections::HashMap
 
 /// Overwrite the remote file in place, streaming from the editor copy.
 /// Truncating keeps the server's permissions/ownership and works when only
-/// the file (not its directory) is writable. Returns the hash of the bytes
-/// that were sent. The local file is opened first, so an unreadable copy
+/// the file (not its directory) is writable. After a finished upload the hash
+/// of the bytes that were sent goes to `edit.server_has`; nothing is returned.
+/// The local file is opened first, so an unreadable copy
 /// never truncates the remote file. `edit.interrupted` is raised right after
 /// the truncating open succeeds and lowered when the file is closed. Uses the shared cached SFTP session on
 /// purpose: requests are multiplexed by id, so a long write does not block
 /// other operations (see "Reviewed and rejected" in docs/agent/live-edit.md).
+/// `emit(bytes, total, status, error)` reports progress for the transfers
+/// bar, from the truncating open on; a failure before it reports nothing,
+/// since the server was not touched.
 async fn upload_editor_copy(
     ssh: &SshState,
     session_id: &str,
     remote_path: &str,
     live: &std::path::Path,
     edit: &mut LiveEdit,
+    emit: &impl Fn(u64, u64, &str, Option<String>),
 ) -> Result<(), String> {
     use russh_sftp::protocol::OpenFlags;
     use sha2::{Digest, Sha256};
@@ -8937,34 +9253,61 @@ async fn upload_editor_copy(
     let mut local = tokio::fs::File::open(live)
         .await
         .map_err(|e| format!("Failed to read file: {}", e))?;
+    // Size at the start of the upload. A save that lands meanwhile can make
+    // the stream longer; the bar then just sits at 100% until it ends.
+    let total = local.metadata().await.map(|m| m.len()).unwrap_or(0);
+    // A batch upload or download of this remote file goes first; the save
+    // waits for it instead of truncating the file under it.
+    let _file_lock = lock_remote_file(session_id, remote_path).await;
     let sftp = get_sftp_session(ssh, session_id).await?;
     let mut remote_file = sftp
         .open_with_flags(remote_path, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE)
         .await
         .map_err(|e| format!("Failed to open remote file: {}", e))?;
     edit.interrupted = true;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 256 * 1024];
-    loop {
-        let n = local
-            .read(&mut buf)
-            .await
-            .map_err(|e| format!("Failed to read file: {}", e))?;
-        if n == 0 {
-            break;
+    emit(0, total, "progress", None);
+    let mut transferred: u64 = 0;
+    let result: Result<[u8; 32], String> = async {
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 256 * 1024];
+        let mut last_report = std::time::Instant::now();
+        loop {
+            let n = local
+                .read(&mut buf)
+                .await
+                .map_err(|e| format!("Failed to read file: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            remote_file
+                .write_all(&buf[..n])
+                .await
+                .map_err(|e| format!("Failed to write to remote: {}", e))?;
+            hasher.update(&buf[..n]);
+            transferred += n as u64;
+            if last_report.elapsed() >= std::time::Duration::from_millis(100) {
+                emit(transferred, total, "progress", None);
+                last_report = std::time::Instant::now();
+            }
         }
         remote_file
-            .write_all(&buf[..n])
+            .shutdown()
             .await
-            .map_err(|e| format!("Failed to write to remote: {}", e))?;
-        hasher.update(&buf[..n]);
+            .map_err(|e| format!("Failed to close remote file: {}", e))?;
+        Ok(hasher.finalize().into())
     }
-    remote_file
-        .shutdown()
-        .await
-        .map_err(|e| format!("Failed to close remote file: {}", e))?;
-    edit.server_has(hasher.finalize().into());
-    Ok(())
+    .await;
+    match result {
+        Ok(hash) => {
+            edit.server_has(hash);
+            emit(transferred, transferred.max(total), "done", None);
+            Ok(())
+        }
+        Err(e) => {
+            emit(transferred, total, "error", Some(e.clone()));
+            Err(e)
+        }
+    }
 }
 
 /// Hash of the editor copy, read in chunks. `None` when the name is
@@ -8999,11 +9342,12 @@ async fn sync_editor_copy(
     remote_path: &str,
     live: &std::path::Path,
     edit: &mut LiveEdit,
+    emit: &impl Fn(u64, u64, &str, Option<String>),
 ) -> Result<bool, String> {
     if !upload_needed(editor_copy_hash(live).await?, edit)? {
         return Ok(false);
     }
-    upload_editor_copy(ssh, session_id, remote_path, live, edit).await?;
+    upload_editor_copy(ssh, session_id, remote_path, live, edit, emit).await?;
     Ok(true)
 }
 
@@ -9172,25 +9516,12 @@ async fn sftp_open_remote_file(
 ) -> Result<(), String> {
     use tauri::{Emitter, Manager};
     use sha2::{Digest, Sha256};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::Ordering;
 
     // Register before any slow await so the toast's cancel button can flip
-    // the flag while the SFTP channel is still coming up.
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancels_map = Arc::clone(&state.transfer_cancels);
-    cancels_map.lock().await.insert(transfer_id.clone(), Arc::clone(&cancel));
-    struct CancelGuard {
-        map: Arc<tokio::sync::Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>>,
-        id: String,
-    }
-    impl Drop for CancelGuard {
-        fn drop(&mut self) {
-            if let Ok(mut g) = self.map.try_lock() {
-                g.remove(&self.id);
-            }
-        }
-    }
-    let _guard = CancelGuard { map: Arc::clone(&cancels_map), id: transfer_id };
+    // the flag while the SFTP channel is still coming up. A cancel that
+    // arrived even earlier is picked up (the flag starts out set).
+    let (cancel, _guard) = register_transfer_cancel(&state, &transfer_id).await;
 
     let flight_key = open_flight_key(&session_id, &remote_path);
     {
@@ -9270,6 +9601,9 @@ async fn sftp_open_remote_file(
         // Reopening always takes the server's version. Local changes that were
         // not sent yet are discarded by the replace below, by design.
         let installed: Result<u64, String> = async {
+            // Do not read the remote file while a batch upload rewrites it.
+            // Lock order is always live-edit entry, then remote file.
+            let _file_lock = lock_remote_file_cancellable(&session_id, &remote_path, &cancel).await?;
             let (hash, transferred) =
                 download_to_part(&sftp, &remote_path, &part_path, &cancel, &emit_progress).await?;
             if open_launch_permitted(cancel.load(Ordering::Relaxed)).is_err() {
@@ -9334,6 +9668,7 @@ async fn sftp_open_remote_file(
         tokio::spawn(async move {
             let _debouncer = debouncer;
             let status_event = format!("sftp-sync-status-{}", session_id);
+            let transfer_event = format!("sftp-transfer-{}", session_id);
             let report = |status: &str, message: String| {
                 let _ = app_handle_clone.emit(
                     &status_event,
@@ -9361,7 +9696,23 @@ async fn sftp_open_remote_file(
                 }
                 let ssh = app_handle_clone.state::<SshState>();
                 let mut edit = entry.lock().await;
-                match sync_editor_copy(&ssh, &session_id, &remote_path, &temp_file_path, &mut edit).await {
+                // Same channel as manual uploads, so the save shows in the
+                // transfers bar. `source: "sync"` marks it as not cancellable:
+                // stopping after the truncate would only leave the remote
+                // file cut short until the retry.
+                // `crate::`: the command's `transfer_id` argument shadows the fn.
+                let upload_id = crate::transfer_id();
+                let emit_upload = |bytes: u64, total: u64, status: &str, error: Option<String>| {
+                    let _ = app_handle_clone.emit(
+                        &transfer_event,
+                        serde_json::json!({
+                            "id": upload_id, "name": filename, "kind": "upload", "source": "sync",
+                            "bytes": bytes, "total": total,
+                            "status": status, "error": error,
+                        }),
+                    );
+                };
+                match sync_editor_copy(&ssh, &session_id, &remote_path, &temp_file_path, &mut edit, &emit_upload).await {
                     Ok(uploaded) => {
                         failed = false;
                         last_error.clear();
@@ -10927,6 +11278,174 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cancel_sent_before_the_command_registers_is_not_lost() {
+        use std::sync::atomic::Ordering;
+        let mut registered = TransferCancelMap::new();
+        let mut early = std::collections::HashMap::new();
+        let now = std::time::Instant::now();
+
+        // Cancel arrives first: remembered, and the registering command
+        // starts with its flag set.
+        cancel_or_remember(&registered, &mut early, "t1", now);
+        let flag = take_transfer_cancel(&mut registered, &mut early, "t1");
+        assert!(flag.load(Ordering::Relaxed));
+        assert!(early.is_empty());
+
+        // No cancel: the flag starts clear; a later cancel flips that flag.
+        let flag = take_transfer_cancel(&mut registered, &mut early, "t2");
+        assert!(!flag.load(Ordering::Relaxed));
+        cancel_or_remember(&registered, &mut early, "t2", now);
+        assert!(flag.load(Ordering::Relaxed));
+        assert!(!early.contains_key("t2"));
+    }
+
+    #[test]
+    fn one_remote_file_gets_one_lock_whatever_the_slashes() {
+        assert_eq!(remote_lock_key("s", "/var//www/app.log"), remote_lock_key("s", "/var/www/app.log"));
+        assert_eq!(remote_lock_key("s", "/var/www/"), remote_lock_key("s", "/var/www"));
+        assert_eq!(remote_lock_key("s", "/"), FileLockKey::Remote("s".into(), "/".into()));
+        assert_ne!(remote_lock_key("s1", "/a"), remote_lock_key("s2", "/a"));
+
+        // Local keys: separators and repeats do not matter; case only on Windows.
+        let p = std::path::Path::new;
+        assert_eq!(local_lock_key(p("C:\\Work\\\\app.log")), local_lock_key(p("C:/Work/app.log")));
+        assert_eq!(
+            local_lock_key(p("/home/u/App.log")) == local_lock_key(p("/home/u/app.log")),
+            cfg!(windows),
+        );
+        // A remote and a local path that spell the same never share a lock.
+        assert_ne!(remote_lock_key("s", "/tmp/a"), local_lock_key(p("/tmp/a")));
+    }
+
+    #[test]
+    fn a_lock_chain_runs_from_the_root_to_the_path() {
+        assert_eq!(path_prefixes("/a/b/c"), ["/", "/a", "/a/b", "/a/b/c"]);
+        assert_eq!(path_prefixes("/"), ["/"]);
+        assert_eq!(path_prefixes("c:/w/f"), ["c:", "c:/w", "c:/w/f"]);
+        assert_eq!(path_prefixes("rel/f"), ["rel", "rel/f"]);
+        assert_eq!(
+            remote_lock_key("s", "/a/b").chain(),
+            [
+                FileLockKey::Remote("s".into(), "/".into()),
+                FileLockKey::Remote("s".into(), "/a".into()),
+                FileLockKey::Remote("s".into(), "/a/b".into()),
+            ],
+        );
+    }
+
+    /// Whether `fut` is still waiting after a short while.
+    async fn still_waiting<F: std::future::Future>(fut: F) -> bool {
+        tokio::time::timeout(std::time::Duration::from_millis(150), fut).await.is_err()
+    }
+
+    #[tokio::test]
+    async fn a_folder_rename_waits_for_a_file_being_written_inside_it() {
+        let s = "lock-tree-test";
+        // A transfer is writing /srv/site/logs/app.log.
+        let writing = lock_remote_file(s, "/srv/site/logs/app.log").await;
+
+        // The mirror's soft delete of /srv/site (rename into the trash) and
+        // of /srv/site/logs must wait for it; so must the same file.
+        assert!(still_waiting(lock_remote_file(s, "/srv/site")).await);
+        assert!(still_waiting(lock_remote_file(s, "/srv/site/logs")).await);
+        assert!(still_waiting(lock_remote_file(s, "/srv//site/logs/app.log/")).await);
+        // A sibling file and another session are not blocked.
+        drop(lock_remote_file(s, "/srv/site/logs/other.log").await);
+        drop(lock_remote_file("another-session", "/srv/site").await);
+
+        drop(writing);
+        // Once the write is done, the folder can be renamed...
+        let renaming = lock_remote_file(s, "/srv/site").await;
+        // ...and while it is, nothing inside it can start.
+        assert!(still_waiting(lock_remote_file(s, "/srv/site/logs/app.log")).await);
+        assert!(still_waiting(lock_remote_file(s, "/srv/site/new.txt")).await);
+        drop(renaming);
+        drop(lock_remote_file(s, "/srv/site/logs/app.log").await);
+    }
+
+    #[tokio::test]
+    async fn local_folder_locks_follow_the_tree_too() {
+        let p = std::path::Path::new;
+        let writing = lock_local_file(p("/tmp/lock-tree-local/dir/file.bin")).await;
+        assert!(still_waiting(lock_local_file(p("/tmp/lock-tree-local/dir"))).await);
+        drop(lock_local_file(p("/tmp/lock-tree-local/sibling.bin")).await);
+        drop(writing);
+        drop(lock_local_file(p("/tmp/lock-tree-local/dir")).await);
+    }
+
+    #[tokio::test]
+    async fn a_free_lock_is_not_handed_to_a_cancelled_transfer() {
+        use std::sync::atomic::AtomicBool;
+        // Nothing holds the file, but the flag is already set: the caller
+        // must not get the lock (its next step would TRUNCATE the file).
+        let cancel = AtomicBool::new(true);
+        let res = lock_remote_file_cancellable("lock-race-free", "/srv/app.log", &cancel).await;
+        assert_eq!(res.err().as_deref(), Some("cancelled"));
+        let res = lock_local_file_cancellable(std::path::Path::new("/tmp/lock-race-free/f"), &cancel).await;
+        assert_eq!(res.err().as_deref(), Some("cancelled"));
+        // And the refused attempt left nothing held behind.
+        drop(lock_remote_file("lock-race-free", "/srv/app.log").await);
+    }
+
+    #[tokio::test]
+    async fn cancel_while_waiting_wins_even_if_the_lock_frees_before_the_next_tick() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let s = "lock-race-tick";
+        // The mirror (or an editor save) holds the folder's file.
+        let holder = lock_remote_file(s, "/site/app.log").await;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let waiter = {
+            let cancel = Arc::clone(&cancel);
+            tokio::spawn(async move {
+                lock_remote_file_cancellable(s, "/site/app.log", &cancel).await.map(drop)
+            })
+        };
+        // Let the waiter get past one tick, then Cancel and release together,
+        // well inside the next 100 ms tick.
+        tokio::time::sleep(std::time::Duration::from_millis(130)).await;
+        cancel.store(true, Ordering::Relaxed);
+        drop(holder);
+        assert_eq!(waiter.await.unwrap().err().as_deref(), Some("cancelled"));
+        drop(lock_remote_file(s, "/site/app.log").await);
+    }
+
+    #[tokio::test]
+    async fn a_transfer_waiting_below_a_busy_folder_can_be_cancelled() {
+        use std::sync::atomic::AtomicBool;
+        let renaming = lock_remote_file("lock-tree-cancel", "/data").await;
+        let cancel = AtomicBool::new(true);
+        let res = lock_remote_file_cancellable("lock-tree-cancel", "/data/big.iso", &cancel).await;
+        assert_eq!(res.err().as_deref(), Some("cancelled"));
+        drop(renaming);
+    }
+
+    #[tokio::test]
+    async fn waiting_for_a_remote_file_lock_can_be_cancelled() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let holder = lock_remote_file("lock-cancel-test", "/busy").await;
+        let cancel = AtomicBool::new(false);
+        cancel.store(true, Ordering::Relaxed);
+        let res = lock_remote_file_cancellable("lock-cancel-test", "/busy", &cancel).await;
+        assert_eq!(res.err().as_deref(), Some("cancelled"));
+        drop(holder);
+        let free = AtomicBool::new(false);
+        assert!(lock_remote_file_cancellable("lock-cancel-test", "/busy", &free).await.is_ok());
+    }
+
+    #[test]
+    fn early_cancels_whose_command_never_comes_expire() {
+        let registered = TransferCancelMap::new();
+        let mut early = std::collections::HashMap::new();
+        let start = std::time::Instant::now();
+        cancel_or_remember(&registered, &mut early, "never-started", start);
+        assert!(early.contains_key("never-started"));
+        // The next cancel after the TTL prunes the stale entry.
+        cancel_or_remember(&registered, &mut early, "other", start + EARLY_CANCEL_TTL);
+        assert!(!early.contains_key("never-started"));
+        assert!(early.contains_key("other"));
+    }
 
     #[test]
     fn discard_open_staging_removes_the_dir_when_the_file_was_never_created() {
