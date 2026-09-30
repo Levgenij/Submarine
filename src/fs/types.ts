@@ -6,6 +6,8 @@
 // each backend can keep its own fast path (e.g. `sftp_download_file` writes
 // directly to disk instead of round-tripping through a JS `Uint8Array`).
 
+import type { ArchiveFormat } from "./archive";
+
 export interface FileEntry {
   name: string;
   path: string;
@@ -42,6 +44,19 @@ export interface FileProvider {
   mkdir(path: string): Promise<void>;
   remove(path: string, isDir: boolean): Promise<void>;
   rename(from: string, to: string): Promise<void>;
+
+  // ---- archives ------------------------------------------------------------
+  /**
+   * Packs `names` (entries of `dir`) into the archive at `dest`. Rejects with
+   * `EXISTS:<path>` when `dest` is already there and `overwrite` is false.
+   */
+  archive(dir: string, names: string[], dest: string, format: ArchiveFormat, overwrite: boolean): Promise<void>;
+  /**
+   * Unpacks the archive `name` of `dir` into `dir`, or into its subfolder
+   * `folder` (created if missing), replacing same-named files. `name` and
+   * `folder` are single path components; the backend refuses anything else.
+   */
+  extract(dir: string, name: string, folder: string | null): Promise<void>;
 
   // ---- optional unix-only operations --------------------------------------
   chmod?: (path: string, mode: number) => Promise<void>;
