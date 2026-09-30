@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Play, RefreshCw, Search, X, Terminal, StickyNote, ClipboardCopy, ChevronDown, ChevronRight, Pencil, Check, Server } from "lucide-react";
 
@@ -31,7 +31,14 @@ type EditTarget =
   | { kind: "command"; id: number; title: string; body: string }
   | { kind: "note"; id: number; title: string; body: string };
 
-export const CmdsPanel = ({ activeTab, onClose, serverId, serverName }: { activeTab: string; onClose: () => void; serverId?: number; serverName?: string }) => {
+export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHeader }: {
+  activeTab: string;
+  onClose: () => void;
+  serverId?: number;
+  serverName?: string;
+  /** Replaces the built-in title bar; gets the refresh button and a close that saves a pending edit first. */
+  renderHeader?: (p: { actions: ReactNode; onClose: () => void }) => ReactNode;
+}) => {
   const [tab, setTab] = useState<Tab>("commands");
   const [commands, setCommands] = useState<CommandItem[]>([]);
   const [notes, setNotes] = useState<NoteItem[]>([]);
@@ -229,9 +236,21 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName }: { active
   const tabLabel = tab === "commands" ? "Commands" : tab === "notes" ? "Notes" : "Node";
   const TabIcon = tab === "commands" ? Terminal : tab === "notes" ? StickyNote : Server;
 
+  const refreshButton = (
+    <button
+      onClick={async () => { await flushIfDirty(editRef.current); fetchAll(); }}
+      disabled={loading}
+      className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-white/5 transition-all disabled:opacity-50"
+      title="Refresh list"
+    >
+      <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
+    </button>
+  );
+  const closeSaving = async () => { await flushIfDirty(editRef.current); onClose(); };
+
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#09090b]">
-      {/* Title Bar */}
+      {renderHeader ? renderHeader({ actions: refreshButton, onClose: closeSaving }) : (
       <div className="h-12 px-4 shrink-0 flex items-center justify-between border-b border-white/5 bg-white/5">
         <div className="flex items-center gap-2 min-w-0">
           <TabIcon size={14} className="text-primary shrink-0" />
@@ -240,16 +259,9 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName }: { active
           </span>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          {refreshButton}
           <button
-            onClick={async () => { await flushIfDirty(editRef.current); fetchAll(); }}
-            disabled={loading}
-            className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-white/5 transition-all disabled:opacity-50"
-            title="Refresh list"
-          >
-            <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
-          </button>
-          <button
-            onClick={async () => { await flushIfDirty(editRef.current); onClose(); }}
+            onClick={closeSaving}
             className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-white/5 transition-all"
             title="Close Panel"
           >
@@ -257,6 +269,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName }: { active
           </button>
         </div>
       </div>
+      )}
 
       {/* Tabs — three when a server is in scope (Commands / Notes / Node),
           two otherwise (the Library is reachable from any context, not just
