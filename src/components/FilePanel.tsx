@@ -12,9 +12,12 @@ import { FileEntry, FileProvider } from "../fs/types";
 import { mergePermissions, permissionOctal, safeLeafName, shellSingleQuote } from "../fs/dirContext";
 import { useConfirm, useOverwritePrompt, OverwriteChoice, OverwritePromptOptions } from "../ui/confirm";
 import { IS_ANDROID } from "../util/platform";
-import { dropQueued, enqueueTransfers, isQueued, queueSignal, startQueued, waitForTurn } from "../fs/transferQueue";
+import {
+  acquireTransferSlot, dropQueued, enqueueTransfers, getQueued, isQueued, queueSignal, startQueued, waitForTurn,
+} from "../fs/transferQueue";
 import { parentPathOf } from "../fs/localProvider";
 import { pathCrumbs } from "../fs/pathCrumbs";
+import { canMoveInto, rulesFor, takenNames } from "../fs/moveRules";
 
 // Batch overwrite state shared across items in a single download/upload run.
 // Once the user picks "Overwrite all" or "Skip all" the kind is sticky and we
@@ -65,12 +68,20 @@ async function transferWithOverwriteCheck(
 // tree. Drag-out and drop integration are handled by the parent workspace —
 // FilePanel just emits lifecycle callbacks.
 
+// "name (reason)" entries of one batch, cut to what fits a single notice.
+const listFailures = (failures: string[]) =>
+  failures.length > 3
+    ? `${failures.slice(0, 3).join(", ")} +${failures.length - 3} more`
+    : failures.join(", ");
+
 type SortColumn = "name" | "size" | "modified" | "permissions";
 interface SortState { column: SortColumn; asc: boolean; }
 
 export interface ActiveDrag {
   paneId: "local" | "remote";
   entry: FileEntry;
+  /** Everything being dragged: the selection, or just `entry`. */
+  items: FileEntry[];
   x: number;
   y: number;
 }
@@ -109,6 +120,11 @@ export interface FilePanelHandle {
   currentDir: () => string;
   /** Shows a short notice in this panel's own stack, above its docked bars. */
   notify: (msg: string, type?: "info" | "success" | "error") => void;
+  /**
+   * Sends this panel's `items` to `destDir` on the other side (upload from
+   * the local panel, download from the remote one) as one queued batch.
+   */
+  sendItems: (items: FileEntry[], destDir: string) => Promise<void>;
 }
 
 const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
@@ -145,6 +161,10 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // anchor. lastSelectedPathRef remembers that anchor across renders.
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const lastSelectedPathRef = useRef<string | null>(null);
+  // The selection as of the latest render, for async work that outlives the
+  // render it started in.
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   // Remote "open in editor" downloads the file first. While that runs, the
   // row's highlight fills left-to-right. One slot per path, so opening a
   // second file does not steal the first file's bar.
@@ -175,6 +195,24 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   const notifyTimerRef = useRef<number | null>(null);
 
   const [dragOver, setDragOver] = useState(false);
+  // Folder (row, ".." or path-bar segment) an in-pane drag would drop into.
+  const [dropHover, setDropHover] = useState<string | null>(null);
+  const dropHoverRef = useRef<string | null>(null);
+  // Set for the tick after a drag ends, so the `click` that the same
+  // mouseup produces doesn't replace or clear the selection.
+  const dragJustEndedRef = useRef(false);
+  // An in-pane move is running (or waiting for the transfer slot). A second
+  // one would work from rows whose paths the first is about to change, so
+  // it is refused with a notice.
+  const movingRef = useRef(false);
+  // The move in progress, shown as its own row in the notice stack (with a
+  // cancel button) for as long as it runs: while it waits for the transfer
+  // slot and while it renames.
+  const [pendingMove, setPendingMove] = useState<{ label: string; targetDir: string; waiting: boolean } | null>(null);
+  const cancelPendingMoveRef = useRef<() => void>(() => {});
+  // The handle is built once; this always points at the current render's
+  // upload / download so a cross-pane drop doesn't run a stale closure.
+  const sendItemsRef = useRef<(items: FileEntry[], destDir: string) => Promise<void>>(async () => {});
   const dropTargetRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const currentPathRef = useRef(currentPath);
@@ -332,6 +370,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     refresh: async () => { await fetch(currentPathRef.current); },
     currentDir: () => currentPathRef.current,
     notify: (msg, type) => notify(msg, type),
+    sendItems: (items, destDir) => sendItemsRef.current(items, destDir),
   }), []);
 
   const goUp = () => fetch(provider.parentPath(currentPath));
@@ -356,6 +395,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // Shift-extend uses `sortedEntries` (the rendered order), not `entries`,
   // so the visual range matches what the user just dragged across.
   const onRowClick = (e: React.MouseEvent, entry: FileEntry, ordered: FileEntry[]) => {
+    if (dragJustEndedRef.current) return;
     if (e.shiftKey && lastSelectedPathRef.current) {
       const a = ordered.findIndex(x => x.path === lastSelectedPathRef.current);
       const b = ordered.findIndex(x => x.path === entry.path);
@@ -510,13 +550,144 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
 
   const DRAG_START_THRESHOLD = 6;
 
+  // ---- in-pane move (drop on a folder of this same pane) ------------------------
+
+  const isRemoteProvider = provider.id === "remote";
+  const moveRules = () => rulesFor(provider.id, provider.pathSep);
+
+  // Folder of THIS pane under the cursor that `items` can be moved into.
+  // Drop targets carry `data-fs-drop-path`: folder rows, the ".." row and the
+  // path-bar segments.
+  const dropTargetAt = (x: number, y: number, items: FileEntry[]): string | null => {
+    const hit = document.elementFromPoint(x, y) as HTMLElement | null;
+    if (!hit || hit.closest("[data-fs-pane]")?.getAttribute("data-fs-pane") !== provider.id) return null;
+    const target = hit.closest("[data-fs-drop-path]")?.getAttribute("data-fs-drop-path");
+    const rules = moveRules();
+    if (!target || !items.some((it) => canMoveInto(it, target, rules))) return null;
+    return target;
+  };
+
+  const moveInto = async (items: FileEntry[], targetDir: string) => {
+    const rules = moveRules();
+    const movable = items.filter((it) => canMoveInto(it, targetDir, rules));
+    if (movable.length === 0) return;
+    if (movingRef.current) {
+      notify("Another move is still in progress. Wait for it, or cancel it.", "info");
+      return;
+    }
+    movingRef.current = true;
+    // Cancel works in both phases. While waiting for the slot nothing has
+    // been touched, so the panel is handed back at once (`ownsPanel` goes
+    // false and this call just returns when its turn comes). While renaming
+    // it stops the loop before the next item.
+    let cancelled = false;
+    let waiting = true;
+    let ownsPanel = true;
+    cancelPendingMoveRef.current = () => {
+      cancelled = true;
+      if (!waiting) return;
+      ownsPanel = false;
+      movingRef.current = false;
+      setPendingMove(null);
+    };
+    const label = movable.length === 1 ? movable[0].name : `${movable.length} items`;
+    const showRow = () => { if (ownsPanel) setPendingMove({ label, targetDir, waiting }); };
+    // Something is already queued: the wait will be visible, say so now.
+    // Otherwise only a move that takes a moment gets the row, so a plain
+    // quick one doesn't flash it. (The slot can also be held by a move in
+    // the other panel, which is not in the queue; the timer covers that.)
+    let rowTimer: number | null = null;
+    if (sessionId && getQueued(sessionId).length > 0) showRow();
+    else rowTimer = window.setTimeout(showRow, 250);
+    // Moves take their turn in the session's transfer slot, so a rename
+    // never pulls a file out from under an upload / download that was
+    // queued before it (and a later batch starts from the new paths).
+    let release: (() => void) | null = null;
+    try {
+      if (sessionId) release = await acquireTransferSlot(sessionId);
+      if (cancelled) return;
+      waiting = false;
+      setPendingMove((cur) => (cur ? { ...cur, waiting: false } : cur));
+      // A rename onto an existing name replaces it on the local side and
+      // fails with a bare "Failure" over SFTP, so look first and skip those.
+      let taken: Set<string>;
+      try {
+        const existing = (await provider.list(targetDir)).entries.map((e) => e.name);
+        taken = takenNames(movable.map((it) => it.name), existing, rules);
+      } catch (err: any) {
+        notify(`Move failed: ${err}`, "error");
+        return;
+      }
+      const moved: string[] = [];
+      const failures: string[] = [];
+      for (const it of movable) {
+        if (cancelled) break;
+        if (taken.has(it.name)) {
+          failures.push(`${it.name} (already exists there)`);
+          continue;
+        }
+        try {
+          await provider.rename(it.path, provider.joinPath(targetDir, it.name));
+          moved.push(it.path);
+        } catch (err: any) {
+          failures.push(`${it.name} (${err})`);
+        }
+      }
+      // One notice for the whole drop: per-item ones would replace each
+      // other and leave only the last on screen.
+      const stopped = movable.length - moved.length - failures.length;
+      const notMoved = failures.length > 0 ? ` Not moved: ${listFailures(failures)}` : "";
+      const stoppedNote = stopped > 0 ? ` (${stopped} cancelled)` : "";
+      if (failures.length === 0 && stopped === 0) {
+        notify(movable.length === 1 ? `Moved ${movable[0].name} → ${targetDir}` : `Moved ${moved.length} items → ${targetDir}`, "success");
+      } else if (moved.length > 0) {
+        notify(`Moved ${moved.length} of ${movable.length} → ${targetDir}${stoppedNote}.${notMoved}`, failures.length > 0 ? "error" : "info");
+      } else if (failures.length > 0) {
+        notify(`Nothing moved${stoppedNote}.${notMoved}`, "error");
+      } else {
+        notify("Move cancelled", "info");
+      }
+      if (moved.length > 0) {
+        // Only what actually left: rows that failed, and selected rows the
+        // name filter hides (never part of the drag), stay selected.
+        // The refresh itself clears the selection, so put the rest back.
+        const gone = new Set(moved);
+        // Taken from the selection as it is NOW: rows clicked while the
+        // move ran must not be rolled back to the drag-start snapshot.
+        const keep = new Set([...selectedRef.current].filter((path) => !gone.has(path)));
+        const anchor = lastSelectedPathRef.current;
+        await fetch(currentPathRef.current);
+        setSelected(keep);
+        lastSelectedPathRef.current = anchor && keep.has(anchor) ? anchor : null;
+      }
+    } finally {
+      release?.();
+      if (rowTimer != null) window.clearTimeout(rowTimer);
+      if (ownsPanel) {
+        ownsPanel = false;
+        setPendingMove(null);
+        movingRef.current = false;
+      }
+    }
+  };
+
   const handleRowMouseDown = (e: React.MouseEvent, entry: FileEntry) => {
     if (disabled || e.button !== 0) return;
-    if (entry.isDir) return; // folder drag handled later
 
     const startX = e.clientX;
     const startY = e.clientY;
     let dragStarted = false;
+    // Dragging a selected row carries the whole (visible) selection; any
+    // other row is dragged on its own.
+    const items = selected.has(entry.path)
+      ? sortedEntries.filter((en) => selected.has(en.path))
+      : [entry];
+
+    const setHover = (path: string | null) => {
+      if (dropHoverRef.current === path) return;
+      dropHoverRef.current = path;
+      setDropHover(path);
+    };
 
     const onMove = (ev: MouseEvent) => {
       if (!dragStarted) {
@@ -527,18 +698,26 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       onDragMove({
         paneId: provider.id as "local" | "remote",
         entry,
+        items,
         x: ev.clientX,
         y: ev.clientY,
       });
+      setHover(dropTargetAt(ev.clientX, ev.clientY, items));
     };
 
-    const onUp = () => {
+    const onUp = (ev: MouseEvent) => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       // Workspace listens for its own `mouseup` and uses the active drag (which
       // we keep up to date via `onDragMove`) to dispatch the cross-pane
       // transfer. We just clear our local indicator here.
       onDragMove(null);
+      setHover(null);
+      if (!dragStarted) return;
+      dragJustEndedRef.current = true;
+      window.setTimeout(() => { dragJustEndedRef.current = false; }, 0);
+      const target = dropTargetAt(ev.clientX, ev.clientY, items);
+      if (target) moveInto(items, target);
     };
 
     window.addEventListener("mousemove", onMove);
@@ -673,18 +852,14 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         notify(items.length === 1
           ? `Uploading ${items[0].isDir ? "folder " : ""}${items[0].name}…`
           : `Uploading ${fileCount} file${fileCount === 1 ? "" : "s"}${dirCount ? ` + ${dirCount} folder${dirCount === 1 ? "" : "s"}` : ""}…`, "info");
-        const { count, cancelled } = await runTransferBatch("upload", items, (it, transferId, overwrite) => {
+        const res = await runTransferBatch("upload", items, (it, transferId, overwrite) => {
           // Folders go to the remote PARENT (sftp_upload_dir adds the name),
           // files to their full remote path — same as uploadItems.
           const remotePath = it.isDir ? trimmed || "/" : `${trimmed}/${it.name}`;
           const cmd = it.isDir ? "sftp_upload_dir" : "sftp_upload_file";
           return invoke(cmd, { sessionId, localPath: it.path, remotePath, overwrite, transferId });
         });
-        if (count > 0) {
-          notify(items.length === 1 ? `Uploaded ${items[0].name}` : `Uploaded ${count} of ${items.length} items`, "success");
-        } else if (cancelled) {
-          notify("Upload batch cancelled", "info");
-        }
+        notifyBatchResult("upload", items, res);
         await fetch(dir);
       }
     ).then((fn) => {
@@ -854,18 +1029,21 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // the first event. An item removed from the bar is skipped, also when that
   // happens during the overwrite prompt: the prompt closes (queue signal)
   // without latching an "all" choice, and the retry checks the queue again.
+  type BatchResult = { count: number; skipped: number; failures: string[] };
   const runTransferBatch = async <T extends { name: string; isDir: boolean; size?: number }>(
     kind: "download" | "upload",
     items: T[],
     run: (item: T, transferId: string, overwrite: boolean) => Promise<unknown>,
-  ): Promise<{ count: number; cancelled: boolean }> => {
-    if (!sessionId) return { count: 0, cancelled: false };
+  ): Promise<BatchResult> => {
+    if (!sessionId) return { count: 0, skipped: 0, failures: [] };
     const batch: OverwriteBatch = { kind: "ask" };
     const ids = enqueueTransfers(sessionId, items.map((it) => ({
       name: it.name, kind, size: it.isDir ? undefined : it.size, isDir: it.isDir,
     })));
     let count = 0;
+    let skipped = 0;
     let cancelled = false;
+    const failures: string[] = [];
     try {
       for (let i = 0; i < items.length && !cancelled; i++) {
         const item = items[i];
@@ -885,12 +1063,11 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             item.name, kind, items.length, batch, overwritePrompt, queueSignal(id),
           );
           if (res === "done") count++;
+          if (res === "skipped") skipped++;
           if (res === "cancelled") cancelled = true;
         } catch (err: any) {
           // Cancelled from the transfers bar: its row already says so.
-          if (!String(err).endsWith("cancelled")) {
-            notify(`${kind === "download" ? "Download" : "Upload"} failed for ${item.name}: ${err}`, "error");
-          }
+          if (!String(err).endsWith("cancelled")) failures.push(`${item.name} (${err})`);
         } finally {
           dropQueued(sessionId, [id]);
           release();
@@ -899,7 +1076,35 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     } finally {
       dropQueued(sessionId, ids);
     }
-    return { count, cancelled };
+    return { count, skipped, failures };
+  };
+
+  // One notice for the whole batch. Per-item ones replace each other in the
+  // single toast slot, so a failure would vanish behind the final count.
+  const notifyBatchResult = (kind: "download" | "upload", items: { name: string }[], res: BatchResult) => {
+    const done = kind === "download" ? "Downloaded" : "Uploaded";
+    const label = kind === "download" ? "Download" : "Upload";
+    const total = items.length;
+    // Whatever is neither done, skipped nor failed was cancelled: from the
+    // transfers bar, or with the rest of the batch at the overwrite prompt.
+    const stopped = total - res.count - res.skipped - res.failures.length;
+    const notes = [
+      res.skipped > 0 ? `${res.skipped} skipped` : "",
+      stopped > 0 ? `${stopped} cancelled` : "",
+    ].filter(Boolean).join(", ");
+    const tail = notes ? ` (${notes})` : "";
+    if (res.failures.length > 0) {
+      notify(res.count > 0 || notes
+        ? `${done} ${res.count} of ${total}${tail}. Failed: ${listFailures(res.failures)}`
+        : `${label} failed: ${listFailures(res.failures)}`, "error");
+    } else if (res.count === total) {
+      notify(total === 1 ? `${done} ${items[0].name}` : `${done} ${res.count} of ${total} items`, "success");
+    } else if (total === 1) {
+      notify(res.skipped > 0 ? `${items[0].name} skipped` : `${label} of ${items[0].name} cancelled`, "info");
+    } else {
+      // Green is for a batch that fully arrived; a cut-short one is a note.
+      notify(`${done} ${res.count} of ${total} items${tail}`, "info");
+    }
   };
 
   // Remote → local download. Bulk-aware, folder-aware. Destination is
@@ -911,9 +1116,9 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // and preserves structure; individual files go through the single-file
   // command. Both paths emit progress on the same `sftp-transfer-{id}`
   // channel so the user sees uniform cards.
-  const downloadItems = async (items: FileEntry[]) => {
+  const downloadItems = async (items: FileEntry[], destDir?: string) => {
     if (!sessionId || items.length === 0) return;
-    let dest = getOppositeDir?.();
+    let dest = destDir || getOppositeDir?.();
     if (!dest) {
       // Fallback destination when the sibling pane hasn't reported a dir
       // yet. Desktop opens the rfd folder picker; Android has no picker
@@ -930,6 +1135,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     }
     const sep = dest.includes("\\") ? "\\" : "/";
     const trimmed = dest.replace(/[\\/]+$/, "");
+    // A folder lands under this parent; a root keeps its separator ("C:\\").
+    const dirParent = trimmed === "" || /^[a-zA-Z]:$/.test(trimmed) ? dest : trimmed;
     const fileCount = items.filter(e => !e.isDir).length;
     const dirCount  = items.filter(e =>  e.isDir).length;
     const summary =
@@ -937,16 +1144,12 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         ? `Downloading ${items[0].isDir ? "folder " : ""}${items[0].name}…`
         : `Downloading ${fileCount} files${dirCount ? ` + ${dirCount} folder${dirCount === 1 ? "" : "s"}` : ""}…`;
     notify(summary, "info");
-    const { count, cancelled } = await runTransferBatch("download", items, (e, transferId, overwrite) => {
-      const dest = e.isDir ? trimmed : `${trimmed}${sep}${e.name}`;
+    const res = await runTransferBatch("download", items, (e, transferId, overwrite) => {
+      const dest = e.isDir ? dirParent : `${trimmed}${sep}${e.name}`;
       const cmd = e.isDir ? "sftp_download_dir" : "sftp_download_file";
       return invoke(cmd, { sessionId, remotePath: e.path, localPath: dest, overwrite, transferId });
     });
-    if (count > 0) {
-      notify(items.length === 1 ? `Downloaded ${items[0].name}` : `Downloaded ${count} of ${items.length} items`, "success");
-    } else if (cancelled) {
-      notify("Download batch cancelled", "info");
-    }
+    notifyBatchResult("download", items, res);
   };
 
   // Local → remote upload. Mirror of downloadItems — handles both files
@@ -954,9 +1157,9 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // Destination is whatever directory the remote pane is showing; if the
   // remote pane hasn't reported one yet (still loading), we bail with a
   // clear error rather than guessing the home dir.
-  const uploadItems = async (items: FileEntry[]) => {
+  const uploadItems = async (items: FileEntry[], destDir?: string) => {
     if (!sessionId || items.length === 0) return;
-    const dest = getOppositeDir?.();
+    const dest = destDir || getOppositeDir?.();
     if (!dest) { notify("Open a directory in the remote pane first.", "error"); return; }
     const trimmed = dest.replace(/[\\/]+$/, "");
     const fileCount = items.filter((e) => !e.isDir).length;
@@ -965,20 +1168,18 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       ? `Uploading ${items[0].isDir ? "folder " : ""}${items[0].name}…`
       : `Uploading ${fileCount} file${fileCount === 1 ? "" : "s"}${dirCount ? ` + ${dirCount} folder${dirCount === 1 ? "" : "s"}` : ""}…`;
     notify(summary, "info");
-    const { count, cancelled } = await runTransferBatch("upload", items, (e, transferId, overwrite) => {
+    const res = await runTransferBatch("upload", items, (e, transferId, overwrite) => {
       // For files we pass the remote target as a full file path; for dirs
       // we pass the remote PARENT and sftp_upload_dir hangs the source
       // basename underneath it (same convention as sftp_download_dir).
-      const remotePath = e.isDir ? trimmed : `${trimmed}/${e.name}`;
+      const remotePath = e.isDir ? trimmed || "/" : `${trimmed}/${e.name}`;
       const cmd = e.isDir ? "sftp_upload_dir" : "sftp_upload_file";
       return invoke(cmd, { sessionId, localPath: e.path, remotePath, overwrite, transferId });
     });
-    if (count > 0) {
-      notify(items.length === 1 ? `Uploaded ${items[0].name}` : `Uploaded ${count} of ${items.length} items`, "success");
-    } else if (cancelled) {
-      notify("Upload batch cancelled", "info");
-    }
+    notifyBatchResult("upload", items, res);
   };
+
+  sendItemsRef.current = isRemoteProvider ? downloadItems : uploadItems;
 
   // Remote: open in OS default editor with a save-watcher that re-uploads on
   // every change. Backed by the existing `sftp_open_remote_file` command.
@@ -1304,7 +1505,10 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                           type="button"
                           onClick={(e) => { e.stopPropagation(); fetch(c.path); }}
                           title={c.path}
-                          className="shrink-0 whitespace-nowrap cursor-pointer text-zinc-300 transition-colors hover:text-indigo-300"
+                          data-fs-drop-path={c.path}
+                          className={`shrink-0 whitespace-nowrap cursor-pointer transition-colors hover:text-indigo-300 ${
+                            dropHover === c.path ? "text-indigo-200 bg-indigo-500/30 rounded ring-1 ring-indigo-400" : "text-zinc-300"
+                          }`}
                         >
                           {c.label}
                         </button>
@@ -1543,7 +1747,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                // rows stopPropagation via their own onClick chain implicitly
                // by being the click target). Clear selection so users can
                // escape a multi-selection without a keyboard shortcut.
-               if (e.target === e.currentTarget) {
+               if (e.target === e.currentTarget && !dragJustEndedRef.current) {
                  setSelected(new Set());
                  lastSelectedPathRef.current = null;
                }
@@ -1556,11 +1760,14 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             <div
               onDoubleClick={(e) => { e.stopPropagation(); goUp(); }}
               title="Parent directory"
+              data-fs-drop-path={provider.parentPath(currentPath)}
               className={`grid ${
                 showPerms
                   ? "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_65px_125px_85px]"
                   : "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_75px_125px]"
-              } gap-1.5 px-2.5 py-1 border-l-2 border-transparent cursor-pointer transition-colors items-center text-zinc-200 hover:bg-white/5 hover:text-white`}
+              } gap-1.5 px-2.5 py-1 border-l-2 border-transparent cursor-pointer transition-colors items-center text-zinc-200 hover:bg-white/5 hover:text-white ${
+                dropHover !== null && dropHover === provider.parentPath(currentPath) ? "bg-indigo-500/20 ring-1 ring-inset ring-indigo-400" : ""
+              }`}
             >
               <div />
               <div className="flex items-center gap-2 min-w-0 pr-1">
@@ -1599,12 +1806,15 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                 }}
                 data-fs-row-path={entry.path}
                 data-fs-row-isdir={entry.isDir ? "1" : "0"}
+                data-fs-drop-path={entry.isDir ? entry.path : undefined}
                 className={`group isolate relative overflow-hidden grid ${
                   showPerms
                     ? "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_65px_125px_85px]"
                     : "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_75px_125px]"
                 } gap-1.5 px-2.5 py-1 border-l-2 cursor-pointer transition-colors items-center ${
-                  opening
+                  dropHover === entry.path
+                    ? "bg-indigo-500/20 ring-1 ring-inset ring-indigo-400 border-indigo-400 text-white"
+                    : opening
                     ? "border-indigo-400 text-indigo-100 font-bold"
                     : isSel
                     ? "bg-indigo-950/40 border-indigo-400 text-indigo-100 font-bold"
@@ -1692,7 +1902,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         </div>
       </div>
 
-      {(notification || openJobs.length > 0) && (
+      {(notification || pendingMove || openJobs.length > 0) && (
         // Bottom-right of the list area: never over the path bar, and never
         // over the docked selection bar below the list. The
         // open-job row is its own element so a later notify() cannot take
@@ -1704,6 +1914,23 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
               notification.type === "error"   ? "bg-rose-950/90 border-rose-500/30 text-rose-400" :
                                                 "bg-indigo-950/90 border-indigo-500/30 text-indigo-400"
             }`}>{notification.msg}</div>
+          )}
+          {pendingMove && (
+            <div className="pointer-events-auto max-w-full px-3 py-1.5 rounded-lg border text-[11px] font-mono shadow-2xl backdrop-blur-md bg-indigo-950/90 border-indigo-500/30 text-indigo-400 flex items-center gap-2">
+              <span className="min-w-0">
+                {pendingMove.waiting
+                  ? `Waiting to move ${pendingMove.label} → ${pendingMove.targetDir}…`
+                  : `Moving ${pendingMove.label} → ${pendingMove.targetDir}…`}
+              </span>
+              <button
+                type="button"
+                title="Cancel move"
+                onClick={() => cancelPendingMoveRef.current()}
+                className="shrink-0 p-0.5 rounded hover:bg-white/15 text-zinc-300 hover:text-rose-300"
+              >
+                <X size={12} />
+              </button>
+            </div>
           )}
           {openJobs.map((job) => (
             <div key={job.transferId} className="pointer-events-auto max-w-full px-3 py-1.5 rounded-lg border text-[11px] font-mono shadow-2xl backdrop-blur-md bg-indigo-950/90 border-indigo-500/30 text-indigo-400 flex items-center gap-2">
