@@ -15,6 +15,6 @@
     "jsx": "react-jsx"
   },
   "include": ["src"],
-  "exclude": ["src/fs/dirContext.check.ts"],
+  "exclude": ["src/fs/dirContext.check.ts", "src/fs/pathCrumbs.check.ts"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

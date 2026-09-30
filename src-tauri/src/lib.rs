@@ -10592,7 +10592,17 @@ async fn select_local_folder() -> Result<Option<String>, String> {
 
 #[tauri::command]
 async fn local_list_dir(path: String) -> Result<Vec<LocalFileEntry>, String> {
-    let safe = guard_local_path(&path, false)?;
+    // Listing is read-only, so the filesystem root (`/`, `C:\`) is allowed
+    // here even though `guard_local_path` refuses it for every other local
+    // command. Only a path that is literally a root skips the guard: it has
+    // no component that could be a symlink or `..`, so there is nothing to
+    // canonicalize. Anything else still goes through the guard.
+    let as_path = std::path::Path::new(&path);
+    let safe = if as_path.has_root() && as_path.parent().is_none() {
+        as_path.to_path_buf()
+    } else {
+        guard_local_path(&path, false)?
+    };
     if !safe.is_dir() {
         return Err("Path is not a directory".into());
     }
