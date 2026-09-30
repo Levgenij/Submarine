@@ -30,6 +30,15 @@ export function parentPathOf(path: string, sep: "/" | "\\"): string {
   return trimmed.slice(0, idx);
 }
 
+// The backend lists the canonicalized directory, so on Windows entry paths
+// come back with the verbatim prefix (`\\?\C:\Users`, `\\?\UNC\srv\share`).
+// Drop it so the path bar and every later call use the ordinary form.
+export function stripVerbatimPrefix(path: string): string {
+  const unc = path.match(/^\\\\\?\\UNC\\(.*)$/i);
+  if (unc) return `\\\\${unc[1]}`;
+  return path.replace(/^\\\\\?\\(?=[a-zA-Z]:)/, "");
+}
+
 export function createLocalProvider(): LocalFileProvider {
   // Sep is computed lazily from the first real path we see (after `homePath`
   // resolves). Defaulting to `\` on Windows is fine because the renderer is
@@ -77,13 +86,13 @@ export function createLocalProvider(): LocalFileProvider {
       const raw = await invoke<RawLocalEntry[]>("local_list_dir", { path });
       const entries: FileEntry[] = raw.map((r) => ({
         name: r.name,
-        path: r.path,
+        path: stripVerbatimPrefix(r.path),
         isDir: r.is_dir,
         size: r.size,
         modified: r.modified,
       }));
       if (entries.length > 0) inferSep(entries[0].path);
-      return { currentPath: path, entries };
+      return { currentPath: stripVerbatimPrefix(path), entries };
     },
 
     joinPath(dir: string, name: string) {
