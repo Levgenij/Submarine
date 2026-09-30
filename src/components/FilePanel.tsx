@@ -6,7 +6,7 @@ import {
   Folder, FolderUp, File, ArrowUp, RefreshCw, Trash2, Edit3, Shield,
   X, ChevronUp, ChevronDown, Plus, MoreVertical, FolderSearch,
   Download, Upload, ExternalLink, Move, CheckSquare, Square, Search,
-  Terminal, Link,
+  Terminal, Link, Archive, PackageOpen,
 } from "lucide-react";
 import { FileEntry, FileProvider } from "../fs/types";
 import { mergePermissions, permissionOctal, safeLeafName, shellSingleQuote } from "../fs/dirContext";
@@ -18,6 +18,15 @@ import {
 import { parentPathOf } from "../fs/localProvider";
 import { pathCrumbs } from "../fs/pathCrumbs";
 import { canMoveInto, rulesFor, takenNames } from "../fs/moveRules";
+import {
+  ARCHIVE_FORMATS, ArchiveFormat, archiveFileName, archiveKind, extractFolderName, suggestArchiveBase,
+} from "../fs/archive";
+
+// Last format picked in the archive dialog. The remote side is remembered
+// per session (the same id the saved directories use): `zip` being installed
+// on one server says nothing about the next one.
+const archiveFormatKey = (providerId: string, sessionId?: string) =>
+  providerId === "remote" ? `submarine-archive-format-remote-${sessionId ?? ""}` : "submarine-archive-format-local";
 
 // Batch overwrite state shared across items in a single download/upload run.
 // Once the user picks "Overwrite all" or "Skip all" the kind is sticky and we
@@ -190,7 +199,9 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; entry: FileEntry } | null>(null);
   const [dirMenu, setDirMenu] = useState<{ x: number; y: number } | null>(null);
-  const [modal, setModal] = useState<{ type: "rename" | "mkdir" | "newfile" | "symlink" | "properties" | "move" | "move-bulk"; entry?: FileEntry; v1?: string; v2?: string } | null>(null);
+  // "archive": v1 is the name without extension, v2 the format, `items` what
+  // was selected when the dialog opened.
+  const [modal, setModal] = useState<{ type: "rename" | "mkdir" | "newfile" | "symlink" | "properties" | "move" | "move-bulk" | "archive"; entry?: FileEntry; items?: FileEntry[]; v1?: string; v2?: string } | null>(null);
   const [notification, setNotification] = useState<{ msg: string; type: "info" | "success" | "error" } | null>(null);
   const notifyTimerRef = useRef<number | null>(null);
 
@@ -210,6 +221,10 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // slot and while it renames.
   const [pendingMove, setPendingMove] = useState<{ label: string; targetDir: string; waiting: boolean } | null>(null);
   const cancelPendingMoveRef = useRef<() => void>(() => {});
+  // Archive / extract runs in progress, each its own row in the notice stack
+  // so a later notify() does not hide that one is still working.
+  const [busyJobs, setBusyJobs] = useState<{ id: number; label: string }[]>([]);
+  const busyJobSeqRef = useRef(0);
   // The handle is built once; this always points at the current render's
   // upload / download so a cross-pane drop doesn't run a stale closure.
   const sendItemsRef = useRef<(items: FileEntry[], destDir: string) => Promise<void>>(async () => {});
@@ -532,7 +547,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   const openMenu = (e: React.MouseEvent, entry: FileEntry) => {
     e.preventDefault();
     e.stopPropagation();
-    const MENU_W = 200, MENU_H = 320;
+    const MENU_W = 200, MENU_H = 380;
     const x = Math.min(e.clientX, window.innerWidth - MENU_W - 4);
     const y = Math.min(e.clientY, window.innerHeight - MENU_H - 4);
     // Right-click on a row that isn't already part of the selection should
@@ -882,6 +897,12 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   const submitModal = async () => {
     if (!modal) return;
     const { type, entry, v1, v2 } = modal;
+    if (type === "archive") {
+      // Stays open when the name is rejected; the packing itself runs on
+      // after the dialog closes.
+      if (await startArchive(modal.items ?? [], v1 || "", (v2 || "zip") as ArchiveFormat)) setModal(null);
+      return;
+    }
     if (type === "mkdir" || type === "newfile" || type === "symlink") {
       const label = type === "mkdir" ? "folder" : type === "newfile" ? "file" : "link";
       if (!safeLeafName(v1 || "")) {
@@ -1013,6 +1034,133 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       notify(items.length === 1 ? `Deleted ${items[0].name}` : `Deleted ${count} of ${items.length} items`, "success");
       await fetch(currentPath);
     }
+  };
+
+  // ---- archive / extract --------------------------------------------------------
+
+  const runBusyJob = async (label: string, work: () => Promise<void>) => {
+    const id = ++busyJobSeqRef.current;
+    setBusyJobs((cur) => [...cur, { id, label }]);
+    try {
+      await work();
+    } finally {
+      setBusyJobs((cur) => cur.filter((job) => job.id !== id));
+    }
+  };
+
+  // Shows what a finished job produced, unless the user has moved on to
+  // another folder. The refresh clears the selection, so it is put back.
+  const refreshAfterJob = async (dir: string) => {
+    if (currentPathRef.current !== dir) return;
+    const keep = new Set(selectedRef.current);
+    const anchor = lastSelectedPathRef.current;
+    await fetch(dir);
+    setSelected(keep);
+    lastSelectedPathRef.current = anchor;
+  };
+
+  const openArchiveDialog = (items: FileEntry[]) => {
+    if (items.length === 0) return;
+    const dirName = atFilesystemRoot(currentPath)
+      ? ""
+      : currentPath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "";
+    let format: ArchiveFormat = isRemoteProvider ? "tar.gz" : "zip";
+    try {
+      const saved = localStorage.getItem(archiveFormatKey(provider.id, sessionId));
+      const known = ARCHIVE_FORMATS.find((f) => f.format === saved);
+      if (known) format = known.format;
+    } catch { /* storage unavailable: keep the default */ }
+    setModal({
+      type: "archive",
+      items,
+      v1: suggestArchiveBase(items, dirName, entries.map((e) => e.name), moveRules().foldCase),
+      v2: format,
+    });
+  };
+
+  // False when the name was refused (the dialog stays open). True once the
+  // packing has started; it reports its own result.
+  const startArchive = async (items: FileEntry[], base: string, format: ArchiveFormat): Promise<boolean> => {
+    const name = base.trim() ? safeLeafName(archiveFileName(base, format)) : null;
+    if (!name || items.length === 0) {
+      notify("Failed: Invalid archive name", "error");
+      return false;
+    }
+    const rules = moveRules();
+    if (takenNames([name], items.map((it) => it.name), rules).size > 0) {
+      notify(`Failed: ${name} is one of the items being archived`, "error");
+      return false;
+    }
+    const dir = currentPath;
+    const dest = provider.joinPath(dir, name);
+    const confirmReplace = () => confirmDialog({
+      title: "Replace archive",
+      message: `“${name}” already exists in this folder. Replace it?`,
+      okLabel: "Replace",
+      destructive: true,
+    });
+    let overwrite = false;
+    const clash = entries.filter((e) => takenNames([name], [e.name], rules).size > 0);
+    // A folder is never replaced, so it must not be offered.
+    if (clash.some((e) => e.isDir)) {
+      notify(`Failed: a folder named ${name} already exists here`, "error");
+      return false;
+    }
+    if (clash.length > 0) {
+      if (!(await confirmReplace())) return false;
+      overwrite = true;
+    }
+    try { localStorage.setItem(archiveFormatKey(provider.id, sessionId), format); } catch { /* not remembered */ }
+    const names = items.map((it) => it.name);
+    const label = items.length === 1 ? items[0].name : `${items.length} items`;
+    void runBusyJob(`Archiving ${label} → ${name}…`, async () => {
+      try {
+        try {
+          await provider.archive(dir, names, dest, format, overwrite);
+        } catch (err: any) {
+          // The listing was stale: the name is taken after all.
+          if (overwrite || !String(err).startsWith("EXISTS:")) throw err;
+          if (!(await confirmReplace())) return;
+          await provider.archive(dir, names, dest, format, true);
+        }
+        notify(`Created ${name}`, "success");
+        await refreshAfterJob(dir);
+      } catch (err: any) {
+        notify(`Archive failed: ${err}`, "error");
+      }
+    });
+    return true;
+  };
+
+  // `intoFolder` unpacks into a folder named after the archive; otherwise
+  // into the current directory. Unpacking replaces same-named files without
+  // asking, so anything but a brand-new folder is confirmed first.
+  const extractEntry = async (entry: FileEntry, intoFolder: boolean) => {
+    const dir = currentPath;
+    const folder = extractFolderName(entry.name);
+    if (intoFolder && !folder) {
+      notify(`Failed: ${entry.name} has no usable folder name`, "error");
+      return;
+    }
+    const destDir = intoFolder ? provider.joinPath(dir, folder!) : dir;
+    const newFolder = intoFolder && takenNames([folder!], entries.map((e) => e.name), moveRules()).size === 0;
+    if (!newFolder) {
+      const ok = await confirmDialog({
+        title: "Extract archive",
+        message: `Extract “${entry.name}” into ${destDir}? Files with the same names will be replaced.`,
+        okLabel: "Extract",
+      });
+      if (!ok) return;
+    }
+    await runBusyJob(`Extracting ${entry.name}…`, async () => {
+      try {
+        await provider.extract(dir, entry.name, intoFolder ? folder : null);
+        notify(`Extracted ${entry.name} → ${destDir}`, "success");
+        await refreshAfterJob(dir);
+      } catch (err: any) {
+        notify(`Extract failed: ${err}`, "error");
+      }
+    });
   };
 
   // ---- contextual actions -----------------------------------------------------
@@ -1902,7 +2050,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         </div>
       </div>
 
-      {(notification || pendingMove || openJobs.length > 0) && (
+      {(notification || pendingMove || openJobs.length > 0 || busyJobs.length > 0) && (
         // Bottom-right of the list area: never over the path bar, and never
         // over the docked selection bar below the list. The
         // open-job row is its own element so a later notify() cannot take
@@ -1943,6 +2091,12 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
               >
                 <X size={12} />
               </button>
+            </div>
+          ))}
+          {busyJobs.map((job) => (
+            <div key={job.id} className="pointer-events-auto max-w-full px-3 py-1.5 rounded-lg border text-[11px] font-mono shadow-2xl backdrop-blur-md bg-indigo-950/90 border-indigo-500/30 text-indigo-400 flex items-center gap-2">
+              <RefreshCw size={11} className="shrink-0 animate-spin" />
+              <span className="min-w-0">{job.label}</span>
             </div>
           ))}
         </div>
@@ -2148,6 +2302,28 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           )}
 
           <div className="h-px bg-white/5 my-1" />
+          <button onClick={() => { setContextMenu(null); openArchiveDialog(acting); }}
+            className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
+            <Archive size={11} className="text-amber-300" />
+            <span>{multi ? `Add to archive (${acting.length})…` : "Add to archive…"}</span>
+          </button>
+          {!multi && !contextMenu.entry.isDir && archiveKind(contextMenu.entry.name) && (
+            <>
+              <button onClick={() => { setContextMenu(null); extractEntry(contextMenu.entry, false); }}
+                className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
+                <PackageOpen size={11} className="text-amber-300" /><span>Extract here</span>
+              </button>
+              {extractFolderName(contextMenu.entry.name) && (
+                <button onClick={() => { setContextMenu(null); extractEntry(contextMenu.entry, true); }}
+                  className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
+                  <PackageOpen size={11} className="text-amber-300 shrink-0" />
+                  <span className="truncate max-w-[260px]">Extract to “{extractFolderName(contextMenu.entry.name)}{provider.pathSep}”</span>
+                </button>
+              )}
+            </>
+          )}
+
+          <div className="h-px bg-white/5 my-1" />
           <button onClick={() => { setContextMenu(null); removeItems(acting); }}
             className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-rose-950/20 text-left text-rose-400">
             <Trash2 size={11} /><span>Delete{multi ? ` (${acting.length})` : ""}</span>
@@ -2218,6 +2394,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                  modal.type === "newfile" ? "New File" :
                  modal.type === "symlink" ? "New Symbolic Link" :
                  modal.type === "move" ? "Move to…" :
+                 modal.type === "archive" ? ((modal.items?.length ?? 0) > 1 ? `Archive ${modal.items!.length} items` : "Add to archive") :
                  modal.type === "move-bulk" ? `Move ${dirStats.selectedCount} items to…` : "Properties"}
               </span>
               <button onClick={() => setModal(null)} className="text-zinc-500 hover:text-white"><X size={12} /></button>
@@ -2317,6 +2494,41 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                       className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />
                   </div>
                 </>
+              ) : modal.type === "archive" ? (
+                <>
+                  <div>
+                    <label className="text-[10px] text-zinc-400 block mb-1">Archive name</label>
+                    <input type="text" autoFocus value={modal.v1 || ""}
+                      onFocus={(e) => e.currentTarget.select()}
+                      onChange={(e) => setModal({ ...modal, v1: e.target.value })}
+                      onKeyDown={(e) => e.key === "Enter" && submitModal()}
+                      className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-zinc-400 block mb-1">Format</label>
+                    <div className="grid grid-cols-3 gap-1">
+                      {ARCHIVE_FORMATS.map((f) => (
+                        <button
+                          key={f.format}
+                          type="button"
+                          aria-pressed={modal.v2 === f.format}
+                          onClick={() => setModal({ ...modal, v2: f.format })}
+                          className={`h-7 rounded border transition-colors ${
+                            modal.v2 === f.format
+                              ? "bg-indigo-500/20 border-indigo-400/40 text-indigo-200"
+                              : "bg-white/[0.04] border-white/10 text-zinc-400 hover:bg-white/[0.08]"
+                          }`}
+                        >
+                          {f.ext}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="text-[10px] text-zinc-500 truncate" title={provider.joinPath(currentPath, archiveFileName(modal.v1 || "", (modal.v2 || "zip") as ArchiveFormat))}>
+                    Saved here as{" "}
+                    <span className="text-zinc-300">{archiveFileName(modal.v1 || "", (modal.v2 || "zip") as ArchiveFormat)}</span>
+                  </div>
+                </>
               ) : (
                 <div>
                   <label className="text-[10px] text-zinc-400 block mb-1">
@@ -2332,7 +2544,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
               )}
               <div className="flex gap-2 justify-end pt-2">
                 <button onClick={() => setModal(null)} className="px-3 h-7 rounded border border-white/5 text-zinc-400 hover:text-white">Cancel</button>
-                <button onClick={submitModal} className="px-3 h-7 rounded bg-indigo-500 text-white font-bold hover:bg-indigo-600">Apply</button>
+                <button onClick={submitModal} className="px-3 h-7 rounded bg-indigo-500 text-white font-bold hover:bg-indigo-600">{modal.type === "archive" ? "Create" : "Apply"}</button>
               </div>
             </div>
           </div>
