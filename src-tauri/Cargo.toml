@@ -126,6 +126,11 @@ zstd = { version = "0.14", default-features = false }
 # String/Vec passed as args to argon2/aes-gcm are zeroized internally by
 # those crates.
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
+# Archive / extract in the local file panel (the remote side runs tar / zip on
+# the server). deflate-flate2 reuses the flate2 already in the tree via russh.
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
+tar = { version = "0.4.46", default-features = false }
+flate2 = "1.1.10"
 
 # ---------------------------------------------------------------------------
 # Desktop-only deps. These crates either don't compile on Android at all

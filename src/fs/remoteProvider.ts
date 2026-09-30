@@ -79,6 +79,16 @@ export function createRemoteProvider(sessionId: string): RemoteFileProvider {
       await invoke("sftp_rename", { sessionId, oldpath: from, newpath: to });
     },
 
+    // Both run `tar` / `zip` / `unzip` on the server, so nothing is
+    // transferred; see `archive.rs`.
+    async archive(dir, names, dest, format, overwrite) {
+      await invoke("sftp_archive", { sessionId, dir, names, dest, format, overwrite });
+    },
+
+    async extract(dir: string, name: string, folder: string | null) {
+      await invoke("sftp_extract", { sessionId, dir, name, folder });
+    },
+
     async chmod(path: string, mode: number) {
       await invoke("sftp_set_permissions", { sessionId, path, permissions: mode });
     },

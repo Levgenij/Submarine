@@ -20,6 +20,7 @@ mod cloud;
 mod about;
 mod mirror;
 mod docker;
+mod archive;
 mod hlc;
 mod identity;
 use ssh_manager::SshState;
@@ -11429,6 +11430,7 @@ pub fn run() {
             sftp_rename, sftp_set_permissions, sftp_set_owner,
             sftp_download_file, sftp_download_dir, sftp_upload_file, sftp_upload_dir, sftp_cancel_transfer, sftp_open_remote_file,
             local_open_file, local_open_in_explorer, sftp_prepare_drag,
+            archive::local_archive, archive::local_extract, archive::sftp_archive, archive::sftp_extract,
             monitor_list, monitor_add, monitor_remove, monitor_set_metrics, monitor_set_custom_metrics,
             monitor_resume, monitor_pause, monitor_resume_all, monitor_pause_all,
             monitor_get_settings, monitor_set_settings,
