@@ -6,10 +6,10 @@ import {
   Folder, FolderUp, File, ArrowUp, RefreshCw, Trash2, Edit3, Shield,
   X, ChevronUp, ChevronDown, Plus, MoreVertical, FolderSearch,
   Download, Upload, ExternalLink, Move, CheckSquare, Square, Search,
-  Terminal, Link,
+  Terminal, Link, FolderSymlink, FileSymlink, CornerDownRight,
 } from "lucide-react";
-import { FileEntry, FileProvider } from "../fs/types";
-import { mergePermissions, permissionOctal, safeLeafName, shellSingleQuote } from "../fs/dirContext";
+import { FileEntry, FileProvider, LinkInfo } from "../fs/types";
+import { carryLinkState, mergePermissions, permissionOctal, safeLeafName, shellSingleQuote } from "../fs/dirContext";
 import { useConfirm, useOverwritePrompt, OverwriteChoice } from "../ui/confirm";
 import { IS_ANDROID } from "../util/platform";
 
@@ -131,6 +131,20 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   const pendingPathRef = useRef<string | null>(null);
   const waitersRef = useRef<Array<() => void>>([]);
   const lastOkRef = useRef(false);
+  // Row to select when a listing of exactly `dir` lands. Set by "Go to
+  // target" on a file symlink; any other listing drops it unused.
+  const selectAfterListRef = useRef<{ dir: string; name: string } | null>(null);
+  const scrollToPathRef = useRef<string | null>(null);
+  // Bumped on every listing. Background link resolution captures it and
+  // stops once the pane shows something newer.
+  const listGenRef = useRef(0);
+  // Set while a directory link is being opened: `from` is where the link
+  // lives. The listing of `linkPath` turns it into `linkBack`.
+  const linkEntryRef = useRef<{ linkPath: string; from: string } | null>(null);
+  // The listing canonicalizes a link path to its real directory, whose
+  // parent is not where the user came from. While the pane sits in `dir`,
+  // ".." returns to `back` instead.
+  const [linkBack, setLinkBack] = useState<{ dir: string; back: string } | null>(null);
   // Multi-selection lives as a Set of paths. Single-click replaces, Ctrl/⌘-
   // click toggles a row in/out, Shift-click extends from the last-clicked
   // anchor. lastSelectedPathRef remembers that anchor across renders.
@@ -157,6 +171,16 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   const menuRef = useRef<HTMLDivElement | null>(null);
   const currentPathRef = useRef(currentPath);
   useEffect(() => { currentPathRef.current = currentPath; }, [currentPath]);
+  const entriesRef = useRef(entries);
+  useEffect(() => { entriesRef.current = entries; }, [entries]);
+  useEffect(() => {
+    const path = scrollToPathRef.current;
+    if (!path) return;
+    scrollToPathRef.current = null;
+    dropTargetRef.current?.querySelectorAll<HTMLElement>("[data-fs-row-path]").forEach((row) => {
+      if (row.getAttribute("data-fs-row-path") === path) row.scrollIntoView({ block: "center" });
+    });
+  }, [entries]);
 
   // Android quick-picker state. There is no OS-level folder picker that
   // returns a real filesystem path on Android (SAF returns content URIs
@@ -198,6 +222,10 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
   };
 
+  // Paths compare and split without a trailing separator; a bare root keeps
+  // its one separator.
+  const stripTrailingSep = (p: string) => p.replace(/[\\/]+$/, "") || p;
+
   // ---- listing / navigation ---------------------------------------------------
 
   const pushRecent = (path: string) => {
@@ -206,6 +234,51 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       const next = [path, ...prev.filter((p) => p !== path)];
       return next.slice(0, 5);
     });
+  };
+
+  // A fresh answer about a link supersedes whatever was carried over.
+  const applyLinkInfo = (infos: LinkInfo[]) => {
+    const byPath = new Map(infos.map((i) => [i.path, i.patch]));
+    setEntries((prev) => prev.map((e) => {
+      const patch = e.isSymlink ? byPath.get(e.path) : undefined;
+      return patch ? { ...e, ...patch, linkStale: undefined } : e;
+    }));
+  };
+
+  // The whole `resolveLinks` call failed, so nothing is known about these
+  // links any more: drop the folder they may have been, record the error.
+  const linkCallFailed = (paths: string[], err: unknown): LinkInfo[] => {
+    const patch: Partial<FileEntry> = { linkState: "error", linkError: String(err), isDir: false };
+    return paths.map((path) => ({ path, patch }));
+  };
+
+  // Not yet followed, or followed once and not confirmed since.
+  const needsResolve = (e: FileEntry) =>
+    !!e.isSymlink && (e.linkStale || (e.linkState !== "ok" && e.linkState !== "broken"));
+
+  // Follows the symlinks of a listing that is already on screen, in chunks,
+  // so a directory full of links does not delay its own first paint. Links
+  // carried over as "ok" by `carryLinkState` are skipped here and re-checked
+  // lazily by `ensureResolvedAll`; broken and failed ones are tried again.
+  // A failed chunk marks its links so the failure is visible; opening one
+  // retries it.
+  const resolveListedLinks = async (gen: number, list: FileEntry[]) => {
+    if (!provider.resolveLinks) return;
+    const paths = list.filter((e) => e.isSymlink && e.linkState !== "ok").map((e) => e.path);
+    const CHUNK = 64;
+    for (let i = 0; i < paths.length; i += CHUNK) {
+      if (listGenRef.current !== gen) return;
+      const chunk = paths.slice(i, i + CHUNK);
+      try {
+        const infos = await provider.resolveLinks(chunk);
+        if (listGenRef.current !== gen) return;
+        applyLinkInfo(infos);
+      } catch (err) {
+        if (listGenRef.current !== gen) return;
+        applyLinkInfo(linkCallFailed(chunk, err));
+        return;
+      }
+    }
   };
 
   // `silent` skips the error toast. Used for the saved initial path, which
@@ -238,11 +311,29 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             pendingPathRef.current = null;
             continue;
           }
-          setEntries(result.entries);
+          const listed = result.currentPath === currentPathRef.current
+            ? carryLinkState(result.entries, entriesRef.current)
+            : result.entries;
+          const gen = ++listGenRef.current;
+          setEntries(listed);
           setCurrentPath(result.currentPath);
           setTempInput(result.currentPath);
-          setSelected(new Set());
-          lastSelectedPathRef.current = null;
+          const via = linkEntryRef.current;
+          linkEntryRef.current = null;
+          if (via && via.linkPath === requested && via.from !== result.currentPath) {
+            setLinkBack({ dir: result.currentPath, back: via.from });
+          } else {
+            setLinkBack((prev) => (prev && prev.dir === result.currentPath ? prev : null));
+          }
+          const sel = selectAfterListRef.current;
+          selectAfterListRef.current = null;
+          const focus = sel && stripTrailingSep(sel.dir) === stripTrailingSep(result.currentPath)
+            ? listed.find((e) => e.name === sel.name)
+            : undefined;
+          scrollToPathRef.current = focus ? focus.path : null;
+          setSelected(new Set(focus ? [focus.path] : []));
+          lastSelectedPathRef.current = focus ? focus.path : null;
+          void resolveListedLinks(gen, listed);
           onPathChange?.(result.currentPath);
           pushRecent(result.currentPath);
           ok = true;
@@ -253,6 +344,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             pendingPathRef.current = null;
             continue;
           }
+          selectAfterListRef.current = null;
+          linkEntryRef.current = null;
           if (!silent || requested !== path) notify(`List failed: ${err}`, "error");
           ok = false;
         }
@@ -295,7 +388,109 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     currentDir: () => currentPathRef.current,
   }), []);
 
-  const goUp = () => fetch(provider.parentPath(currentPath));
+  const cameViaLink = linkBack !== null && linkBack.dir === currentPath;
+  const goUp = () => fetch(cameViaLink ? linkBack!.back : provider.parentPath(currentPath));
+
+  // Latest known state of each entry, following the links the background
+  // pass has not reached, failed on, or only carried over from an earlier
+  // listing. Needed before any action that depends on what a link points
+  // at: until resolved, a link looks like a file.
+  const ensureResolvedAll = async (items: FileEntry[]): Promise<FileEntry[]> => {
+    const live = items.map((entry) => entriesRef.current.find((e) => e.path === entry.path) ?? entry);
+    const unresolved = live.filter(needsResolve);
+    if (unresolved.length === 0 || !provider.resolveLinks) return live;
+    const paths = unresolved.map((e) => e.path);
+    let infos: LinkInfo[];
+    try {
+      infos = await provider.resolveLinks(paths);
+    } catch (err) {
+      infos = linkCallFailed(paths, err);
+    }
+    applyLinkInfo(infos);
+    const byPath = new Map(infos.map((i) => [i.path, i.patch]));
+    return live.map((e) => {
+      const patch = byPath.get(e.path);
+      return patch ? { ...e, ...patch, linkStale: undefined } : e;
+    });
+  };
+  const ensureResolved = async (entry: FileEntry): Promise<FileEntry> =>
+    (await ensureResolvedAll([entry]))[0];
+
+  // True (after telling the user why) when the link cannot be followed.
+  const linkUnusable = (entry: FileEntry): boolean => {
+    if (entry.linkState === "broken") {
+      notify(`Broken link: ${entry.name} → ${entry.linkTarget ?? "?"}`, "error");
+      return true;
+    }
+    if (entry.linkState !== "ok") {
+      notify(`Cannot read the target of ${entry.name}: ${entry.linkError ?? "not resolved"}`, "error");
+      return true;
+    }
+    return false;
+  };
+
+  // Enter a directory through a link to it. The listing canonicalizes the
+  // path; `linkEntryRef` makes ".." return to the directory holding the link,
+  // which is the current one for a row and may be elsewhere for a suggestion.
+  const enterDirLink = (entry: FileEntry) => {
+    linkEntryRef.current = { linkPath: entry.path, from: provider.parentPath(entry.path) };
+    fetch(entry.path);
+  };
+
+  // Double-click / Open / Edit. A directory link is entered through the
+  // link, so ".." comes back here; a file link opens like the file it points
+  // at. Everything past the resolve step works on the fresh entry: the row's
+  // own `isDir` may describe what the link pointed at before a refresh.
+  const openEntry = async (row: FileEntry) => {
+    let entry = row;
+    if (row.isSymlink) {
+      const from = currentPath;
+      entry = await ensureResolved(row);
+      if (currentPathRef.current !== from || linkUnusable(entry)) return;
+      if (entry.isDir) { enterDirLink(entry); return; }
+    } else if (entry.isDir) {
+      fetch(entry.path);
+      return;
+    }
+    // For files: remote → live-edit (download + open editor + auto-upload
+    // on save); local → open in the OS default app. Both are desktop-only —
+    // on Android a double-tap on a file is a no-op (there's no OS default
+    // editor to hand off to).
+    if (IS_ANDROID) return;
+    if (isRemote) liveEditEntry(entry);
+    else openLocalEntry(entry);
+  };
+
+  // Properties edits the target's mode and owner (chmod/chown follow the
+  // link), so a link is followed first and the dialog shows fresh values.
+  const openProperties = async (row: FileEntry) => {
+    const entry = row.isSymlink ? await ensureResolved(row) : row;
+    if (entry.isSymlink && linkUnusable(entry)) return;
+    setModal({ type: "properties", entry, v1: permissionOctal(entry.permissions), v2: entry.uid?.toString() });
+  };
+
+  // Jump to where the link really points, leaving the link behind: a
+  // directory target is opened by its real path (".." is then its real
+  // parent); a file target is selected inside its own directory.
+  const goToLinkTarget = async (entry: FileEntry) => {
+    if (!provider.realPath) return;
+    const from = currentPath;
+    const resolved = await ensureResolved(entry);
+    if (currentPathRef.current !== from || linkUnusable(resolved)) return;
+    let real: string;
+    try {
+      real = await provider.realPath(entry.path);
+    } catch (err: any) {
+      notify(`Cannot resolve ${entry.name}: ${err}`, "error");
+      return;
+    }
+    if (currentPathRef.current !== from) return;
+    if (resolved.isDir) { fetch(real); return; }
+    const target = stripTrailingSep(real);
+    const dir = provider.parentPath(target);
+    selectAfterListRef.current = { dir, name: target.split(provider.pathSep).pop() ?? "" };
+    fetch(dir);
+  };
 
   // WinSCP-style ".." row. Hidden at a filesystem root, where parentPath is
   // the same place (remote "/") or a drive root ("C:\"). Not a real entry:
@@ -306,7 +501,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     const trimmed = path.replace(/[\\/]+$/, "");
     return trimmed === "" || /^[a-zA-Z]:$/.test(trimmed);
   };
-  const showParent = currentPath.length > 0 && !atFilesystemRoot(currentPath);
+  const showParent = currentPath.length > 0 && (cameViaLink || !atFilesystemRoot(currentPath));
 
   // ---- selection -------------------------------------------------------------
 
@@ -398,10 +593,15 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     return source.filter(e => e.name.toLowerCase().startsWith(leafLower));
   })();
 
-  const pickSuggestion = (e: FileEntry) => {
+  // A link in the suggestions was never followed (only the pane's own
+  // listing gets the background pass), so ask before deciding to enter it.
+  const pickSuggestion = async (e: FileEntry) => {
     setTempInput(e.path);
-    if (e.isDir) fetch(e.path);
     setInputFocused(false);
+    const resolved = e.isSymlink ? await ensureResolved(e) : e;
+    if (!resolved.isDir) return;
+    if (e.isSymlink) enterDirLink(e);
+    else fetch(e.path);
   };
 
   // ---- context menu auto-close ------------------------------------------------
@@ -444,7 +644,12 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
 
   const handleRowMouseDown = (e: React.MouseEvent, entry: FileEntry) => {
     if (disabled || e.button !== 0) return;
-    if (entry.isDir) return; // folder drag handled later
+    // folder drag handled later. A link drags only once it is known to
+    // point at a file: unresolved or carried over from an earlier listing,
+    // it may turn out to be a folder or gone. Re-check now so the next
+    // attempt can go ahead.
+    if (entry.isDir) return;
+    if (needsResolve(entry)) { void ensureResolved(entry); return; }
 
     const startX = e.clientX;
     const startY = e.clientY;
@@ -659,17 +864,24 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     const ok = await confirmDialog({
       title: items.length === 1 ? "Delete item" : `Delete ${items.length} items`,
       message: items.length === 1
-        ? (items[0].isDir
+        ? (items[0].isSymlink
+            ? `Delete link “${items[0].name}”? Its target is not touched.`
+            : items[0].isDir
             ? `Permanently delete folder “${items[0].name}” and everything inside?`
             : `Permanently delete “${items[0].name}”?`)
-        : `Permanently delete ${items.length} items? Folders include their contents.`,
+        : `Permanently delete ${items.length} items?${
+            items.some((e) => e.isDir && !e.isSymlink) ? " Folders include their contents." : ""
+          }${
+            items.some((e) => e.isSymlink) ? " Links are removed without touching their targets." : ""
+          }`,
       okLabel: "Delete",
       destructive: true,
     });
     if (!ok) return;
     let count = 0;
     for (const it of items) {
-      try { await provider.remove(it.path, it.isDir); count++; }
+      // A link is unlinked as a file even when it points at a directory.
+      try { await provider.remove(it.path, it.isDir && !it.isSymlink); count++; }
       catch (err: any) { notify(`Delete failed for ${it.name}: ${err}`, "error"); }
     }
     if (count > 0) {
@@ -691,7 +903,19 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // and preserves structure; individual files go through the single-file
   // command. Both paths emit progress on the same `sftp-transfer-{id}`
   // channel so the user sees uniform cards.
-  const downloadItems = async (items: FileEntry[]) => {
+  const downloadItems = async (selection: FileEntry[]) => {
+    // A link to a folder is left out: `sftp_download_dir` would walk the
+    // target's tree, which is not what selecting the link row asks for.
+    // Links are followed first, since an unresolved one looks like a file.
+    const resolved = await ensureResolvedAll(selection);
+    const items = resolved.filter((e) => !(e.isSymlink && e.isDir));
+    const skippedLinks = selection.length - items.length;
+    if (skippedLinks > 0) {
+      notify(
+        `Skipped ${skippedLinks} folder link${skippedLinks === 1 ? "" : "s"} — open a link to download its contents`,
+        "info",
+      );
+    }
     if (!sessionId || items.length === 0) return;
     let dest = getOppositeDir?.();
     if (!dest) {
@@ -856,6 +1080,9 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         continue;
       }
       fileCount++;
+      // A link's size is its target's once resolved; that file lives
+      // elsewhere and is not part of this directory's total.
+      if (entry.isSymlink) continue;
       totalBytes += entry.size || 0;
       if (isSelected) selectedBytes += entry.size || 0;
     }
@@ -1323,7 +1550,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           {showParent && (
             <div
               onDoubleClick={(e) => { e.stopPropagation(); goUp(); }}
-              title="Parent directory"
+              title={cameViaLink ? `Back to ${linkBack!.back}` : "Parent directory"}
               className={`grid ${
                 showPerms
                   ? "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_65px_115px_85px]"
@@ -1351,16 +1578,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                 onMouseDown={(e) => handleRowMouseDown(e, entry)}
                 onContextMenu={(e) => openMenu(e, entry)}
                 onClick={(e) => onRowClick(e, entry, sortedEntries)}
-                onDoubleClick={() => {
-                  if (entry.isDir) { fetch(entry.path); return; }
-                  // For files: remote → live-edit (download + open editor +
-                  // auto-upload on save); local → open in the OS default app.
-                  // Both are desktop-only — on Android a double-tap on a file
-                  // is a no-op (there's no OS default editor to hand off to).
-                  if (IS_ANDROID) return;
-                  if (isRemote) liveEditEntry(entry);
-                  else openLocalEntry(entry);
-                }}
+                onDoubleClick={() => { openEntry(entry); }}
                 data-fs-row-path={entry.path}
                 data-fs-row-isdir={entry.isDir ? "1" : "0"}
                 className={`group grid ${
@@ -1399,11 +1617,41 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                     : <Square size={12} className="text-zinc-500 hover:text-zinc-300" />}
                 </div>
                 <div className="flex items-center gap-2 min-w-0 pr-1">
-                  {entry.isDir
+                  {/* A link's kind is unknown until STAT answers: a bare
+                      chain until then, file or folder link afterwards. */}
+                  {entry.isSymlink
+                    ? (entry.linkState === "pending"
+                        ? <Link size={12} className="text-zinc-500 shrink-0" />
+                        : entry.isDir
+                        ? <FolderSymlink size={12} className="text-cyan-300 shrink-0" />
+                        : <FileSymlink size={12} className={`${
+                            entry.linkState === "broken" ? "text-rose-400"
+                              : entry.linkState === "error" ? "text-amber-400"
+                              : "text-cyan-300"
+                          } shrink-0`} />)
+                    : entry.isDir
                     ? <Folder size={12} className="text-indigo-300 shrink-0" />
                     : <File size={12} className="text-zinc-500 shrink-0" />}
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-zinc-100 text-[11px]">{entry.name}</div>
+                    <div
+                      className="truncate text-zinc-100 text-[11px]"
+                      title={entry.isSymlink
+                        ? `${entry.name} → ${entry.linkTarget ?? "…"}${
+                            entry.linkState === "broken" ? " (broken)"
+                              : entry.linkState === "error" ? ` (${entry.linkError ?? "target unreadable"})`
+                              : ""
+                          }`
+                        : undefined}
+                    >
+                      {entry.name}
+                      {entry.isSymlink && entry.linkTarget && (
+                        <span className={`font-normal ${
+                          entry.linkState === "broken" ? "text-rose-400/80"
+                            : entry.linkState === "error" ? "text-amber-400/80"
+                            : "text-zinc-500"
+                        }`}> → {entry.linkTarget}</span>
+                      )}
+                    </div>
                     {/* Narrow-viewport subline: on < sm the SIZE / CHANGED /
                         RIGHTS cells are display:none (so they don't force
                         horizontal scroll), and their info collapses into
@@ -1484,6 +1732,15 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         const acting = selectedEntries.length > 0 ? selectedEntries : [contextMenu.entry];
         const multi = acting.length > 1;
         const selectedFileCount = acting.filter(e => !e.isDir).length;
+        // The menu holds the entry as it was when opened; a link may have
+        // been resolved since. Every per-item action below uses the live
+        // one: the snapshot of a link carries lstat data (mode 777, not a
+        // directory) that must not drive chmod or the file/folder choice.
+        const menuEntry = entries.find(e => e.path === contextMenu.entry.path) ?? contextMenu.entry;
+        // Not confirmed to point at a file (pending, broken, unreadable), so
+        // file actions do not apply. Only Open, which resolves first and
+        // explains a failure, makes sense.
+        const unresolvedLink = menuEntry.isSymlink && menuEntry.linkState !== "ok";
         return (
         <div ref={menuRef}
           style={{ top: contextMenu.y, left: contextMenu.x }}
@@ -1491,10 +1748,13 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
 
           {/* Primary action: open folder, or transfer/edit file. The exact
               set depends on which side this panel is on. */}
-          {contextMenu.entry.isDir && !multi ? (
-            <button onClick={() => { setContextMenu(null); fetch(contextMenu.entry.path); }}
+          {(menuEntry.isDir || unresolvedLink) && !multi ? (
+            <button onClick={() => { setContextMenu(null); openEntry(menuEntry); }}
               className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
-              <Folder size={11} className="text-indigo-400" /><span>Open</span>
+              {menuEntry.isDir
+                ? <Folder size={11} className="text-indigo-400" />
+                : <Link size={11} className="text-cyan-300" />}
+              <span>Open</span>
             </button>
           ) : isRemote ? (
             <>
@@ -1507,24 +1767,32 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                   filesystem watcher. Android has none of those in a form we
                   can bridge, so the backend command returns an error there
                   — hide the menu item entirely rather than surface it. */}
-              {!multi && !contextMenu.entry.isDir && !IS_ANDROID && (
-                <button onClick={() => { setContextMenu(null); liveEditEntry(contextMenu.entry); }}
+              {!multi && !menuEntry.isDir && !IS_ANDROID && (
+                <button onClick={() => { setContextMenu(null); openEntry(menuEntry); }}
                   className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
                   <ExternalLink size={11} className="text-indigo-400" /><span>Edit (auto-upload)</span>
                 </button>
               )}
             </>
           ) : (
-            !multi && !contextMenu.entry.isDir && !IS_ANDROID && (
-              <button onClick={() => { setContextMenu(null); openLocalEntry(contextMenu.entry); }}
+            !multi && !menuEntry.isDir && !IS_ANDROID && (
+              <button onClick={() => { setContextMenu(null); openLocalEntry(menuEntry); }}
                 className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
                 <ExternalLink size={11} className="text-indigo-400" /><span>Open</span>
               </button>
             )
           )}
 
+          {!multi && menuEntry.isSymlink && menuEntry.linkState !== "broken" && provider.realPath && (
+            <button onClick={() => { setContextMenu(null); goToLinkTarget(menuEntry); }}
+              title={menuEntry.linkTarget}
+              className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
+              <CornerDownRight size={11} className="text-cyan-300" /><span>Go to target</span>
+            </button>
+          )}
+
           {!isRemote && !multi && !IS_ANDROID && (
-            <button onClick={() => { setContextMenu(null); revealLocalEntry(contextMenu.entry); }}
+            <button onClick={() => { setContextMenu(null); revealLocalEntry(menuEntry); }}
               className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
               <FolderSearch size={11} className="text-emerald-300" /><span>Reveal in Explorer</span>
             </button>
@@ -1554,8 +1822,10 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
             <Move size={11} /><span>{multi ? `Move (${acting.length}) to…` : "Move to…"}</span>
           </button>
-          {!multi && provider.chmod && (
-            <button onClick={() => { setContextMenu(null); setModal({ type: "properties", entry: contextMenu.entry, v1: permissionOctal(contextMenu.entry.permissions), v2: contextMenu.entry.uid?.toString() }); }}
+          {/* A broken link has no target to chmod; anything else is
+              followed on click. */}
+          {!multi && provider.chmod && menuEntry.linkState !== "broken" && (
+            <button onClick={() => { setContextMenu(null); openProperties(menuEntry); }}
               className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
               <Shield size={11} /><span>Properties</span>
             </button>
