@@ -2,7 +2,7 @@
 // component is mounted twice — once with a LocalProvider and once with a
 // RemoteProvider — and dispatches all I/O through this interface.
 //
-// Cross-pane transfer is handled outside the provider (see `transfer.ts`) so
+// Cross-pane transfer is handled outside the provider (the panels' upload / download batches) so
 // each backend can keep its own fast path (e.g. `sftp_download_file` writes
 // directly to disk instead of round-tripping through a JS `Uint8Array`).
 

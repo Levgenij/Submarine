@@ -129,6 +129,20 @@ select optgroup {
   }
 }
 
+/* Drop target of a cross-pane drag (set by SftpWorkspace): the folder row,
+   ".." row or path segment under the cursor, or the whole pane when the
+   release would land in its current directory. */
+[data-fs-drop-path][data-fs-drop-hover] {
+  background-color: rgb(99 102 241 / 0.2);
+  outline: 1px solid rgb(129 140 248);
+  outline-offset: -1px;
+}
+
+[data-fs-pane][data-fs-drop-hover] {
+  outline: 2px solid rgb(129 140 248);
+  outline-offset: -2px;
+}
+
 /* ==========================================================================
    BULLETPROOF THEMED SCROLLBAR OVERRIDES
    ========================================================================== */
