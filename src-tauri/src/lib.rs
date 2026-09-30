@@ -7609,6 +7609,9 @@ struct SftpFileEntry {
     uid: Option<u32>,
     gid: Option<u32>,
     modified: Option<u64>,
+    /// The entry itself is a symbolic link. Everything above is the link's
+    /// own lstat data; the target is resolved later by `sftp_resolve_links`.
+    is_symlink: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -7700,6 +7703,16 @@ async fn sftp_list_dir(
         if name == "." || name == ".." {
             continue;
         }
+        let entry_path = if canonical_path.ends_with('/') {
+            format!("{}{}", canonical_path, name)
+        } else {
+            format!("{}/{}", canonical_path, name)
+        };
+
+        // READDIR reports lstat attributes, so a link shows up as a link.
+        // Its target is not followed here: that costs round-trips per link
+        // and would hold the listing back. See `sftp_resolve_links`.
+        let is_symlink = entry.file_type().is_symlink();
         let is_dir = entry.file_type().is_dir();
         let metadata = entry.metadata();
         let size = metadata.size.unwrap_or(0);
@@ -7707,13 +7720,7 @@ async fn sftp_list_dir(
         let uid = metadata.uid;
         let gid = metadata.gid;
         let modified = metadata.mtime.map(|t| t as u64);
-        
-        let entry_path = if canonical_path.ends_with('/') {
-            format!("{}{}", canonical_path, name)
-        } else {
-            format!("{}/{}", canonical_path, name)
-        };
-        
+
         entries.push(SftpFileEntry {
             name,
             path: entry_path,
@@ -7723,6 +7730,7 @@ async fn sftp_list_dir(
             uid,
             gid,
             modified,
+            is_symlink,
         });
     }
     
@@ -7790,6 +7798,110 @@ async fn sftp_create_symlink(
     let (first, second) = openssh_symlink_args(path, target);
     sftp.symlink(first, second).await.map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct SftpLinkInfo {
+    path: String,
+    /// "ok": target attributes below are valid. "broken": the target does
+    /// not exist or the chain loops. "error": STAT failed for another reason
+    /// (permissions, transport), so nothing is known about the target.
+    state: &'static str,
+    /// Raw READLINK text (may be relative).
+    target: Option<String>,
+    error: Option<String>,
+    /// Attributes of the target when followed, of the link itself (LSTAT)
+    /// otherwise, so a link that stopped resolving does not keep showing
+    /// the folder it used to point at.
+    is_dir: bool,
+    size: Option<u64>,
+    permissions: Option<u32>,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    modified: Option<u64>,
+}
+
+/// OpenSSH maps ENOENT, ENOTDIR and ELOOP to SSH_FX_NO_SUCH_FILE. Only that
+/// status means the link is dangling; EACCES or a dropped channel must not.
+fn link_stat_failure_state(err: &russh_sftp::client::error::Error) -> &'static str {
+    use russh_sftp::client::error::Error;
+    use russh_sftp::protocol::StatusCode;
+    match err {
+        Error::Status(status) if status.status_code == StatusCode::NoSuchFile => "broken",
+        _ => "error",
+    }
+}
+
+async fn resolve_sftp_link(sftp: &russh_sftp::client::SftpSession, path: String) -> SftpLinkInfo {
+    let (target, stat) = tokio::join!(sftp.read_link(path.as_str()), sftp.metadata(path.as_str()));
+    let mut info = SftpLinkInfo {
+        path,
+        state: "ok",
+        target: target.ok(),
+        error: None,
+        is_dir: false,
+        size: None,
+        permissions: None,
+        uid: None,
+        gid: None,
+        modified: None,
+    };
+    let meta = match stat {
+        Ok(meta) => Some(meta),
+        Err(e) => {
+            info.state = link_stat_failure_state(&e);
+            info.error = Some(e.to_string());
+            sftp.symlink_metadata(info.path.as_str()).await.ok()
+        }
+    };
+    if let Some(meta) = meta {
+        info.is_dir = meta.file_type().is_dir();
+        info.size = meta.size;
+        info.permissions = meta.permissions;
+        info.uid = meta.uid;
+        info.gid = meta.gid;
+        info.modified = meta.mtime.map(|t| t as u64);
+    }
+    info
+}
+
+/// Follows the given symlinks (READLINK + STAT each). Called by the file pane
+/// after the directory is already on screen. Results carry their path, so
+/// the order is not significant.
+#[tauri::command]
+async fn sftp_resolve_links(
+    state: tauri::State<'_, SshState>,
+    session_id: String,
+    paths: Vec<String>,
+) -> Result<Vec<SftpLinkInfo>, String> {
+    const CONCURRENCY: usize = 8;
+    let sftp = get_sftp_session(&state, &session_id).await?;
+    let mut out = Vec::with_capacity(paths.len());
+    for chunk in paths.chunks(CONCURRENCY) {
+        let mut set = tokio::task::JoinSet::new();
+        for path in chunk {
+            let sftp = Arc::clone(&sftp);
+            let path = path.clone();
+            set.spawn(async move { resolve_sftp_link(&sftp, path).await });
+        }
+        while let Some(joined) = set.join_next().await {
+            if let Ok(info) = joined {
+                out.push(info);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// REALPATH: absolute path with every symlink component resolved.
+#[tauri::command]
+async fn sftp_realpath(
+    state: tauri::State<'_, SshState>,
+    session_id: String,
+    path: String,
+) -> Result<String, String> {
+    let sftp = get_sftp_session(&state, &session_id).await?;
+    sftp.canonicalize(path).await.map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]
@@ -10933,7 +11045,7 @@ pub fn run() {
             android_quick_dirs, android_default_local_dir,
             parse_ssh_config,
             parse_client_import,
-            sftp_list_dir, sftp_create_dir, sftp_create_file, sftp_create_symlink, sftp_stat, sftp_remove_file, sftp_remove_dir,
+            sftp_list_dir, sftp_create_dir, sftp_create_file, sftp_create_symlink, sftp_resolve_links, sftp_realpath, sftp_stat, sftp_remove_file, sftp_remove_dir,
             sftp_rename, sftp_set_permissions, sftp_set_owner,
             sftp_download_file, sftp_download_dir, sftp_upload_file, sftp_upload_dir, sftp_cancel_transfer, sftp_open_remote_file,
             local_open_file, local_open_in_explorer, sftp_prepare_drag,
@@ -11076,6 +11188,24 @@ mod tests {
         let (first, second) = super::openssh_symlink_args("/tmp/link".into(), "../target".into());
         assert_eq!(first, "../target");
         assert_eq!(second, "/tmp/link");
+    }
+
+    #[test]
+    fn only_a_missing_target_marks_a_link_broken() {
+        use russh_sftp::client::error::Error;
+        use russh_sftp::protocol::{Status, StatusCode};
+        let status = |status_code| {
+            Error::Status(Status {
+                id: 0,
+                status_code,
+                error_message: String::new(),
+                language_tag: String::new(),
+            })
+        };
+        assert_eq!(super::link_stat_failure_state(&status(StatusCode::NoSuchFile)), "broken");
+        assert_eq!(super::link_stat_failure_state(&status(StatusCode::PermissionDenied)), "error");
+        assert_eq!(super::link_stat_failure_state(&status(StatusCode::Failure)), "error");
+        assert_eq!(super::link_stat_failure_state(&Error::Timeout), "error");
     }
 
     #[test]
