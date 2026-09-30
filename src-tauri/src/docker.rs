@@ -666,31 +666,12 @@ pub async fn open_container_terminal(
     rows: u32,
     use_sudo: bool,
 ) -> Result<(), String> {
-    use crate::ssh_manager::TerminalCommand;
+    use crate::ssh_manager::{PtyChannel, PtyProgram, TerminalCommand};
     use russh::ChannelMsg;
 
     if !is_safe_name(&container) {
         return Err("invalid container name".into());
     }
-    let session_arc = {
-        let connections = state.connections.lock().await;
-        connections
-            .get(&session_id)
-            .map(Arc::clone)
-            .ok_or_else(|| "Session not connected".to_string())?
-    };
-    let mut channel = {
-        let session = session_arc.lock().await;
-        session
-            .channel_open_session()
-            .await
-            .map_err(|e| e.to_string())?
-    };
-    channel
-        .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
-        .await
-        .map_err(|e| e.to_string())?;
-
     // Shell auto-detect runs inside the container: prefer bash, fall back to
     // sh, fall back to ash (Alpine). Anything more exotic and the user can
     // jump in via a regular ssh terminal and figure it out.
@@ -701,26 +682,10 @@ pub async fn open_container_terminal(
     } else {
         docker_cmd
     };
-    channel
-        .exec(true, cmd.as_bytes())
-        .await
-        .map_err(|e| e.to_string())?;
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<TerminalCommand>(32);
-    let (resize_tx, mut resize_rx) = tokio::sync::watch::channel(crate::ssh_manager::PtySize {
-        cols,
-        rows,
-    });
-    state
-        .terminal_txs
-        .lock()
-        .await
-        .insert(terminal_id.clone(), tx);
-    state
-        .resize_txs
-        .lock()
-        .await
-        .insert(terminal_id.clone(), resize_tx);
+    let PtyChannel { mut channel, commands: mut rx, resizes: mut resize_rx } = state
+        .open_pty_channel(&session_id, &terminal_id, cols, rows, PtyProgram::Exec(cmd))
+        .await?;
 
     let terminal_id_clone = terminal_id.clone();
     let app_clone = app.clone();

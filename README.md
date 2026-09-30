@@ -264,7 +264,7 @@ No. Distribution is via sideloadable APK from the [releases page](https://github
 
 ## Build from Source
 
-Requirements: Node 20+, Rust 1.89+, [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS. The SSH stack is pure Rust, so no OpenSSL or Perl is needed on any platform.
+Requirements: Node 22+ (or 20.19+), Rust 1.89+, [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS. The SSH stack is pure Rust, so no OpenSSL or Perl is needed on any platform.
 
 ```bash
 git clone https://github.com/sinaxhpm/submarine
@@ -297,7 +297,7 @@ This path works whether Wi-Fi is on or off — only USB matters. If you still se
 
 ## Tech Stack
 
-**Frontend** — React 18 · TypeScript · Tailwind CSS · xterm.js
+**Frontend** — React 19 · TypeScript · Tailwind CSS · xterm.js
 **Backend** — Rust · Tauri 2 · russh · rusqlite · aes-gcm · argon2 · zstd
 
 ## Credits

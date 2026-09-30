@@ -68,6 +68,21 @@ pub struct PtySize {
     pub rows: u32,
 }
 
+/// What to start on a freshly allocated PTY channel.
+pub enum PtyProgram {
+    /// The user's login shell (`request_shell`).
+    Shell,
+    /// A one-shot command (`exec`), e.g. `docker exec -it ...`.
+    Exec(String),
+}
+
+/// Everything the PTY task needs after `SshState::open_pty_channel`.
+pub struct PtyChannel {
+    pub channel: russh::Channel<client::Msg>,
+    pub commands: mpsc::Receiver<TerminalCommand>,
+    pub resizes: tokio::sync::watch::Receiver<PtySize>,
+}
+
 /// Flush a coalesced batch of PTY output as one `terminal-output-{id}` event.
 ///
 /// The read loops accumulate channel bytes and call this on an ~8ms timer or a
@@ -141,6 +156,60 @@ pub struct SshState {
 }
 
 impl SshState {
+    /// Open an SSH channel with a PTY on `session_id`, start `program` on it
+    /// and register the terminal's command / resize senders.
+    ///
+    /// The resize watch is registered BEFORE the SSH round-trips. xterm's
+    /// layout usually settles (fonts, panel transitions, window-state
+    /// restore) while `channel_open_session` / `request_pty` are still in
+    /// flight; a `resize_terminal` arriving then used to find no sender and
+    /// was dropped, leaving the PTY one row short until the next manual
+    /// resize. `request_pty` reads the size via `borrow_and_update()`, so any
+    /// later send still wakes the PTY task's `changed()` and is forwarded as
+    /// `window_change`. On failure nothing stays registered.
+    pub async fn open_pty_channel(
+        &self,
+        session_id: &str,
+        terminal_id: &str,
+        cols: u32,
+        rows: u32,
+        program: PtyProgram,
+    ) -> Result<PtyChannel, String> {
+        let session_arc = self
+            .connections
+            .lock()
+            .await
+            .get(session_id)
+            .map(Arc::clone)
+            .ok_or_else(|| "Session not connected".to_string())?;
+
+        let (resize_tx, mut resizes) = tokio::sync::watch::channel(PtySize { cols, rows });
+        self.resize_txs.lock().await.insert(terminal_id.to_string(), resize_tx);
+
+        let opened = async {
+            let channel = session_arc.lock().await.channel_open_session().await?;
+            let size = *resizes.borrow_and_update();
+            channel.request_pty(false, "xterm-256color", size.cols, size.rows, 0, 0, &[]).await?;
+            match &program {
+                PtyProgram::Shell => channel.request_shell(true).await?,
+                PtyProgram::Exec(cmd) => channel.exec(true, cmd.as_bytes()).await?,
+            }
+            Ok::<_, russh::Error>(channel)
+        }
+        .await;
+        let channel = match opened {
+            Ok(channel) => channel,
+            Err(e) => {
+                self.resize_txs.lock().await.remove(terminal_id);
+                return Err(e.to_string());
+            }
+        };
+
+        let (tx, commands) = mpsc::channel::<TerminalCommand>(32);
+        self.terminal_txs.lock().await.insert(terminal_id.to_string(), tx);
+        Ok(PtyChannel { channel, commands, resizes })
+    }
+
     pub fn new() -> Self {
         Self {
             fp_txs: Arc::new(Mutex::new(HashMap::new())),
@@ -453,6 +522,28 @@ mod tests {
             .encode(Sha256::digest(public.to_bytes().unwrap()));
         assert_eq!(fp, expected);
         assert!(!fp.starts_with("SHA256:"));
+    }
+
+    /// A `resize_terminal` that lands while the channel is still being
+    /// negotiated must reach `request_pty` (via `borrow_and_update`), and a
+    /// resize after that point must still wake the PTY task's `changed()`.
+    #[tokio::test]
+    async fn early_resize_is_seen_by_request_pty_and_late_resize_wakes_task() {
+        let resize_txs: Arc<Mutex<HashMap<String, tokio::sync::watch::Sender<PtySize>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let (tx, mut rx) = tokio::sync::watch::channel(PtySize { cols: 80, rows: 24 });
+        resize_txs.lock().await.insert("t1".into(), tx);
+
+        resize_txs.lock().await.get("t1").unwrap()
+            .send(PtySize { cols: 254, rows: 57 }).unwrap();
+        let size = *rx.borrow_and_update();
+        assert_eq!((size.cols, size.rows), (254, 57));
+        assert!(!rx.has_changed().unwrap());
+
+        resize_txs.lock().await.get("t1").unwrap()
+            .send(PtySize { cols: 254, rows: 58 }).unwrap();
+        rx.changed().await.unwrap();
+        assert_eq!(rx.borrow().rows, 58);
     }
 
     #[test]
