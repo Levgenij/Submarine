@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, forwardRef, useImperativeHandle }
 import { createPortal } from "react-dom";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { File as FileIcon, Folder, FolderUp, Rows, LayoutPanelTop } from "lucide-react";
+import { File as FileIcon, Folder, FolderUp } from "lucide-react";
 import FilePanel, { ActiveDrag, FilePanelHandle } from "./FilePanel";
 import MirrorsPanel from "./MirrorsPanel";
 import TransfersBar, { Transfer } from "./TransfersBar";
@@ -13,6 +13,8 @@ import {
   dropQueued, enqueueTransfers, isQueued, queueSignal, startQueued, useQueuedTransfers, waitForTurn,
 } from "../fs/transferQueue";
 import { useOverwritePrompt } from "../ui/confirm";
+import { useElementWidth } from "../hooks/useViewport";
+import { onRovingKeyDown } from "../ui/rovingKeys";
 
 // Speed is measured over this trailing window of progress samples, so one
 // slow or fast chunk does not make the number jump.
@@ -114,6 +116,13 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
     setActiveSide(s);
     try { localStorage.setItem(sideStorageKey, s); } catch { /* ignore */ }
   };
+  // What the Local / Remote / Split switcher shows as selected.
+  const panelMode: FilesSide | "split" = layout === "split" ? "split" : activeSide;
+  // Files / Mirror drop to icons when the pane is dragged too narrow for
+  // both the tabs and the panel switcher.
+  const subBarRef = useRef<HTMLDivElement>(null);
+  const subBarWidth = useElementWidth(subBarRef);
+  const showSubLabels = subBarWidth >= 380;
   // Providers are created once per session so the panels' provider identity
   // is stable across renders (the FilePanel's load-on-mount effect keys off it).
   const localProvider = useMemo(() => createLocalProvider(), []);
@@ -365,35 +374,73 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#0a0a0c] relative">
-      {/* Sub-tab strip — Files vs Mirror, replacing the standalone Mirror
-          toolbar button that used to live next to SFTP / Ports / Library. The
-          Mirror panel keeps state across tab switches via CSS hidden (same
-          mounted-but-invisible pattern the parent SessionView used before)
-          so the live worker's counters and rolling log survive a switch back
-          to Files. */}
-      <div className="shrink-0 grid grid-cols-2 border-b border-white/5 bg-black/20">
-        <button
-          onClick={() => setView("files")}
-          className={`h-9 flex items-center justify-center gap-1.5 text-[11px] font-bold uppercase tracking-wider transition-all ${
-            view === "files"
-              ? "text-primary bg-primary/5 border-b border-primary"
-              : "text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.03] border-b border-transparent"
-          }`}
-        >
-          <Folder size={12} /> Files
-        </button>
-        <button
-          onClick={() => setView("mirror")}
-          disabled={!serverId}
-          title={!serverId ? "Mirror needs a saved server" : undefined}
-          className={`h-9 flex items-center justify-center gap-1.5 text-[11px] font-bold uppercase tracking-wider transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
-            view === "mirror"
-              ? "text-primary bg-primary/5 border-b border-primary"
-              : "text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.03] border-b border-transparent"
-          }`}
-        >
-          <FolderUp size={12} /> Mirror
-        </button>
+      {/* Sub-tab row — Files vs Mirror on the left, and for Files the
+          panel switcher on the right: Local / Remote show one side at full
+          height, Split stacks both (drag-drop between them). The Mirror
+          panel keeps state across tab switches via CSS hidden so the live
+          worker's counters and rolling log survive a switch back to Files. */}
+      <div ref={subBarRef} className="shrink-0 h-11 flex items-stretch gap-2 px-2 border-b border-white/5 bg-white/[0.02]">
+        <div role="tablist" aria-label="SFTP views" onKeyDown={(e) => onRovingKeyDown(e)} className="flex items-stretch min-w-0">
+          {([
+            { id: "files", icon: Folder, label: "Files" },
+            { id: "mirror", icon: FolderUp, label: "Mirror" },
+          ] as const).map(({ id, icon: Icon, label }) => {
+            const on = view === id;
+            const off = id === "mirror" && !serverId;
+            return (
+              <button
+                key={id}
+                role="tab"
+                aria-selected={on}
+                tabIndex={on ? 0 : -1}
+                aria-label={label}
+                onClick={() => setView(id)}
+                disabled={off}
+                title={off ? "Mirror needs a saved server" : undefined}
+                className={`relative shrink-0 px-3 flex items-center gap-2 text-[13px] transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                  on ? "text-primary font-semibold" : "text-zinc-400 font-medium hover:text-zinc-100"
+                }`}
+              >
+                <Icon size={15} className="shrink-0" />
+                {showSubLabels && <span>{label}</span>}
+                {on && <span className="absolute left-2 right-2 bottom-0 h-0.5 rounded-full bg-primary" />}
+              </button>
+            );
+          })}
+        </div>
+        <div className="flex-1" />
+        {view === "files" && (
+          <div role="radiogroup" aria-label="File panels" onKeyDown={(e) => onRovingKeyDown(e)} className="self-center shrink-0 flex items-center gap-0.5 p-0.5 rounded-lg border border-white/10 bg-black/20">
+            {([
+              { id: "local", label: "Local", hint: "Local files at full height" },
+              { id: "remote", label: "Remote", hint: "Remote files at full height" },
+              { id: "split", label: "Split", hint: "Show both panels stacked (drag-drop between them)" },
+            ] as const).map(({ id, label, hint }) => {
+              const on = panelMode === id;
+              return (
+                <button
+                  key={id}
+                  role="radio"
+                  aria-checked={on}
+                  tabIndex={on ? 0 : -1}
+                  title={hint}
+                  onClick={() => {
+                    if (id === "split") { setLayoutPersisted("split"); return; }
+                    setLayoutPersisted("tabs");
+                    setActiveSidePersisted(id);
+                  }}
+                  className={`h-7 px-3 rounded-md border text-[12.5px] font-semibold transition-colors ${
+                    on
+                      ? "border-primary/60 bg-primary/10 text-primary"
+                      : "border-transparent text-zinc-300 hover:text-white hover:bg-white/5"
+                  }`}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Files view — dual-pane browser. Stays mounted when Mirror is on top
@@ -402,51 +449,6 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
           tabs mode) so cd state, scroll position, and selection survive a
           tab toggle. */}
       <div className={`${view === "files" ? "flex-1 flex flex-col min-h-0" : "hidden"}`}>
-        {/* Layout toolbar: Local|Remote pills in tabs mode (or a static
-            label in split mode), plus the global layout toggle on the
-            right. The toggle's label is the DESTINATION mode so the
-            user can predict what clicking will do. */}
-        <div className="shrink-0 h-10 sm:h-8 flex items-stretch border-b border-white/5 bg-black/20">
-          {layout === "tabs" ? (
-            <div className="flex-1 grid grid-cols-2">
-              <button
-                onClick={() => setActiveSidePersisted("local")}
-                className={`h-full flex items-center justify-center gap-1.5 text-[10px] font-bold uppercase tracking-wider transition-all ${
-                  activeSide === "local"
-                    ? "text-emerald-300 bg-emerald-500/5 border-b border-emerald-400"
-                    : "text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.03] border-b border-transparent"
-                }`}
-              >
-                <Folder size={11} /> Local
-              </button>
-              <button
-                onClick={() => setActiveSidePersisted("remote")}
-                className={`h-full flex items-center justify-center gap-1.5 text-[10px] font-bold uppercase tracking-wider transition-all ${
-                  activeSide === "remote"
-                    ? "text-sky-300 bg-sky-500/5 border-b border-sky-400"
-                    : "text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.03] border-b border-transparent"
-                }`}
-              >
-                <Folder size={11} /> Remote
-              </button>
-            </div>
-          ) : (
-            <div className="flex-1 flex items-center px-3 text-[9.5px] font-bold uppercase tracking-widest text-zinc-500">
-              Local + Remote
-            </div>
-          )}
-          <button
-            onClick={() => setLayoutPersisted(layout === "tabs" ? "split" : "tabs")}
-            title={layout === "tabs" ? "Show both panels stacked (drag-drop between them)" : "Switch to tabbed view (one panel at full height)"}
-            className="px-3 border-l border-white/5 text-[10px] font-bold uppercase tracking-wider text-zinc-400 hover:bg-white/5 hover:text-white flex items-center gap-1.5 transition-all shrink-0"
-          >
-            {layout === "tabs"
-              ? <><Rows size={11} /> Split</>
-              : <><LayoutPanelTop size={11} /> Tabs</>
-            }
-          </button>
-        </div>
-
         {/* Local panel — visible in split mode (top), or in tabs mode when
             Local is the active side. Hidden via CSS (not unmounted) when
             on the inactive tab so its directory and provider state
