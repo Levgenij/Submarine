@@ -14,6 +14,7 @@ import { useConfirm, useOverwritePrompt, OverwriteChoice, OverwritePromptOptions
 import { IS_ANDROID } from "../util/platform";
 import { dropQueued, enqueueTransfers, isQueued, queueSignal, startQueued, waitForTurn } from "../fs/transferQueue";
 import { parentPathOf } from "../fs/localProvider";
+import { pathCrumbs } from "../fs/pathCrumbs";
 
 // Batch overwrite state shared across items in a single download/upload run.
 // Once the user picks "Overwrite all" or "Skip all" the kind is sticky and we
@@ -440,6 +441,35 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     setTempInput(e.path);
     if (e.isDir) fetch(e.path);
     setInputFocused(false);
+  };
+
+  // ---- path bar segments ------------------------------------------------------
+
+  const crumbs = pathCrumbs(currentPath, provider.pathSep);
+
+  const crumbsRef = useRef<HTMLDivElement | null>(null);
+  const blurTimerRef = useRef<number | null>(null);
+  const clearBlurTimer = () => {
+    if (blurTimerRef.current != null) {
+      window.clearTimeout(blurTimerRef.current);
+      blurTimerRef.current = null;
+    }
+  };
+  useEffect(() => clearBlurTimer, []);
+
+  // A long path scrolls inside the bar; keep its end (the current folder)
+  // in view.
+  useEffect(() => {
+    const el = crumbsRef.current;
+    if (el) el.scrollLeft = el.scrollWidth;
+  }, [currentPath, inputFocused]);
+
+  const editPath = () => {
+    // A pending blur from the previous edit must not close this one.
+    clearBlurTimer();
+    setTempInput(currentPath);
+    setActiveSuggestion(-1);
+    setInputFocused(true);
   };
 
   // ---- context menu auto-close ------------------------------------------------
@@ -1244,13 +1274,61 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
               </div>
             )}
           </div>
-          <div className="flex-1 relative">
+          {/* Path bar. Stretches to the row height, which the icon buttons
+              set, so both are the same height. Shows clickable segments;
+              a click on the free space switches to the text input. Both
+              views fill this box absolutely, so the switch cannot resize
+              the header. */}
+          <div className="flex-1 min-w-0 relative self-stretch">
+            {!inputFocused ? (
+              <div
+                ref={crumbsRef}
+                onClick={editPath}
+                // A vertical wheel does not scroll a horizontal overflow on
+                // its own; without this the parents of a long path are
+                // out of reach.
+                onWheel={(e) => { if (!e.deltaX) e.currentTarget.scrollLeft += e.deltaY; }}
+                className="absolute inset-0 flex items-center px-2 bg-white/[0.04] border border-white/10 rounded text-[11px] font-mono overflow-x-auto no-scrollbar cursor-text hover:border-white/20"
+              >
+                {crumbs.length === 0 && <span className="shrink-0 text-zinc-500">Path…</span>}
+                {crumbs.map((c, i) => {
+                  const current = i === crumbs.length - 1;
+                  const navigable = !current && c.navigable;
+                  return (
+                    <React.Fragment key={c.path}>
+                      {i > 0 && !/^[\\/]$/.test(crumbs[i - 1].label) && (
+                        <span className="shrink-0 text-zinc-600">{provider.pathSep}</span>
+                      )}
+                      {navigable ? (
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); fetch(c.path); }}
+                          title={c.path}
+                          className="shrink-0 whitespace-nowrap cursor-pointer text-zinc-300 transition-colors hover:text-indigo-300"
+                        >
+                          {c.label}
+                        </button>
+                      ) : (
+                        <span className={`shrink-0 whitespace-nowrap ${current ? "text-zinc-100" : "text-zinc-500"}`}>{c.label}</span>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+                <button type="button" title="Edit path" aria-label="Edit path" className="flex-1 min-w-4 self-stretch cursor-text focus:outline-none" />
+              </div>
+            ) : (
             <input
               type="text"
+              autoFocus
               value={tempInput}
               onChange={(e) => { setTempInput(e.target.value); setActiveSuggestion(-1); }}
-              onFocus={() => setInputFocused(true)}
-              onBlur={() => setTimeout(() => setInputFocused(false), 250)}
+              onFocus={(e) => {
+                clearBlurTimer();
+                setInputFocused(true);
+                const end = e.currentTarget.value.length;
+                e.currentTarget.setSelectionRange(end, end);
+              }}
+              onBlur={() => { blurTimerRef.current = window.setTimeout(() => setInputFocused(false), 250); }}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
@@ -1274,10 +1352,11 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                 } else if (e.key === "Escape") setInputFocused(false);
               }}
               placeholder="Path…"
-              className="w-full h-6 px-2 bg-white/[0.04] border border-white/10 rounded text-[11px] text-zinc-100 font-mono focus:outline-none focus:border-indigo-400/50 focus:bg-white/10"
+              className="absolute inset-0 w-full h-full px-2 bg-white/[0.04] border border-white/10 rounded text-[11px] text-zinc-100 font-mono focus:outline-none focus:border-indigo-400/50 focus:bg-white/10"
             />
+            )}
             {inputFocused && suggestions.length > 0 && (
-              <div className="absolute top-[28px] left-0 right-0 max-h-[220px] overflow-y-auto z-50 bg-[#0c0c0e]/95 border border-white/10 rounded-lg shadow-2xl p-1 backdrop-blur-md font-mono text-[11px] text-zinc-200 no-scrollbar">
+              <div className="absolute top-full mt-1 left-0 right-0 max-h-[220px] overflow-y-auto z-50 bg-[#0c0c0e]/95 border border-white/10 rounded-lg shadow-2xl p-1 backdrop-blur-md font-mono text-[11px] text-zinc-200 no-scrollbar">
                 {suggestions.map((s, idx) => (
                   <button key={s.path} onClick={() => pickSuggestion(s)}
                     className={`w-full flex items-center justify-between p-1.5 rounded text-left transition-colors ${
