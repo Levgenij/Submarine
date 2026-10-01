@@ -35,7 +35,12 @@ interface SftpWorkspaceProps {
   terminalId?: string;
   /** Compact layout: close the SFTP pane so the terminal that just received `cd` is visible. */
   onRevealTerminal?: () => void;
+  /** Unlocked profile. Server ids restart in every profile's DB, so per-server storage keys need it. */
+  profile: string;
 }
+
+// Profile names hold only [A-Za-z0-9_-], so ":" keeps the parts apart.
+export const bookmarksKeyPrefix = (profile: string) => `submarine-sftp-bookmarks:${profile}:`;
 
 type SftpView = "files" | "mirror";
 type FilesLayout = "tabs" | "split";
@@ -80,7 +85,7 @@ const DragGhost = forwardRef<DragGhostHandle>((_props, ref) => {
 });
 DragGhost.displayName = "DragGhost";
 
-const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfig = [], terminalId, onRevealTerminal }: SftpWorkspaceProps) => {
+const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfig = [], terminalId, onRevealTerminal, profile }: SftpWorkspaceProps) => {
   // Active sub-tab. Files is the default (the common workflow); Mirror is
   // for the per-server one-way replication setup.
   const [view, setView] = useState<SftpView>("files");
@@ -144,6 +149,7 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
     try { localStorage.setItem(storageKey, JSON.stringify(savedDirsRef.current)); }
     catch { /* quota or private-mode storage — ignore */ }
   };
+  const bookmarksKey = (side: FilesSide) => `${bookmarksKeyPrefix(profile)}${sessionId}:${side}`;
 
   // Source of truth for the active drag. Updated SYNCHRONOUSLY from the
   // panel's onMove via the ref so the window mouseup handler (which runs in
@@ -422,7 +428,8 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
             onDragMove={handleDragMove}
             initialPath={savedDirsRef.current.local}
             onPathChange={(p) => saveDir("local", p)}
-            getOppositeDir={() => remoteRef.current?.currentDir()}          />
+            getOppositeDir={() => remoteRef.current?.currentDir()}
+            bookmarksKey={bookmarksKey("local")}          />
         </div>
         <div className={
           layout === "split"
@@ -439,7 +446,8 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
             onPathChange={(p) => saveDir("remote", p)}
             getOppositeDir={() => localRef.current?.currentDir()}
             terminalId={terminalId}
-            onRevealTerminal={onRevealTerminal}          />
+            onRevealTerminal={onRevealTerminal}
+            bookmarksKey={bookmarksKey("remote")}          />
         </div>
       </div>
 
