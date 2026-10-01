@@ -6,7 +6,7 @@ import {
   Folder, FolderUp, File, ArrowUp, RefreshCw, Trash2, Edit3, Shield,
   X, ChevronUp, ChevronDown, Plus, MoreVertical, FolderSearch,
   Download, Upload, ExternalLink, Move, CheckSquare, Square, Search,
-  Terminal, Link, FolderSymlink, FileSymlink, CornerDownRight, Archive, PackageOpen,
+  Terminal, Link, FolderSymlink, FileSymlink, CornerDownRight, Archive, PackageOpen, Bookmark,
 } from "lucide-react";
 import { FileEntry, FileProvider, LinkInfo } from "../fs/types";
 import { carryLinkState, mergePermissions, permissionOctal, safeLeafName, shellSingleQuote } from "../fs/dirContext";
@@ -122,6 +122,8 @@ export interface FilePanelProps {
   terminalId?: string;
   /** Compact layout: close the SFTP pane so the terminal that just received `cd` is visible. */
   onRevealTerminal?: () => void;
+  /** localStorage key this panel's bookmarked directories persist under. */
+  bookmarksKey: string;
 }
 
 export interface FilePanelHandle {
@@ -146,6 +148,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   getOppositeDir,
   terminalId,
   onRevealTerminal,
+  bookmarksKey,
 }, ref) => {
   const [currentPath, setCurrentPath] = useState("");
   // Last five distinct directories visited in this panel, MRU first. Lives
@@ -155,6 +158,12 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // when navigation succeeds.
   const [recentDirs, setRecentDirs] = useState<string[]>([]);
   const [recentOpen, setRecentOpen] = useState(false);
+  const [bookmarks, setBookmarks] = useState<string[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(bookmarksKey) || "[]");
+      return Array.isArray(saved) ? saved.filter((p) => typeof p === "string") : [];
+    } catch { return []; }
+  });
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
   // One list() at a time. A call that arrives mid-flight stores its path in
@@ -318,6 +327,12 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       const next = [path, ...prev.filter((p) => p !== path)];
       return next.slice(0, 5);
     });
+  };
+
+  const toggleBookmark = (path: string) => {
+    const next = bookmarks.includes(path) ? bookmarks.filter((p) => p !== path) : [...bookmarks, path];
+    setBookmarks(next);
+    try { localStorage.setItem(bookmarksKey, JSON.stringify(next)); } catch { /* not remembered */ }
   };
 
   // A fresh answer about a link supersedes whatever was carried over.
@@ -1782,6 +1797,37 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     setDirMenu({ x: Math.max(4, x), y: Math.max(4, y) });
   };
 
+  const recentShown = recentDirs.filter((p) => p !== currentPath);
+  const hasDirMenu = recentShown.length > 0 || bookmarks.length > 0;
+  useEffect(() => { if (!hasDirMenu) setRecentOpen(false); }, [hasDirMenu]);
+  const currentBookmarked = bookmarks.includes(currentPath);
+  // A row of the Recent / Bookmarks dropdown. Mouse-down handlers keep focus
+  // on the toggle button, whose blur closes the dropdown.
+  const dirRow = (p: string) => {
+    const bookmarked = bookmarks.includes(p);
+    return (
+      <div key={p} className="flex items-center rounded hover:bg-white/10">
+        <button
+          onMouseDown={(e) => { e.preventDefault(); setRecentOpen(false); fetch(p); }}
+          className="flex-1 min-w-0 flex items-center gap-2 p-1.5 text-left hover:text-white"
+          title={p}
+        >
+          <Folder size={11} className="text-indigo-300 shrink-0" />
+          <span className="truncate">{p}</span>
+        </button>
+        <button
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => toggleBookmark(p)}
+          title={bookmarked ? "Remove bookmark" : "Bookmark"}
+          aria-pressed={bookmarked}
+          className={`p-1.5 shrink-0 ${bookmarked ? "text-amber-400 hover:text-amber-300" : "text-zinc-500 hover:text-zinc-200"}`}
+        >
+          <Bookmark size={11} fill={bookmarked ? "currentColor" : "none"} />
+        </button>
+      </div>
+    );
+  };
+
   return (
     <div
       data-fs-pane={provider.id}
@@ -1811,28 +1857,27 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             <button
               onClick={() => setRecentOpen((p) => !p)}
               onBlur={() => setTimeout(() => setRecentOpen(false), 200)}
-              disabled={recentDirs.filter((p) => p !== currentPath).length === 0}
-              title="Recent directories"
+              disabled={!hasDirMenu}
+              title="Recent and bookmarked directories"
               className="p-1 rounded bg-white/[0.04] border border-white/10 text-zinc-200 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed flex items-center"
             >
               <ChevronDown size={11} />
             </button>
-            {recentOpen && (
-              <div className="absolute top-[28px] left-0 z-50 min-w-[220px] max-h-[220px] overflow-y-auto bg-[#0c0c0e]/95 border border-white/10 rounded-lg shadow-2xl p-1 backdrop-blur-md font-mono text-[11px] text-zinc-200 no-scrollbar">
-                <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-zinc-500 font-bold">Recent</div>
-                {recentDirs
-                  .filter((p) => p !== currentPath)
-                  .map((p) => (
-                    <button
-                      key={p}
-                      onMouseDown={(e) => { e.preventDefault(); setRecentOpen(false); fetch(p); }}
-                      className="w-full flex items-center gap-2 p-1.5 rounded text-left hover:bg-white/10 hover:text-white truncate"
-                      title={p}
-                    >
-                      <Folder size={11} className="text-indigo-300 shrink-0" />
-                      <span className="truncate">{p}</span>
-                    </button>
-                  ))}
+            {recentOpen && hasDirMenu && (
+              <div className="absolute top-[28px] left-0 z-50 min-w-[260px] max-h-[320px] overflow-y-auto bg-[#0c0c0e]/95 border border-white/10 rounded-lg shadow-2xl p-1 backdrop-blur-md font-mono text-[11px] text-zinc-200 no-scrollbar">
+                {recentShown.length > 0 && (
+                  <>
+                    <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-zinc-500 font-bold">Recent</div>
+                    {recentShown.map(dirRow)}
+                  </>
+                )}
+                {recentShown.length > 0 && bookmarks.length > 0 && <div className="my-1 h-px bg-white/10" />}
+                {bookmarks.length > 0 && (
+                  <>
+                    <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-zinc-500 font-bold">Bookmarks</div>
+                    {bookmarks.map(dirRow)}
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -1937,6 +1982,15 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
               </div>
             )}
           </div>
+          <button
+            onClick={() => toggleBookmark(currentPath)}
+            disabled={!currentPath}
+            title={currentBookmarked ? "Remove bookmark" : "Bookmark this directory"}
+            aria-pressed={currentBookmarked}
+            className={`p-1 rounded bg-white/[0.04] border border-white/10 hover:bg-white/10 shrink-0 disabled:opacity-30 disabled:cursor-not-allowed ${currentBookmarked ? "text-amber-400" : "text-zinc-200"}`}
+          >
+            <Bookmark size={11} fill={currentBookmarked ? "currentColor" : "none"} />
+          </button>
           <button onClick={() => fetch(currentPath)} title="Refresh"
             className={`p-1 rounded bg-white/[0.04] border border-white/10 text-zinc-200 hover:bg-white/10 shrink-0 ${loading ? "animate-spin" : ""}`}>
             <RefreshCw size={11} />

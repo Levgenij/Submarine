@@ -138,7 +138,7 @@ const ToolPanelActions = ({ slot, onClose, children }: {
   slot
 ) : null;
 
-const SessionViewImpl = ({ session, onClose, addLog, onStatusChange, chromeless = false, onTerminalsChange }: any) => {
+const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, chromeless = false, onTerminalsChange }: any) => {
   const [status, setStatus] = useState<'connecting' | 'connected' | 'failed' | 'disconnected'>('connecting');
 
   // Bubble every status change up to the parent so the session-tab strip
@@ -1616,6 +1616,7 @@ const SessionViewImpl = ({ session, onClose, addLog, onStatusChange, chromeless 
                   })()}
                   terminalId={activeTab}
                   onRevealTerminal={isCompact ? () => setActiveTool(null) : undefined}
+                  profile={profile}
                 />
               </div>
             </div>
