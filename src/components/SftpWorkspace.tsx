@@ -223,7 +223,8 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
       if (t.status === "done" || t.status === "error" || t.status === "cancelled") {
         // Leave the final state visible briefly before clearing the card so
         // the user sees the success tick / failure colour / cancel notice.
-        const linger = t.status === "error" ? 6000 : t.status === "cancelled" ? 3000 : 1800;
+        // A cancel that left something behind says so as long as an error.
+        const linger = t.status === "error" || t.error ? 6000 : t.status === "cancelled" ? 3000 : 1800;
         setTimeout(() => {
           setTransfers((prev) => {
             const { [t.id]: _, ...rest } = prev;
