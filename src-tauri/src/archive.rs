@@ -29,10 +29,11 @@ use std::path::{Path, PathBuf};
 /// Remote packing of a big tree is slow; this only bounds a hung command.
 /// A watchdog in the script kills the tool on the server at this limit; our
 /// own wait is a little longer so the script's report still arrives.
-const REMOTE_TIMEOUT_SECS: u64 = 60 * 60;
+pub(crate) const REMOTE_TIMEOUT_SECS: u64 = 60 * 60;
 const REMOTE_WAIT_SLACK_SECS: u64 = 60;
-/// Exit code the script reports for a tool it stopped at the time limit.
-const KILLED_BY_WATCHDOG: i32 = 143;
+/// Exit code the script reports for a tool it stopped at the time limit, as
+/// `timeout(1)` does. Not 143: that is any SIGTERM, not only the watchdog's.
+const KILLED_BY_WATCHDOG: i32 = 124;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Format {
@@ -472,14 +473,15 @@ pub async fn local_extract(dir: String, name: String, folder: Option<String>) ->
 
 // ---- remote -----------------------------------------------------------------
 
-fn sh_quote(value: &str) -> String {
+pub(crate) fn sh_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 const EXISTS_MARKER: &str = "__SUB_EXISTS";
 
 // Runs `tool` in the background and leaves its exit code in `$rc`; a tool
-// still running after `secs` is stopped (TERM, then KILL) and `$rc` is 143.
+// still running after `secs` is stopped (TERM, then KILL) and `$rc` is
+// KILLED_BY_WATCHDOG.
 //
 // The timer only signals the script's own shell (`$$`; `run_remote` gives the
 // script a shell of its own for that). The shell then stops the tool itself:
@@ -487,7 +489,7 @@ const EXISTS_MARKER: &str = "__SUB_EXISTS";
 // another process. The timer sleeps in short steps with its output on
 // /dev/null, so after a normal finish it holds no pipe open and is gone
 // within one step.
-fn with_watchdog(tool: &str, secs: u64) -> String {
+pub(crate) fn with_watchdog(tool: &str, secs: u64) -> String {
     format!(
         "timed=0; trap 'timed=1' USR1; {tool} & pid=$!; \
          ( n=0; while [ $n -lt {secs} ]; do sleep {step}; n=$((n+{step})); done; kill -USR1 $$ ) >/dev/null 2>&1 & dog=$!; \
@@ -657,9 +659,13 @@ fn wrap_script(script: &str) -> String {
 /// Runs `script` under `sh` whatever the login shell is, and returns its exit
 /// code with the tail of its output (stdout and stderr together).
 async fn run_remote(state: &SshState, session_id: &str, script: &str) -> Result<(i32, String), String> {
+    Ok(crate::parse_exit_marker(&run_remote_raw(state, session_id, script).await?))
+}
+
+/// `run_remote` without parsing: the raw output, exit marker included.
+pub(crate) async fn run_remote_raw(state: &SshState, session_id: &str, script: &str) -> Result<String, String> {
     let cmd = format!("sh -c {}", sh_quote(&wrap_script(script)));
-    let raw = crate::run_exec_capture(state, session_id, &cmd, REMOTE_TIMEOUT_SECS + REMOTE_WAIT_SLACK_SECS).await?;
-    Ok(crate::parse_exit_marker(&raw))
+    crate::run_exec_capture(state, session_id, &cmd, REMOTE_TIMEOUT_SECS + REMOTE_WAIT_SLACK_SECS).await
 }
 
 fn remote_error(code: i32, out: &str, tool: &str) -> String {
@@ -1426,8 +1432,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    // A tool that outlives the limit is stopped and reported as 143; one that
-    // finishes is reported with its own code, at once.
+    // A tool that outlives the limit is stopped and reported as
+    // KILLED_BY_WATCHDOG; one that finishes is reported with its own code,
+    // at once, a SIGTERM from elsewhere included.
     #[test]
     fn watchdog_stops_a_hung_tool() {
         if sh("true").is_none() {
@@ -1437,12 +1444,15 @@ mod tests {
         let started = std::time::Instant::now();
         let (code, out) = sh(&format!("{}; echo rc=$rc", with_watchdog("sleep 60", 1))).unwrap();
         assert_eq!(code, 0, "{}", out);
-        assert!(out.contains("rc=143"), "{}", out);
+        assert!(out.contains(&format!("rc={}", KILLED_BY_WATCHDOG)), "{}", out);
         assert!(started.elapsed() < std::time::Duration::from_secs(30), "{:?}", started.elapsed());
 
         let started = std::time::Instant::now();
         let (_, out) = sh(&format!("{}; echo rc=$rc", with_watchdog("sh -c 'exit 3'", 600))).unwrap();
         assert!(out.contains("rc=3"), "{}", out);
         assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
+
+        let (_, out) = sh(&format!("{}; echo rc=$rc", with_watchdog("sh -c 'kill -TERM $$'", 600))).unwrap();
+        assert!(out.contains("rc=143"), "a SIGTERM from elsewhere is not a watchdog stop: {}", out);
     }
 }

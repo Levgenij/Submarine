@@ -438,17 +438,14 @@ async fn sftp_hard_delete(session_id: &str, sftp: &SftpSession, target: &str) ->
     // Not while a transfer or editor save is writing this file (or, for a
     // folder, a file below it; see `sftp_soft_delete`).
     let _remote_lock = crate::lock_remote_file(session_id, target).await;
-    // Try as file, then as directory (russh-sftp doesn't expose stat-type
-    // cheaply; the two error paths are fast).
-    if let Err(e) = sftp.remove_file(target).await {
-        let msg = e.to_string().to_lowercase();
-        if msg.contains("directory") || msg.contains("isdir") {
-            sftp.remove_dir(target).await.map_err(|e| format!("rmdir {}: {}", target, e))?;
-        } else if !msg.contains("no such") && !msg.contains("does not exist") {
-            return Err(format!("rm {}: {}", target, e));
-        }
+    // LSTAT, not the REMOVE error text: OpenSSH reports a directory there as
+    // a bare "Failure" (Linux) or "Permission denied" (BSD).
+    match sftp.symlink_metadata(target).await {
+        Ok(meta) if meta.file_type().is_dir() => crate::sftp_remove_tree(sftp, target).await,
+        Ok(_) => sftp.remove_file(target).await.map_err(|e| format!("rm {}: {}", target, e)),
+        Err(e) if crate::is_no_such_file(&e) => Ok(()),
+        Err(e) => Err(format!("stat {}: {}", target, e)),
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1123,5 +1120,20 @@ async fn process_event(
             emit_log(app, session_id, mirror_id, "warn", "stat-fail",
                      Some(rel), Some(e.to_string()));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_sftp::{self, Node::*};
+
+    #[tokio::test]
+    async fn hard_delete_removes_a_folder_with_its_contents() {
+        let tree = test_sftp::tree(&[("/srv", Dir), ("/srv/old", Dir), ("/srv/old/f", File), ("/srv/keep", File)]);
+        let sftp = test_sftp::connect(tree.clone(), Default::default()).await;
+        super::sftp_hard_delete("mirror-hard-delete-test", &sftp, "/srv/old").await.unwrap();
+        let left: Vec<String> = tree.lock().unwrap().keys().cloned().collect();
+        assert_eq!(left, ["/srv", "/srv/keep"]);
+        super::sftp_hard_delete("mirror-hard-delete-test", &sftp, "/srv/old").await.expect("gone already is done");
     }
 }

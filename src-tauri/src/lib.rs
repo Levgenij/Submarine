@@ -7457,6 +7457,10 @@ async fn run_exec_capture(
         session.channel_open_session().await.map_err(|e| e.to_string())?
     };
     channel.exec(true, cmd.as_bytes()).await.map_err(|e| e.to_string())?;
+    // No command reads stdin. Closing it lets a server that swaps every exec
+    // for sftp-server (`ForceCommand internal-sftp`) exit instead of waiting
+    // out the whole timeout for SFTP packets.
+    channel.eof().await.map_err(|e| e.to_string())?;
     let mut stream = channel.into_stream();
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
     let read_fut = async {
@@ -7478,14 +7482,15 @@ async fn run_exec_capture(
 }
 
 fn parse_exit_marker(raw: &str) -> (i32, String) {
-    if let Some(idx) = raw.rfind("__SUB_EXITCODE:") {
-        let after = &raw[idx + "__SUB_EXITCODE:".len()..];
-        let code = after.trim().split_whitespace().next().unwrap_or("1").parse().unwrap_or(1);
-        let out = raw[..idx].trim_end_matches('\n').to_string();
-        (code, out)
-    } else {
-        (1, raw.trim_end_matches('\n').to_string())
-    }
+    exit_marker(raw).unwrap_or_else(|| (1, raw.trim_end_matches('\n').to_string()))
+}
+
+/// `None` when the output carries no exit marker: the script never ran.
+fn exit_marker(raw: &str) -> Option<(i32, String)> {
+    let idx = raw.rfind("__SUB_EXITCODE:")?;
+    let after = &raw[idx + "__SUB_EXITCODE:".len()..];
+    let code = after.trim().split_whitespace().next().unwrap_or("1").parse().unwrap_or(1);
+    Some((code, raw[..idx].trim_end_matches('\n').to_string()))
 }
 
 #[tauri::command]
@@ -7825,12 +7830,13 @@ struct SftpLinkInfo {
 /// OpenSSH maps ENOENT, ENOTDIR and ELOOP to SSH_FX_NO_SUCH_FILE. Only that
 /// status means the link is dangling; EACCES or a dropped channel must not.
 fn link_stat_failure_state(err: &russh_sftp::client::error::Error) -> &'static str {
+    if is_no_such_file(err) { "broken" } else { "error" }
+}
+
+pub(crate) fn is_no_such_file(err: &russh_sftp::client::error::Error) -> bool {
     use russh_sftp::client::error::Error;
     use russh_sftp::protocol::StatusCode;
-    match err {
-        Error::Status(status) if status.status_code == StatusCode::NoSuchFile => "broken",
-        _ => "error",
-    }
+    matches!(err, Error::Status(status) if status.status_code == StatusCode::NoSuchFile)
 }
 
 async fn resolve_sftp_link(sftp: &russh_sftp::client::SftpSession, path: String) -> SftpLinkInfo {
@@ -7946,9 +7952,187 @@ async fn sftp_remove_dir(
     session_id: String,
     path: String,
 ) -> Result<(), String> {
+    let path = removable_dir_path(&path)?;
     let sftp = get_sftp_session(&state, &session_id).await?;
-    sftp.remove_dir(path).await.map_err(|e| e.to_string())?;
+    // Not while a transfer or editor save is writing below this folder.
+    let _lock = lock_remote_file(&session_id, path).await;
+    let meta = match sftp.symlink_metadata(path).await {
+        Ok(meta) => meta,
+        Err(e) if is_no_such_file(&e) => return Ok(()),
+        Err(e) => return Err(format!("stat {}: {}", path, e)),
+    };
+    // Some servers list a link with its target's type, so the UI can take a
+    // link for a folder. Unlink it; never walk into the target.
+    if meta.file_type().is_symlink() {
+        return sftp.remove_file(path).await.map_err(|e| format!("remove {}: {}", path, e));
+    }
+    if let Err(reason) = rm_rf_over_exec(&state, &sftp, &session_id, path).await {
+        eprintln!("[SFTP] rm -rf did not finish {}: {}", path, reason);
+    }
+    // The walk takes whatever `rm` left: one READDIR after a clean run, the
+    // rest after a skip or a watchdog stop. By then `rm` has exited, so
+    // nothing races the walk.
+    sftp_remove_tree(&sftp, path).await
+}
+
+/// An absolute path below the root (a drive root such as `/C:` counts as
+/// root) with no `.`/`..` step: `rm -rf` and the walk would both resolve
+/// `/var/www/..` upwards. `\` separates steps too, for Windows servers.
+fn removable_dir_path(path: &str) -> Result<&str, String> {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    let steps: Vec<&str> = trimmed.split(['/', '\\']).collect();
+    let is_root = steps.len() < 2 || (steps.len() == 2 && steps[1].ends_with(':'));
+    let steps_up = steps.iter().any(|step| *step == "." || *step == "..");
+    if !trimmed.starts_with('/') || is_root || steps_up {
+        return Err(format!("refusing to delete {:?}", path));
+    }
+    Ok(trimmed)
+}
+
+/// A server-side `rm -rf` takes seconds where `sftp_remove_tree` needs a
+/// round trip per entry. Proof that the shell's path is the folder SFTP sees
+/// (a server whose SFTP root is virtual must never lose a same-named shell
+/// folder): a file with a random name, created over SFTP, that the shell
+/// finds there. `Err` says why `rm` did not run or finish; the marker is then
+/// removed here, so a walk that fails early leaves nothing new in the folder.
+async fn rm_rf_over_exec(
+    state: &SshState,
+    sftp: &russh_sftp::client::SftpSession,
+    session_id: &str,
+    path: &str,
+) -> Result<(), String> {
+    let marker = format!("{}/.submarine-rm-{}", path, new_entity_uuid());
+    let created = match sftp.create(&marker).await {
+        Ok(file) => file.close().await.map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    let result = match created {
+        Ok(()) => rm_rf_with_marker(state, session_id, path, &marker).await,
+        Err(e) => Err(format!("create marker {}: {}", marker, e)),
+    };
+    if result.is_err() {
+        if let Err(e) = gone_is_ok(sftp.remove_file(&marker).await) {
+            eprintln!("[SFTP] remove marker {}: {}", marker, e);
+        }
+    }
+    result
+}
+
+async fn rm_rf_with_marker(state: &SshState, session_id: &str, path: &str, marker: &str) -> Result<(), String> {
+    let probe = format!("[ -e {} ] && printf %s {}", archive::sh_quote(marker), archive::sh_quote(path));
+    shell_echoes_path(archive::run_remote_raw(state, session_id, &probe).await, path)?;
+    rm_rf_outcome(archive::run_remote_raw(state, session_id, &rm_rf_script(path, marker)).await)
+}
+
+/// The command passes through the login shell before `sh`, and `sh_quote` is
+/// only right for POSIX shells: fish reads `\'` inside single quotes as an
+/// escaped quote, and PowerShell or cmd on a Windows server parse it their own
+/// way. So `rm` runs only after the same quoting brought the path back intact
+/// (and the probe found the marker under it).
+/// The last line is compared: a chatty shell rc file may print above it.
+fn shell_echoes_path(result: Result<String, String>, path: &str) -> Result<(), String> {
+    match result.map(|raw| exit_marker(&raw)) {
+        Ok(Some((0, out))) if out.lines().last() == Some(path) => Ok(()),
+        other => Err(format!("the shell did not echo the path back intact: {:?}", other)
+            .chars()
+            .take(300)
+            .collect()),
+    }
+}
+
+/// One line: csh/tcsh reject a newline inside quotes. The checks run again
+/// right before `rm`, in the same shell. `[ -e marker ]` and `[ -d ]` see
+/// through a link, and `rm -rf` on a link only unlinks it, so a shell path
+/// that is a link to the SFTP folder must stop here.
+fn rm_rf_script(path: &str, marker: &str) -> String {
+    let (path_q, marker_q) = (archive::sh_quote(path), archive::sh_quote(marker));
+    format!(
+        "[ ! -L {p} ] && [ -d {p} ] && [ -e {m} ] || {{ echo 'shell sees another folder'; exit 3; }}; {rm}; exit $rc",
+        p = path_q,
+        m = marker_q,
+        rm = archive::with_watchdog(&format!("rm -rf -- {}", path_q), archive::REMOTE_TIMEOUT_SECS)
+    )
+}
+
+/// Exec errors include our own wait running out, which is longer than the
+/// watchdog's limit, so `rm` is stopped by then.
+fn rm_rf_outcome(result: Result<String, String>) -> Result<(), String> {
+    let short = |s: &str| s.trim().chars().take(300).collect::<String>();
+    let raw = result?;
+    match exit_marker(&raw) {
+        Some((0, _)) => Ok(()),
+        Some((code, out)) => Err(format!("exit {}: {}", code, short(&out))),
+        None => Err(format!("the server ran no sh script: {}", short(&raw))),
+    }
+}
+
+/// Recursive delete over plain SFTP. RMDIR only removes empty directories, so
+/// files and symlinks go first (a symlink to a dir is unlinked, never
+/// followed) and dirs afterwards, deepest-first. Explicit stack instead of
+/// async recursion, same as sftp_download_dir. Whatever is already gone
+/// counts as removed, so a tree something else is deleting too still ends Ok.
+pub(crate) async fn sftp_remove_tree(sftp: &russh_sftp::client::SftpSession, path: &str) -> Result<(), String> {
+    let mut stack = vec![removable_dir_path(path)?.to_string()];
+    let mut dirs = Vec::new();
+    while let Some(dir) = stack.pop() {
+        let read = match sftp.read_dir(&dir).await {
+            Ok(read) => read,
+            Err(e) if is_no_such_file(&e) => continue,
+            Err(e) => return Err(format!("read_dir {}: {}", dir, e)),
+        };
+        for entry in read {
+            let name = entry.file_name();
+            if name == "." || name == ".." { continue; }
+            if !is_child_name(&name) {
+                return Err(format!("{}: the server listed an unsafe entry name {:?}", dir, name));
+            }
+            let full = format!("{}/{}", dir, name);
+            match entry_is_dir(sftp, &full, entry.file_type()).await? {
+                Some(true) => stack.push(full),
+                Some(false) => gone_is_ok(sftp.remove_file(&full).await).map_err(|e| format!("remove {}: {}", full, e))?,
+                None => {}
+            }
+        }
+        dirs.push(dir);
+    }
+    for dir in dirs.iter().rev() {
+        gone_is_ok(sftp.remove_dir(dir).await).map_err(|e| format!("rmdir {}: {}", dir, e))?;
+    }
     Ok(())
+}
+
+/// `None` once the entry is gone. Some servers list a link with its target's
+/// type, others send no type at all, so LSTAT decides for anything not plainly
+/// a file or link. A failed LSTAT is an error, not a guess: taken for a file,
+/// a folder would hit OpenSSH's bare "Failure" on REMOVE halfway through the
+/// tree; taken for a folder, a link could be walked into.
+async fn entry_is_dir(
+    sftp: &russh_sftp::client::SftpSession,
+    full: &str,
+    listed: russh_sftp::protocol::FileType,
+) -> Result<Option<bool>, String> {
+    if listed.is_file() || listed.is_symlink() {
+        return Ok(Some(false));
+    }
+    match sftp.symlink_metadata(full).await {
+        Ok(meta) => Ok(Some(meta.file_type().is_dir())),
+        Err(e) if is_no_such_file(&e) => Ok(None),
+        Err(e) => Err(format!("stat {}: {}", full, e)),
+    }
+}
+
+/// One step down on POSIX and Windows servers alike. Unlike
+/// `is_safe_dir_entry_name` (which guards local writes), a `\` in a POSIX
+/// name is fine here: it only has to stay below the folder on the server.
+fn is_child_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains('/') && !name.split('\\').any(|step| step == "..")
+}
+
+fn gone_is_ok(result: Result<(), russh_sftp::client::error::Error>) -> Result<(), russh_sftp::client::error::Error> {
+    match result {
+        Err(e) if is_no_such_file(&e) => Ok(()),
+        other => other,
+    }
 }
 
 #[tauri::command]
@@ -11558,6 +11742,136 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
+/// An SFTP server over an in-memory tree, wired to a real client through a
+/// duplex pipe, for tests of the remote-delete code.
+#[cfg(test)]
+pub(crate) mod test_sftp {
+    use russh_sftp::client::SftpSession;
+    use russh_sftp::protocol::{Attrs, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode};
+    use std::collections::{BTreeMap, HashSet};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    pub enum Node { Dir, File, Link }
+
+    pub type Tree = Arc<Mutex<BTreeMap<String, Node>>>;
+
+    #[derive(Default)]
+    pub struct Quirks {
+        /// READDIR gives a link its target's type, as some servers do.
+        pub links_listed_as_dirs: bool,
+        /// LSTAT of these paths fails with a bare Failure.
+        pub lstat_fails: HashSet<String>,
+    }
+
+    pub fn tree(entries: &[(&str, Node)]) -> Tree {
+        Arc::new(Mutex::new(entries.iter().map(|(p, n)| (p.to_string(), *n)).collect()))
+    }
+
+    pub async fn connect(tree: Tree, quirks: Quirks) -> SftpSession {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        russh_sftp::server::run(server, Server { tree, quirks, read: HashSet::new() }).await;
+        SftpSession::new(client).await.unwrap()
+    }
+
+    struct Server {
+        tree: Tree,
+        quirks: Quirks,
+        read: HashSet<String>,
+    }
+
+    fn attrs(node: Node) -> FileAttributes {
+        let mode = match node { Node::Dir => 0o040755, Node::File => 0o100644, Node::Link => 0o120777 };
+        FileAttributes { permissions: Some(mode), ..Default::default() }
+    }
+
+    fn ok(id: u32) -> Status {
+        Status { id, status_code: StatusCode::Ok, error_message: "Ok".into(), language_tag: "en-US".into() }
+    }
+
+    impl Server {
+        fn node(&self, path: &str) -> Option<Node> {
+            self.tree.lock().unwrap().get(path).copied()
+        }
+        fn has_children(&self, path: &str) -> bool {
+            let prefix = format!("{}/", path);
+            self.tree.lock().unwrap().keys().any(|k| k.starts_with(&prefix))
+        }
+    }
+
+    impl russh_sftp::server::Handler for Server {
+        type Error = StatusCode;
+
+        fn unimplemented(&self) -> StatusCode {
+            StatusCode::OpUnsupported
+        }
+
+        async fn open(&mut self, id: u32, filename: String, _: OpenFlags, _: FileAttributes) -> Result<Handle, StatusCode> {
+            self.tree.lock().unwrap().insert(filename.clone(), Node::File);
+            Ok(Handle { id, handle: filename })
+        }
+
+        async fn close(&mut self, id: u32, _: String) -> Result<Status, StatusCode> {
+            Ok(ok(id))
+        }
+
+        async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, StatusCode> {
+            match self.node(&path) {
+                Some(Node::Dir) => Ok(Handle { id, handle: path }),
+                _ => Err(StatusCode::NoSuchFile),
+            }
+        }
+
+        async fn readdir(&mut self, id: u32, handle: String) -> Result<Name, StatusCode> {
+            if !self.read.insert(handle.clone()) {
+                self.read.remove(&handle);
+                return Err(StatusCode::Eof);
+            }
+            let prefix = format!("{}/", handle);
+            let files = self.tree.lock().unwrap().iter()
+                .filter_map(|(path, node)| {
+                    let name = path.strip_prefix(&prefix).filter(|n| !n.contains('/'))?;
+                    let listed = match node {
+                        Node::Link if self.quirks.links_listed_as_dirs => Node::Dir,
+                        other => *other,
+                    };
+                    Some(File::new(name, attrs(listed)))
+                })
+                .collect();
+            Ok(Name { id, files })
+        }
+
+        async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, StatusCode> {
+            if self.quirks.lstat_fails.contains(&path) {
+                return Err(StatusCode::Failure);
+            }
+            self.node(&path).map(|n| Attrs { id, attrs: attrs(n) }).ok_or(StatusCode::NoSuchFile)
+        }
+
+        async fn remove(&mut self, id: u32, filename: String) -> Result<Status, StatusCode> {
+            match self.node(&filename) {
+                Some(Node::Dir) => Err(StatusCode::Failure),
+                Some(_) => {
+                    self.tree.lock().unwrap().remove(&filename);
+                    Ok(ok(id))
+                }
+                None => Err(StatusCode::NoSuchFile),
+            }
+        }
+
+        async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, StatusCode> {
+            match self.node(&path) {
+                Some(Node::Dir) if !self.has_children(&path) => {
+                    self.tree.lock().unwrap().remove(&path);
+                    Ok(ok(id))
+                }
+                Some(_) => Err(StatusCode::Failure),
+                None => Err(StatusCode::NoSuchFile),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -11899,6 +12213,132 @@ mod tests {
         assert_eq!(super::link_stat_failure_state(&status(StatusCode::PermissionDenied)), "error");
         assert_eq!(super::link_stat_failure_state(&status(StatusCode::Failure)), "error");
         assert_eq!(super::link_stat_failure_state(&Error::Timeout), "error");
+    }
+
+    #[test]
+    fn rm_rf_runs_only_where_the_shell_finds_the_marker() {
+        let script = super::rm_rf_script("it's", "it's/.submarine-rm-x");
+        assert!(!script.contains('\n'), "csh/tcsh reject a newline inside quotes");
+        let run = |dir: &std::path::Path, script: &str| {
+            std::process::Command::new("sh").arg("-c").arg(script).current_dir(dir).status().ok().and_then(|s| s.code())
+        };
+        let root = std::env::temp_dir().join(format!("submarine-rmrf-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("it's/a/b")).unwrap();
+        std::fs::write(root.join("it's/a/b/f"), b"x").unwrap();
+        if run(&root, "true").is_none() {
+            eprintln!("rm_rf_runs_only_where_the_shell_finds_the_marker: SKIPPED, no sh");
+            return;
+        }
+
+        assert_eq!(run(&root, &script), Some(3), "no marker: the shell sees another folder");
+        assert!(root.join("it's/a/b/f").exists(), "nothing may go without the marker");
+
+        std::fs::write(root.join("it's/.submarine-rm-x"), b"").unwrap();
+        // MSYS `ln -s` may copy instead of linking; then there is no link to test.
+        if run(&root, "ln -s \"it's\" link && [ -L link ]") == Some(0) {
+            let via_link = super::rm_rf_script("link", "link/.submarine-rm-x");
+            assert_eq!(run(&root, &via_link), Some(3), "a link to the folder must not pass for it");
+            assert!(root.join("it's/a/b/f").exists());
+        } else {
+            eprintln!("rm_rf_runs_only_where_the_shell_finds_the_marker: link case SKIPPED, no symlinks");
+        }
+        assert_eq!(run(&root, &script), Some(0));
+        assert!(!root.join("it's").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn removable_dir_path_refuses_the_root_and_steps_up() {
+        use super::removable_dir_path as path;
+        assert_eq!(path("/var/www/site/"), Ok("/var/www/site"));
+        assert_eq!(path("/C:/Users/me/dir"), Ok("/C:/Users/me/dir"));
+        let bad = [
+            "/", "///", "", "/..", "/var/www/../..", "/var/./www", "/srv/x/../../.ssh", "relative/dir",
+            "/C:", "/C:/", "/C:\\", "/C:/Users/me/..\\..\\Windows", "/srv\\..\\etc",
+        ];
+        for bad in bad {
+            assert!(path(bad).is_err(), "{:?} must be refused", bad);
+        }
+    }
+
+    #[test]
+    fn child_name_stays_below_the_folder_on_any_server() {
+        for ok in ["a", "back\\slash", ".hidden", "..a", "a.."] {
+            assert!(super::is_child_name(ok), "{:?}", ok);
+        }
+        for bad in ["", "a/b", "..\\..\\Windows", "a\\..", "..\\x"] {
+            assert!(!super::is_child_name(bad), "{:?}", bad);
+        }
+    }
+
+    #[tokio::test]
+    async fn remove_tree_empties_folders_before_removing_them() {
+        use test_sftp::Node::*;
+        let tree = test_sftp::tree(&[
+            ("/srv", Dir), ("/srv/site", Dir), ("/srv/site/a", Dir), ("/srv/site/a/b", Dir),
+            ("/srv/site/a/b/f", File), ("/srv/site/back\\slash", File), ("/srv/keep", File),
+        ]);
+        let sftp = test_sftp::connect(tree.clone(), Default::default()).await;
+        assert!(super::sftp_remove_tree(&sftp, "/").await.is_err(), "the root is refused by every caller");
+        super::sftp_remove_tree(&sftp, "/srv/site").await.unwrap();
+        let left: Vec<String> = tree.lock().unwrap().keys().cloned().collect();
+        assert_eq!(left, ["/srv", "/srv/keep"]);
+    }
+
+    #[tokio::test]
+    async fn remove_tree_unlinks_a_link_listed_as_a_folder() {
+        use test_sftp::Node::*;
+        let tree = test_sftp::tree(&[
+            ("/srv", Dir), ("/srv/site", Dir), ("/srv/site/data", Link),
+            ("/data", Dir), ("/data/precious", File),
+        ]);
+        let quirks = test_sftp::Quirks { links_listed_as_dirs: true, ..Default::default() };
+        let sftp = test_sftp::connect(tree.clone(), quirks).await;
+        super::sftp_remove_tree(&sftp, "/srv/site").await.unwrap();
+        let left: Vec<String> = tree.lock().unwrap().keys().cloned().collect();
+        assert_eq!(left, ["/data", "/data/precious", "/srv"], "the link's target must stay");
+    }
+
+    #[tokio::test]
+    async fn remove_tree_of_a_gone_folder_is_done() {
+        let tree = test_sftp::tree(&[("/srv", test_sftp::Node::Dir)]);
+        let sftp = test_sftp::connect(tree, Default::default()).await;
+        super::sftp_remove_tree(&sftp, "/srv/site").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn remove_tree_stops_on_a_failed_lstat_instead_of_guessing() {
+        use test_sftp::Node::*;
+        let tree = test_sftp::tree(&[("/srv", Dir), ("/srv/site", Dir), ("/srv/site/sub", Dir), ("/srv/site/sub/f", File)]);
+        let mut quirks = test_sftp::Quirks::default();
+        quirks.lstat_fails.insert("/srv/site/sub".into());
+        let sftp = test_sftp::connect(tree.clone(), quirks).await;
+        let err = super::sftp_remove_tree(&sftp, "/srv/site").await.unwrap_err();
+        assert!(err.starts_with("stat /srv/site/sub:"), "{}", err);
+        assert!(tree.lock().unwrap().contains_key("/srv/site/sub/f"));
+    }
+
+    #[test]
+    fn rm_rf_finishes_only_on_a_clean_exit() {
+        let outcome = |raw: &str| super::rm_rf_outcome(Ok(raw.to_string()));
+        assert_eq!(outcome("\n__SUB_EXITCODE:0"), Ok(()));
+        assert!(outcome("\n__SUB_EXITCODE:124").is_err_and(|r| r.starts_with("exit 124")));
+        assert!(outcome("shell sees another folder\n__SUB_EXITCODE:3").is_err_and(|r| r.starts_with("exit 3")));
+        assert!(outcome("This service allows sftp connections only.\n").is_err_and(|r| r.starts_with("the server ran no sh")));
+        assert!(super::rm_rf_outcome(Err("exec timed out after 3660s".into())).is_err());
+    }
+
+    #[test]
+    fn rm_rf_needs_the_shell_to_echo_the_path_back_intact() {
+        let echo = |raw: &str| super::shell_echoes_path(Ok(raw.to_string()), "/srv/it's");
+        assert!(echo("/srv/it's\n__SUB_EXITCODE:0").is_ok());
+        assert!(echo("Welcome!\n/srv/it's\n__SUB_EXITCODE:0").is_ok(), "rc-file noise above is fine");
+        assert!(echo("/srv/its\n__SUB_EXITCODE:0").is_err(), "a misquoted path must stop rm");
+        assert!(echo("/a/srv/it's\n__SUB_EXITCODE:0").is_err());
+        assert!(echo("/srv/it's\n__SUB_EXITCODE:2").is_err());
+        assert!(echo("'sh' is not recognized as an internal or external command").is_err());
+        assert!(super::shell_echoes_path(Err("exec failed".into()), "/srv/it's").is_err());
     }
 
     #[test]
