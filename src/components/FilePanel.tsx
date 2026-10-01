@@ -1225,11 +1225,13 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     });
     if (!ok) return;
     let count = 0;
-    for (const it of items) {
-      // A link is unlinked as a file even when it points at a directory.
-      try { await provider.remove(it.path, it.isDir && !it.isSymlink); count++; }
-      catch (err: any) { notify(`Delete failed for ${it.name}: ${err}`, "error"); }
-    }
+    await runBusyJob(items.length === 1 ? `Deleting ${items[0].name}…` : `Deleting ${items.length} items…`, async () => {
+      for (const it of items) {
+        // A link is unlinked as a file even when it points at a directory.
+        try { await provider.remove(it.path, it.isDir && !it.isSymlink); count++; }
+        catch (err: any) { notify(`Delete failed for ${it.name}: ${err}`, "error"); }
+      }
+    });
     if (count > 0) {
       setSelected(new Set());
       lastSelectedPathRef.current = null;
