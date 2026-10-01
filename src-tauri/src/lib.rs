@@ -9346,6 +9346,37 @@ fn open_launch_permitted(cancelled: bool) -> Result<(), &'static str> {
     }
 }
 
+/// Transfers-bar event for an open-in-editor download. It carries the
+/// command's transfer id, so the bar's Cancel reaches the open.
+/// `launching: true` (progress only) marks the editor launch: the bar labels
+/// the row as opening and hides Cancel, since the launch is committed.
+fn open_transfer_event(
+    transfer_id: &str,
+    name: &str,
+    bytes: u64,
+    total: u64,
+    status: &str,
+    error: Option<String>,
+    launching: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": transfer_id, "name": name, "kind": "download",
+        "bytes": bytes, "total": total,
+        "status": status, "error": error,
+        "launching": launching && status == "progress",
+    })
+}
+
+/// The single final status of an open: `done` only when the editor was
+/// launched, and any failure (watcher, launch included) is an `error`.
+fn open_final_status(result: &Result<(), String>) -> (&'static str, Option<String>) {
+    match result {
+        Ok(()) => ("done", None),
+        Err(e) if e == "cancelled" => ("cancelled", None),
+        Err(e) => ("error", Some(e.clone())),
+    }
+}
+
 /// State of an editor copy that has (or had) a save watcher. `synced` is the
 /// hash of the bytes last known to be on the server; the lock is held while
 /// the copy is uploaded or replaced, so the two never interleave.
@@ -9540,24 +9571,21 @@ fn download_is_short(expected: u64, transferred: u64) -> bool {
 /// A stream that ends before the size the server reported is an error, and a
 /// file whose size the server does not report is refused: the next save would
 /// truncate the remote file to whatever an unverified download delivered.
+/// `emit(bytes, total)` reports progress only; the caller sends the final status.
 async fn download_to_part(
     sftp: &russh_sftp::client::SftpSession,
     remote_path: &str,
     part: &std::path::Path,
     cancel: &std::sync::atomic::AtomicBool,
-    emit: &impl Fn(u64, u64, &str),
+    emit: &impl Fn(u64, u64),
 ) -> Result<([u8; 32], u64), String> {
     use sha2::{Digest, Sha256};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use std::sync::atomic::Ordering;
 
-    // Size up front so the file-row progress bar can show a percentage.
-    // Some servers omit it; the UI then falls back to an indeterminate sweep.
     let stat_size = sftp.metadata(remote_path).await.ok().and_then(|m| m.size);
-    let total = stat_size.unwrap_or(0);
     let mut transferred: u64 = 0;
     let result: Result<[u8; 32], String> = async {
-        emit(0, total, "progress");
         let mut remote_file = sftp
             .open(remote_path)
             .await
@@ -9572,6 +9600,7 @@ async fn download_to_part(
                 .and_then(|m| m.size)
                 .ok_or("Remote file size is unavailable; refusing an unverified download")?,
         };
+        emit(0, expected);
         let mut local_file = tokio::fs::File::create(part)
             .await
             .map_err(|e| format!("Failed to write temporary file: {}", e))?;
@@ -9596,7 +9625,7 @@ async fn download_to_part(
             hasher.update(&buf[..n]);
             transferred += n as u64;
             if last_report.elapsed() >= std::time::Duration::from_millis(100) {
-                emit(transferred, total, "progress");
+                emit(transferred, expected);
                 last_report = std::time::Instant::now();
             }
         }
@@ -9614,7 +9643,6 @@ async fn download_to_part(
         Ok(hash) => Ok((hash, transferred)),
         Err(e) => {
             discard_open_staging(part);
-            emit(transferred, total, if e == "cancelled" { "cancelled" } else { "error" });
             Err(e)
         }
     }
@@ -9668,11 +9696,10 @@ async fn sftp_open_remote_file(
     remote_path: String,
     transfer_id: String,
 ) -> Result<(), String> {
-    use tauri::{Emitter, Manager};
-    use sha2::{Digest, Sha256};
+    use tauri::Emitter;
     use std::sync::atomic::Ordering;
 
-    // Register before any slow await so the toast's cancel button can flip
+    // Register before any slow await so the transfers bar's Cancel can flip
     // the flag while the SFTP channel is still coming up. A cancel that
     // arrived even earlier is picked up (the flag starts out set).
     let (cancel, _guard) = register_transfer_cancel(&state, &transfer_id).await;
@@ -9691,12 +9718,18 @@ async fn sftp_open_remote_file(
         }
     }
     let _in_flight = InFlightGuard { key: flight_key };
-
-    let sftp = get_sftp_session(&state, &session_id).await?;
     let filename = safe_temp_leaf_name(&remote_path)?;
 
     let event_name = format!("sftp-open-{}", session_id);
-    let emit_progress = |bytes: u64, total: u64, status: &str| {
+    // Also sent like a manual download, so the open shows (and can be
+    // cancelled) in the transfers bar.
+    let transfer_event = format!("sftp-transfer-{}", session_id);
+    let last_bytes = std::sync::atomic::AtomicU64::new(0);
+    let last_total = std::sync::atomic::AtomicU64::new(0);
+    let launching = std::sync::atomic::AtomicBool::new(false);
+    let emit_status = |bytes: u64, total: u64, status: &str, error: Option<String>| {
+        last_bytes.store(bytes, Ordering::Relaxed);
+        last_total.store(total, Ordering::Relaxed);
         let _ = app_handle.emit(
             &event_name,
             serde_json::json!({
@@ -9706,15 +9739,54 @@ async fn sftp_open_remote_file(
                 "status": status,
             }),
         );
+        let _ = app_handle.emit(
+            &transfer_event,
+            open_transfer_event(&transfer_id, &filename, bytes, total, status, error, launching.load(Ordering::Relaxed)),
+        );
     };
+    // `is_launching`: the download is installed and the editor launch is
+    // committed, so Cancel no longer stops it.
+    let emit_progress = |bytes: u64, total: u64, is_launching: bool| {
+        launching.store(is_launching, Ordering::Relaxed);
+        emit_status(bytes, total, "progress", None);
+    };
+
+    // The bar row exists from here on, before the waits (live-edit mutex,
+    // file lock), so it can be cancelled while it waits. A Cancel during the
+    // SFTP channel setup takes effect once the channel is up.
+    // Every exit after this point sends exactly one final status.
+    emit_progress(0, 0, false);
+    let result =
+        download_and_open(&app_handle, &state, &session_id, &remote_path, &filename, &cancel, &emit_progress).await;
+    let (status, error) = open_final_status(&result);
+    emit_status(last_bytes.load(Ordering::Relaxed), last_total.load(Ordering::Relaxed), status, error);
+    result
+}
+
+/// Body of `sftp_open_remote_file` after its first progress event. `Ok` only
+/// once the editor has been launched.
+async fn download_and_open(
+    app_handle: &tauri::AppHandle,
+    state: &SshState,
+    session_id: &str,
+    remote_path: &str,
+    filename: &str,
+    cancel: &std::sync::atomic::AtomicBool,
+    emit_progress: &impl Fn(u64, u64, bool),
+) -> Result<(), String> {
+    use tauri::{Emitter, Manager};
+    use sha2::{Digest, Sha256};
+    use std::sync::atomic::Ordering;
+
+    let sftp = get_sftp_session(state, session_id).await?;
 
     // Per-session subdirectory so we can sweep everything cleanly on
     // disconnect. One directory per remote path, so opening the same file
     // again replaces the same editor copy.
-    let session_temp_dir = session_sftp_dir(&session_id);
+    let session_temp_dir = session_sftp_dir(session_id);
     let mut path_key = hex::encode(Sha256::digest(remote_path.as_bytes()));
     path_key.truncate(32);
-    let temp_file_path = open_staging_file(&session_temp_dir, &path_key, &filename);
+    let temp_file_path = open_staging_file(&session_temp_dir, &path_key, filename);
     // The download lands here first, so a failed or cancelled download
     // never touches the copy the editor has open.
     let part_path = temp_file_path.with_file_name(format!("{filename}.part"));
@@ -9749,38 +9821,40 @@ async fn sftp_open_remote_file(
                 }
             }
         };
-        let mut edit = entry.lock().await;
-        let had_copy = existed && temp_file_path.exists();
-
         // Reopening always takes the server's version. Local changes that were
         // not sent yet are discarded by the replace below, by design.
-        let installed: Result<u64, String> = async {
+        let installed = async {
+            // A reopen waits here for an auto-sync upload; Cancel must still work.
+            let mut edit = until_cancelled(Arc::clone(&entry).lock_owned(), Some(cancel)).await?;
+            let had_copy = existed && temp_file_path.exists();
             // Do not read the remote file while a batch upload rewrites it.
             // Lock order is always live-edit entry, then remote file.
-            let _file_lock = lock_remote_file_cancellable(&session_id, &remote_path, &cancel).await?;
+            let _file_lock = lock_remote_file_cancellable(session_id, remote_path, cancel).await?;
             let (hash, transferred) =
-                download_to_part(&sftp, &remote_path, &part_path, &cancel, &emit_progress).await?;
+                download_to_part(&sftp, remote_path, &part_path, cancel, &|bytes, total| emit_progress(bytes, total, false))
+                    .await?;
             if open_launch_permitted(cancel.load(Ordering::Relaxed)).is_err() {
                 discard_open_staging(&part_path);
-                emit_progress(transferred, transferred, "cancelled");
                 return Err("cancelled".to_string());
             }
+            // Past the gate the launch goes ahead: the bar shows the row as
+            // opening in the editor, without Cancel.
+            emit_progress(transferred, transferred, true);
             // On Windows the replace fails if the editor holds the file
             // locked; the old copy stays.
             if let Err(e) = std::fs::rename(&part_path, &temp_file_path) {
                 discard_open_staging(&part_path);
-                emit_progress(transferred, transferred, "error");
                 return Err(format!(
                     "Failed to update the local copy (is it locked by the editor?): {}",
                     e
                 ));
             }
             edit.server_has(hash);
-            Ok(transferred)
+            Ok((edit, had_copy))
         }
         .await;
-        let transferred = match installed {
-            Ok(n) => n,
+        let (mut edit, had_copy) = match installed {
+            Ok(installed) => installed,
             Err(e) => {
                 if !existed {
                     lock_live_edits().remove(&temp_file_path);
@@ -9788,7 +9862,6 @@ async fn sftp_open_remote_file(
                 return Err(e);
             }
         };
-        emit_progress(transferred, transferred, "done");
 
         let watcher = if edit.watching {
             None
@@ -9817,6 +9890,7 @@ async fn sftp_open_remote_file(
         edit.watching = true;
         drop(edit);
 
+        let (session_id, remote_path, filename) = (session_id.to_string(), remote_path.to_string(), filename.to_string());
         let connections_clone = Arc::clone(&state.connections);
         let app_handle_clone = app_handle.clone();
         tokio::spawn(async move {
@@ -9854,8 +9928,7 @@ async fn sftp_open_remote_file(
                 // transfers bar. `source: "sync"` marks it as not cancellable:
                 // stopping after the truncate would only leave the remote
                 // file cut short until the retry.
-                // `crate::`: the command's `transfer_id` argument shadows the fn.
-                let upload_id = crate::transfer_id();
+                let upload_id = transfer_id();
                 let emit_upload = |bytes: u64, total: u64, status: &str, error: Option<String>| {
                     let _ = app_handle_clone.emit(
                         &transfer_event,
@@ -11713,6 +11786,31 @@ mod tests {
     fn cancel_before_editor_launch_is_rejected() {
         assert_eq!(open_launch_permitted(true), Err("cancelled"));
         assert_eq!(open_launch_permitted(false), Ok(()));
+    }
+
+    #[test]
+    fn an_open_reports_to_the_transfers_bar_under_its_own_id() {
+        let event = open_transfer_event("open-1", "app.log", 10, 100, "progress", None, false);
+        assert_eq!(event["id"], "open-1");
+        assert_eq!(event["kind"], "download");
+        assert_eq!(event["name"], "app.log");
+        assert_eq!(event["total"], 100);
+        assert_eq!(event["launching"], false);
+        // The committed editor launch is its own phase in the bar.
+        let launching = open_transfer_event("open-1", "app.log", 100, 100, "progress", None, true);
+        assert_eq!(launching["launching"], true);
+        // A final status is never shown as launching.
+        let done = open_transfer_event("open-1", "app.log", 100, 100, "done", None, true);
+        assert_eq!(done["launching"], false);
+    }
+
+    #[test]
+    fn an_open_ends_done_only_when_launched_and_a_failure_carries_its_text() {
+        assert_eq!(open_final_status(&Ok(())), ("done", None));
+        assert_eq!(open_final_status(&Err("cancelled".into())), ("cancelled", None));
+        // Watcher or editor launch failing after the download is an error, not done.
+        let failed = Err("Failed to open file: no handler".to_string());
+        assert_eq!(open_final_status(&failed), ("error", Some("Failed to open file: no handler".to_string())));
     }
 
     #[test]

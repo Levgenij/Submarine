@@ -1,4 +1,4 @@
-import { AlertTriangle, Ban, Check, ChevronDown, ChevronUp, Clock, Download, Upload, X } from "lucide-react";
+import { AlertTriangle, Ban, Check, ChevronDown, ChevronUp, Clock, Download, ExternalLink, Upload, X } from "lucide-react";
 import type { QueuedTransfer } from "../fs/transferQueue";
 
 // Docked transfers section at the bottom of the SFTP file card. One row per
@@ -16,6 +16,8 @@ export interface Transfer {
   error?: string;
   /** "sync": a save from the live-edit editor copy. It cannot be cancelled. */
   source?: "sync";
+  /** An open-in-editor download is installed and the editor is launching. It cannot be cancelled. */
+  launching?: boolean;
   /** Bytes per second over the last few seconds; unset until there is enough data. */
   speed?: number;
 }
@@ -49,7 +51,8 @@ const formatEta = (seconds: number) => {
 };
 
 const TransfersBar = ({ transfers, queued, collapsed, onToggleCollapsed, onCancel, onCancelQueued }: TransfersBarProps) => {
-  const active = transfers.filter((t) => t.status === "progress");
+  const active = transfers.filter((t) => t.status === "progress" && !t.launching);
+  const launching = transfers.filter((t) => t.status === "progress" && t.launching).length;
   const starting = queued.filter((q) => q.state === "starting");
   const waiting = queued.filter((q) => q.state === "queued");
   const count = (kind: "upload" | "download") =>
@@ -60,6 +63,7 @@ const TransfersBar = ({ transfers, queued, collapsed, onToggleCollapsed, onCance
   const summary = [
     downloading ? `${downloading} downloading` : null,
     uploading ? `${uploading} uploading` : null,
+    launching ? `${launching} opening in editor` : null,
     waiting.length ? `${waiting.length} queued` : null,
     failed ? `${failed} failed` : null,
   ].filter(Boolean).join(" · ") || "Finished";
@@ -95,10 +99,15 @@ const TransfersBar = ({ transfers, queued, collapsed, onToggleCollapsed, onCance
 
 const TransferRow = ({ t, onCancel }: { t: Transfer; onCancel: (id: string) => void }) => {
   const pct = t.total > 0 ? Math.min(100, (t.bytes * 100) / t.total) : null;
+  const launching = t.status === "progress" && t.launching;
+  // No byte and no size yet (an open waiting for its lock, a folder walk):
+  // an empty bar, so the row does not flash the sweep before the size arrives.
+  const starting = t.status === "progress" && t.bytes === 0 && t.total === 0;
   const Icon =
     t.status === "error"     ? AlertTriangle :
     t.status === "done"      ? Check :
     t.status === "cancelled" ? Ban :
+    launching                ? ExternalLink :
     t.kind   === "upload"    ? Upload :
                                Download;
   const iconTone =
@@ -115,10 +124,12 @@ const TransferRow = ({ t, onCancel }: { t: Transfer; onCancel: (id: string) => v
     t.status === "error"     ? <span className="text-rose-400">Failed</span> :
     t.status === "done"      ? <span className="text-emerald-400">Done</span> :
     t.status === "cancelled" ? <span className="text-amber-400">Cancelled</span> :
+    launching                ? <span className="text-blue-400">Opening in editor…</span> :
+    starting                 ? <span className="text-zinc-400">Starting…</span> :
     pct !== null             ? <span className="text-blue-400">{Math.floor(pct)}%</span> :
                                null;
   const sizeText = t.total > 0 ? `${formatBytes(t.bytes)} / ${formatBytes(t.total)}` : formatBytes(t.bytes);
-  const rate = t.status === "progress" && t.speed && t.speed > 0
+  const rate = t.status === "progress" && !launching && t.speed && t.speed > 0
     ? [formatSpeed(t.speed), t.total > t.bytes ? formatEta((t.total - t.bytes) / t.speed) : null].filter(Boolean).join(" · ")
     : null;
 
@@ -141,7 +152,7 @@ const TransferRow = ({ t, onCancel }: { t: Transfer; onCancel: (id: string) => v
         </div>
         {t.status !== "error" && (
           <div className="relative h-1 my-1 bg-white/10 rounded overflow-hidden">
-            {pct === null && t.status === "progress" ? (
+            {pct === null && t.status === "progress" && !starting ? (
               <div className="absolute inset-y-0 left-0 w-1/3 bg-blue-500/70 open-progress-indeterminate" />
             ) : (
               <div
@@ -160,7 +171,7 @@ const TransferRow = ({ t, onCancel }: { t: Transfer; onCancel: (id: string) => v
           </div>
         )}
       </div>
-      {t.status === "progress" && t.source !== "sync" ? (
+      {t.status === "progress" && t.source !== "sync" && !launching ? (
         <button
           type="button"
           onClick={() => onCancel(t.id)}

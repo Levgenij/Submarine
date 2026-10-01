@@ -199,7 +199,6 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // A second request for one of these is ignored until that call returns.
   const openingPathsRef = useRef<Set<string>>(new Set());
   const [openProgress, setOpenProgress] = useState<Record<string, { bytes: number; total: number }>>({});
-  const [openJobs, setOpenJobs] = useState<{ transferId: string; name: string }[]>([]);
   const [sort, setSort] = useState<SortState>({ column: "name", asc: true });
 
   const [tempInput, setTempInput] = useState("");
@@ -278,12 +277,6 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       notifyTimerRef.current = null;
       setNotification(null);
     }, 4000);
-  };
-
-  // A click that lands before the command registered its flag is kept by
-  // the backend (early cancel), so one send is enough.
-  const cancelOpenDownload = (id: string) => {
-    invoke("sftp_cancel_transfer", { transferId: id }).catch(() => {});
   };
 
   const formatRights = (isDir: boolean, perm?: number) => {
@@ -1569,7 +1562,6 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       ...prev,
       [entry.path]: { bytes: 0, total: entry.size || 0 },
     }));
-    setOpenJobs((cur) => [...cur, { transferId, name: entry.name }]);
     const clearOpen = () => {
       if (openGenByPathRef.current.get(entry.path) !== gen) return;
       openGenByPathRef.current.delete(entry.path);
@@ -1580,14 +1572,10 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         return next;
       });
     };
-    const clearOpenJob = () => {
-      setOpenJobs((cur) => cur.filter((job) => job.transferId !== transferId));
-    };
     try {
       await invoke("sftp_open_remote_file", { sessionId, remotePath: entry.path, transferId });
     } catch (err: any) {
       clearOpen();
-      clearOpenJob();
       const message = String(err);
       if (message === "cancelled" || message.endsWith("cancelled")) notify("Open cancelled", "info");
       else if (message === "already downloading" || message.endsWith("already downloading")) {
@@ -1597,7 +1585,6 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     } finally {
       openingPathsRef.current.delete(entry.path);
     }
-    clearOpenJob();
     setOpenProgress((prev) => {
       const cur = prev[entry.path];
       if (!cur || openGenByPathRef.current.get(entry.path) !== gen) return prev;
@@ -2296,10 +2283,10 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         </div>
       </div>
 
-      {(notification || pendingMove || openJobs.length > 0 || busyJobs.length > 0) && (
+      {(notification || pendingMove || busyJobs.length > 0) && (
         // Bottom-right of the list area: never over the path bar, and never
         // over the docked selection bar below the list. The
-        // open-job row is its own element so a later notify() cannot take
+        // move row is its own element so a later notify() cannot take
         // the cancel button with it.
         <div className="absolute bottom-2 right-2 left-2 z-30 flex flex-col items-end gap-1.5 pointer-events-none">
           {notification && (
@@ -2326,19 +2313,6 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
               </button>
             </div>
           )}
-          {openJobs.map((job) => (
-            <div key={job.transferId} className="pointer-events-auto max-w-full px-3 py-1.5 rounded-lg border text-[11px] font-mono shadow-2xl backdrop-blur-md bg-indigo-950/90 border-indigo-500/30 text-indigo-400 flex items-center gap-2">
-              <span className="min-w-0">Opening {job.name} in default editor…</span>
-              <button
-                type="button"
-                title="Cancel"
-                onClick={() => cancelOpenDownload(job.transferId)}
-                className="shrink-0 p-0.5 rounded hover:bg-white/15 text-zinc-300 hover:text-rose-300"
-              >
-                <X size={12} />
-              </button>
-            </div>
-          ))}
           {busyJobs.map((job) => (
             <div key={job.id} className="pointer-events-auto max-w-full px-3 py-1.5 rounded-lg border text-[11px] font-mono shadow-2xl backdrop-blur-md bg-indigo-950/90 border-indigo-500/30 text-indigo-400 flex items-center gap-2">
               <RefreshCw size={11} className="shrink-0 animate-spin" />
