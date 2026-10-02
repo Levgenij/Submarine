@@ -7604,6 +7604,33 @@ struct SftpListResult {
     entries: Vec<SftpFileEntry>,
 }
 
+#[derive(serde::Serialize)]
+struct SftpOwner {
+    uid: u32,
+    name: String,
+}
+
+#[derive(serde::Serialize)]
+struct SftpOwnerLookup {
+    owners: Vec<SftpOwner>,
+    status: &'static str,
+}
+
+fn parse_sftp_owners(
+    output: &str,
+    requested: &std::collections::HashSet<u32>,
+) -> Vec<SftpOwner> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (uid, name) = line.split_once('\t')?;
+            let uid = uid.parse().ok()?;
+            (requested.contains(&uid) && !name.is_empty())
+                .then(|| SftpOwner { uid, name: name.to_string() })
+        })
+        .collect()
+}
+
 pub async fn get_sftp_session(
     state: &SshState,
     session_id: &str,
@@ -7730,6 +7757,70 @@ async fn sftp_list_dir(
     Ok(SftpListResult {
         current_path: canonical_path,
         entries,
+    })
+}
+
+#[tauri::command]
+async fn sftp_resolve_owners(
+    state: tauri::State<'_, SshState>,
+    session_id: String,
+    mut uids: Vec<u32>,
+) -> Result<SftpOwnerLookup, String> {
+    const BATCH_SIZE: usize = 64;
+    const MAX_UIDS: usize = 4096;
+    const SUCCESS_MARKER: &str = "__SUB_OWNER_LOOKUP_OK__";
+
+    uids.sort_unstable();
+    uids.dedup();
+    if uids.is_empty() {
+        return Ok(SftpOwnerLookup {
+            owners: Vec::new(),
+            status: "complete",
+        });
+    }
+    if uids.len() > MAX_UIDS {
+        return Err(format!("Owner lookup is limited to {MAX_UIDS} unique UIDs"));
+    }
+
+    let requested: std::collections::HashSet<u32> = uids.iter().copied().collect();
+    let mut owners = Vec::new();
+    for batch in uids.chunks(BATCH_SIZE) {
+        let uid_args = batch.iter().map(u32::to_string).collect::<Vec<_>>().join(" ");
+        let script = format!(
+            "for uid in {uid_args}; do \
+name=$(id -un \"$uid\" 2>/dev/null) || name=$(getent passwd \"$uid\" 2>/dev/null | awk -F: 'NR == 1 {{ print $1 }}'); \
+[ -n \"$name\" ] && printf '%s\\t%s\\n' \"$uid\" \"$name\"; \
+done; printf '%s\\n' {SUCCESS_MARKER}"
+        );
+        let command = format!("sh -c {}", archive::sh_quote(&script));
+        let output = match run_exec_capture(&state, &session_id, &command, 5).await {
+            Ok(output) => output,
+            Err(_) => {
+                return Ok(SftpOwnerLookup {
+                    owners,
+                    status: "transient_error",
+                });
+            }
+        };
+        let batch_owners = parse_sftp_owners(&output, &requested);
+        if !output.lines().any(|line| line == SUCCESS_MARKER) {
+            let status = if output.is_empty() || !batch_owners.is_empty() {
+                "transient_error"
+            } else {
+                "unsupported"
+            };
+            owners.extend(batch_owners);
+            return Ok(SftpOwnerLookup {
+                owners,
+                status,
+            });
+        }
+        owners.extend(batch_owners);
+    }
+
+    Ok(SftpOwnerLookup {
+        owners,
+        status: "complete",
     })
 }
 
@@ -11706,7 +11797,7 @@ pub fn run() {
             android_quick_dirs, android_default_local_dir,
             parse_ssh_config,
             parse_client_import,
-            sftp_list_dir, sftp_create_dir, sftp_create_file, sftp_create_symlink, sftp_resolve_links, sftp_realpath, sftp_stat, sftp_remove_file, sftp_remove_dir,
+            sftp_list_dir, sftp_resolve_owners, sftp_create_dir, sftp_create_file, sftp_create_symlink, sftp_resolve_links, sftp_realpath, sftp_stat, sftp_remove_file, sftp_remove_dir,
             sftp_rename, sftp_set_permissions, sftp_set_owner,
             sftp_download_file, sftp_download_dir, sftp_upload_file, sftp_upload_dir, sftp_cancel_transfer, sftp_open_remote_file,
             local_open_file, local_open_in_explorer, sftp_prepare_drag,
@@ -11853,6 +11944,19 @@ pub(crate) mod test_sftp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_lookup_parser_accepts_only_requested_uid_name_rows() {
+        let requested = [0, 1003].into_iter().collect();
+        let owners = parse_sftp_owners(
+            "0\troot\n1003\tdeploy\n1004\tother\ninvalid\n__SUB_OWNER_LOOKUP_OK__\n",
+            &requested,
+        );
+
+        assert_eq!(owners.len(), 2);
+        assert_eq!((owners[0].uid, owners[0].name.as_str()), (0, "root"));
+        assert_eq!((owners[1].uid, owners[1].name.as_str()), (1003, "deploy"));
+    }
 
     #[test]
     fn a_cancel_sent_before_the_command_registers_is_not_lost() {
