@@ -6,7 +6,7 @@ import {
   Folder, FolderUp, File, ArrowUp, RefreshCw, Trash2, Edit3, Shield,
   X, ChevronUp, ChevronDown, Plus, MoreVertical, FolderSearch,
   Download, Upload, ExternalLink, Move, CheckSquare, Square, Search,
-  Terminal, Link, FolderSymlink, FileSymlink, CornerDownRight, Archive, PackageOpen, Bookmark,
+  Terminal, Link, FolderSymlink, FileSymlink, CornerDownRight, Archive, PackageOpen, Bookmark, Copy,
 } from "lucide-react";
 import { FileEntry, FileProvider, LinkInfo } from "../fs/types";
 import { carryLinkState, mergePermissions, permissionOctal, safeLeafName, shellSingleQuote } from "../fs/dirContext";
@@ -343,6 +343,13 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       notifyTimerRef.current = null;
       setNotification(null);
     }, 4000);
+  };
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text).then(
+      () => notify("Copied to clipboard", "success"),
+      () => notify("Clipboard unavailable", "error"),
+    );
   };
 
   const formatRights = (isDir: boolean, perm?: number) => {
@@ -814,7 +821,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   const openMenu = (e: React.MouseEvent, entry: FileEntry) => {
     e.preventDefault();
     e.stopPropagation();
-    const MENU_W = 200, MENU_H = 380;
+    const MENU_W = 200, MENU_H = 440;
     const x = Math.min(e.clientX, window.innerWidth - MENU_W - 4);
     const y = Math.min(e.clientY, window.innerHeight - MENU_H - 4);
     // Right-click on a row that isn't already part of the selection should
@@ -2577,8 +2584,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
 
       {/* Context menu (portal) — bulk-aware. When the right-click anchor is
           part of a multi-selection, actions like Download / Move / Delete
-          apply to the whole set; per-item actions (Rename, Properties,
-          Edit) only show when exactly one row is selected. */}
+          apply to the whole set; per-item actions (Rename, Copy name/path,
+          Properties, Edit) only show when exactly one row is selected. */}
       {contextMenu && createPortal((() => {
         const selectedEntries = sortedEntries.filter(e => selected.has(e.path));
         const acting = selectedEntries.length > 0 ? selectedEntries : [contextMenu.entry];
@@ -2674,6 +2681,23 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
             <Move size={11} /><span>{multi ? `Move (${acting.length}) to…` : "Move to…"}</span>
           </button>
+          {multi ? (
+            <button onClick={() => { setContextMenu(null); copyToClipboard(acting.map(e => e.path).join("\n")); }}
+              className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
+              <Copy size={11} /><span>{`Copy ${acting.length} paths`}</span>
+            </button>
+          ) : (
+            <>
+              <button onClick={() => { setContextMenu(null); copyToClipboard(contextMenu.entry.name); }}
+                className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
+                <Copy size={11} /><span>Copy name</span>
+              </button>
+              <button onClick={() => { setContextMenu(null); copyToClipboard(contextMenu.entry.path); }}
+                className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
+                <Copy size={11} /><span>Copy path</span>
+              </button>
+            </>
+          )}
           {/* A broken link has no target to chmod; anything else is
               followed on click. */}
           {!multi && provider.chmod && menuEntry.linkState !== "broken" && (
