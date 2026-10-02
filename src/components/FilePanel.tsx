@@ -18,6 +18,7 @@ import {
 import { parentPathOf } from "../fs/localProvider";
 import { pathCrumbs } from "../fs/pathCrumbs";
 import { canMoveInto, rulesFor, takenNames } from "../fs/moveRules";
+import { useElementWidth } from "../hooks/useViewport";
 import {
   ARCHIVE_FORMATS, ArchiveFormat, archiveFileName, archiveKind, extractFolderName, suggestArchiveBase,
 } from "../fs/archive";
@@ -83,8 +84,13 @@ const listFailures = (failures: string[]) =>
     ? `${failures.slice(0, 3).join(", ")} +${failures.length - 3} more`
     : failures.join(", ");
 
-type SortColumn = "name" | "size" | "modified" | "permissions";
+type SortColumn = "name" | "size" | "modified" | "owner" | "permissions";
 interface SortState { column: SortColumn; asc: boolean; }
+interface SftpOwner { uid: number; name: string; }
+interface SftpOwnerLookup {
+  owners: SftpOwner[];
+  status: "complete" | "transient_error" | "unsupported";
+}
 
 export interface ActiveDrag {
   paneId: "local" | "remote";
@@ -251,11 +257,62 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // upload / download so a cross-pane drop doesn't run a stale closure.
   const sendItemsRef = useRef<(items: FileEntry[], destDir: string) => Promise<void>>(async () => {});
   const dropTargetRef = useRef<HTMLDivElement | null>(null);
+  const listWidth = useElementWidth(dropTargetRef);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const currentPathRef = useRef(currentPath);
   useEffect(() => { currentPathRef.current = currentPath; }, [currentPath]);
   const entriesRef = useRef(entries);
   useEffect(() => { entriesRef.current = entries; }, [entries]);
+  const [ownerNames, setOwnerNames] = useState<Record<number, string>>({});
+  const requestedOwnerUidsRef = useRef(new Set<number>());
+  const ownerLookupUnavailableRef = useRef(false);
+  const failedOwnerLookupListGenRef = useRef<number | null>(null);
+  const ownerLookupGenerationRef = useRef(0);
+  useEffect(() => {
+    ownerLookupGenerationRef.current++;
+    requestedOwnerUidsRef.current.clear();
+    ownerLookupUnavailableRef.current = false;
+    failedOwnerLookupListGenRef.current = null;
+    setOwnerNames({});
+  }, [provider, sessionId, disabled]);
+  useEffect(() => {
+    if (
+      provider.id !== "remote"
+      || !sessionId
+      || disabled
+      || ownerLookupUnavailableRef.current
+      || failedOwnerLookupListGenRef.current === listGenRef.current
+    ) return;
+    const uids = [...new Set(entries.map((entry) => entry.uid).filter((uid): uid is number => uid != null))]
+      .filter((uid) => !requestedOwnerUidsRef.current.has(uid));
+    if (uids.length === 0) return;
+
+    uids.forEach((uid) => requestedOwnerUidsRef.current.add(uid));
+    const generation = ownerLookupGenerationRef.current;
+    const listGeneration = listGenRef.current;
+    invoke<SftpOwnerLookup>("sftp_resolve_owners", { sessionId, uids })
+      .then((result) => {
+        if (ownerLookupGenerationRef.current !== generation) return;
+        if (result.status === "unsupported") ownerLookupUnavailableRef.current = true;
+        if (result.status === "transient_error") {
+          failedOwnerLookupListGenRef.current = listGeneration;
+          const resolved = new Set(result.owners.map((owner) => owner.uid));
+          uids.filter((uid) => !resolved.has(uid))
+            .forEach((uid) => requestedOwnerUidsRef.current.delete(uid));
+        }
+        if (result.owners.length > 0) {
+          setOwnerNames((current) => ({
+            ...current,
+            ...Object.fromEntries(result.owners.map((owner) => [owner.uid, owner.name])),
+          }));
+        }
+      })
+      .catch(() => {
+        if (ownerLookupGenerationRef.current !== generation) return;
+        failedOwnerLookupListGenRef.current = listGeneration;
+        uids.forEach((uid) => requestedOwnerUidsRef.current.delete(uid));
+      });
+  }, [entries, provider.id, sessionId, disabled]);
   useEffect(() => {
     const path = scrollToPathRef.current;
     if (!path) return;
@@ -314,6 +371,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
   };
+
+  const ownerLabel = (uid?: number) => uid == null ? "" : ownerNames[uid] ?? uid.toString();
 
   // Paths compare and split without a trailing separator; a bare root keeps
   // its one separator.
@@ -1640,6 +1699,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         case "name": va = a.name.toLowerCase(); vb = b.name.toLowerCase(); break;
         case "size": va = a.isDir ? -1 : a.size; vb = b.isDir ? -1 : b.size; break;
         case "modified": va = a.modified || 0; vb = b.modified || 0; break;
+        case "owner": va = ownerLabel(a.uid).toLowerCase(); vb = ownerLabel(b.uid).toLowerCase(); break;
         case "permissions": va = a.permissions || 0; vb = b.permissions || 0; break;
       }
       if (va < vb) return sort.asc ? -1 : 1;
@@ -1737,6 +1797,20 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
 
   const isRemote = provider.id === "remote";
   const showPerms = isRemote; // local entries don't carry perms here
+  const showDetails = listWidth >= (showPerms ? 650 : 465);
+  const showOwnerColumn = showPerms && listWidth >= 325;
+  const showRightsColumn = showPerms && listWidth >= 410;
+  const gridColumns = showPerms
+    ? showDetails
+      ? "grid-cols-[22px_minmax(180px,1fr)_65px_125px_100px_85px]"
+      : showRightsColumn
+        ? "grid-cols-[22px_minmax(140px,1fr)_100px_85px]"
+        : showOwnerColumn
+          ? "grid-cols-[22px_minmax(140px,1fr)_100px]"
+          : "grid-cols-[22px_1fr]"
+    : showDetails
+      ? "grid-cols-[22px_minmax(180px,1fr)_75px_125px]"
+      : "grid-cols-[22px_1fr]";
   // Every selected row is hidden by the name filter: the bar stays (so the
   // selection can be cleared) but there is nothing to act on.
   const noVisibleSelection = dirStats.selectedCount === 0;
@@ -2124,11 +2198,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             row click (single select), Ctrl/Shift-click (extend), Ctrl+A
             (select all), right-click → context menu, and the header bar's
             select-all toggle to the right of the address bar. */}
-        <div className={`group min-w-full grid ${
-          showPerms
-            ? "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_65px_125px_85px]"
-            : "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_75px_125px]"
-        } gap-1.5 px-2.5 bg-[#161619] border-b border-white/5 font-mono text-[10.5px] text-zinc-300 select-none font-bold shrink-0 sticky top-0 z-10 shadow-md`}>
+        <div className={`group min-w-full grid ${gridColumns} gap-1.5 px-2.5 bg-[#161619] border-b border-white/5 font-mono text-[10.5px] text-zinc-300 select-none font-bold shrink-0 sticky top-0 z-10 shadow-md`}>
           {/* Select-all — the 22px column is ALWAYS reserved (both here and in
               every row) so starting a selection never shifts the columns
               sideways. The control is revealed on header hover, or whenever a
@@ -2143,14 +2213,23 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           <div className="bg-[#161619] cursor-pointer hover:text-white py-1.5" onClick={() => toggleSort("name")}>
             NAME {sortIcon("name")}
           </div>
-          <div className="hidden sm:block bg-[#161619] cursor-pointer hover:text-white text-right py-1.5" onClick={() => toggleSort("size")}>
-            SIZE {sortIcon("size")}
-          </div>
-          <div className="hidden sm:block bg-[#161619] cursor-pointer hover:text-white text-right py-1.5" onClick={() => toggleSort("modified")}>
-            CHANGED {sortIcon("modified")}
-          </div>
-          {showPerms && (
-            <div className="hidden sm:block bg-[#161619] cursor-pointer hover:text-white text-right py-1.5" onClick={() => toggleSort("permissions")}>
+          {showDetails && (
+            <>
+              <div className="bg-[#161619] cursor-pointer hover:text-white text-right py-1.5" onClick={() => toggleSort("size")}>
+                SIZE {sortIcon("size")}
+              </div>
+              <div className="bg-[#161619] cursor-pointer hover:text-white text-right py-1.5" onClick={() => toggleSort("modified")}>
+                CHANGED {sortIcon("modified")}
+              </div>
+            </>
+          )}
+          {showOwnerColumn && (
+            <div className="bg-[#161619] cursor-pointer hover:text-white text-left py-1.5" onClick={() => toggleSort("owner")}>
+              OWNER {sortIcon("owner")}
+            </div>
+          )}
+          {showRightsColumn && (
+            <div className="bg-[#161619] cursor-pointer hover:text-white text-right py-1.5" onClick={() => toggleSort("permissions")}>
               RIGHTS {sortIcon("permissions")}
             </div>
           )}
@@ -2177,11 +2256,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
               onDoubleClick={(e) => { e.stopPropagation(); goUp(); }}
               title={cameViaLink ? `Back to ${linkBack!.back}` : "Parent directory"}
               data-fs-drop-path={provider.parentPath(currentPath)}
-              className={`grid ${
-                showPerms
-                  ? "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_65px_125px_85px]"
-                  : "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_75px_125px]"
-              } gap-1.5 px-2.5 py-1 border-l-2 border-transparent cursor-pointer transition-colors items-center text-zinc-200 hover:bg-white/5 hover:text-white ${
+              className={`grid ${gridColumns} gap-1.5 px-2.5 py-1 border-l-2 border-transparent cursor-pointer transition-colors items-center text-zinc-200 hover:bg-white/5 hover:text-white ${
                 dropHover !== null && dropHover === provider.parentPath(currentPath) ? "bg-indigo-500/20 ring-1 ring-inset ring-indigo-400" : ""
               }`}
             >
@@ -2190,9 +2265,9 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                 <FolderUp size={12} className="text-indigo-300 shrink-0" />
                 <div className="truncate text-zinc-100 text-[11px]">..</div>
               </div>
-              <div className="hidden sm:block" />
-              <div className="hidden sm:block" />
-              {showPerms && <div className="hidden sm:block" />}
+              {showDetails && <><div /><div /></>}
+              {showOwnerColumn && <div />}
+              {showRightsColumn && <div />}
             </div>
           )}
           {sortedEntries.length === 0 ? (
@@ -2214,11 +2289,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                 data-fs-row-path={entry.path}
                 data-fs-row-isdir={entry.isDir ? "1" : "0"}
                 data-fs-drop-path={entry.isDir ? entry.path : undefined}
-                className={`group isolate relative overflow-hidden grid ${
-                  showPerms
-                    ? "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_65px_125px_85px]"
-                    : "grid-cols-[22px_1fr] sm:grid-cols-[22px_minmax(180px,1fr)_75px_125px]"
-                } gap-1.5 px-2.5 py-1 border-l-2 cursor-pointer transition-colors items-center ${
+                className={`group isolate relative overflow-hidden grid ${gridColumns} gap-1.5 px-2.5 py-1 border-l-2 cursor-pointer transition-colors items-center ${
                   dropHover === entry.path
                     ? "bg-indigo-500/20 ring-1 ring-inset ring-indigo-400 border-indigo-400 text-white"
                     : opening
@@ -2302,27 +2373,41 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                         }`}> → {entry.linkTarget}</span>
                       )}
                     </div>
-                    {/* Narrow-viewport subline: on < sm the SIZE / CHANGED /
-                        RIGHTS cells are display:none (so they don't force
-                        horizontal scroll), and their info collapses into
-                        this muted second line under the filename. */}
-                    <div className="sm:hidden truncate text-[10px] text-zinc-500 font-mono">
-                      {[
-                        entry.isDir ? null : formatSize(entry.size),
-                        formatTime(entry.modified, isRemote),
-                        showPerms ? formatRights(entry.isDir, entry.permissions) : null,
-                      ].filter(Boolean).join(" · ")}
-                    </div>
+                    {/* Panel-width fallback for metadata columns that do not fit.
+                        Their values stay visible below the filename instead of
+                        forcing horizontal scrolling in a narrow tool pane. */}
+                    {(!showDetails || (showPerms && (!showOwnerColumn || !showRightsColumn))) && (
+                      <div className="truncate text-[10px] text-zinc-500 font-mono">
+                        {[
+                          !showDetails && !entry.isDir ? formatSize(entry.size) : null,
+                          !showDetails ? formatTime(entry.modified, isRemote) : null,
+                          showPerms && !showOwnerColumn && entry.uid != null ? `Owner ${ownerLabel(entry.uid)}` : null,
+                          showPerms && !showRightsColumn ? formatRights(entry.isDir, entry.permissions) : null,
+                        ].filter(Boolean).join(" · ")}
+                      </div>
+                    )}
                   </div>
                 </div>
-                <div className="hidden sm:block text-right text-[10.5px] text-zinc-300 font-sans">
-                  {entry.isDir ? "" : formatSize(entry.size)}
-                </div>
-                <div className="hidden sm:block text-right text-[9.5px] text-zinc-400 truncate">
-                  {formatTime(entry.modified, isRemote)}
-                </div>
-                {showPerms && (
-                  <div className="hidden sm:flex text-right text-[10.5px] text-zinc-300 font-mono opacity-90 items-center justify-end gap-1">
+                {showDetails && (
+                  <>
+                    <div className="text-right text-[10.5px] text-zinc-300 font-sans">
+                      {entry.isDir ? "" : formatSize(entry.size)}
+                    </div>
+                    <div className="text-right text-[9.5px] text-zinc-400 truncate">
+                      {formatTime(entry.modified, isRemote)}
+                    </div>
+                  </>
+                )}
+                {showOwnerColumn && (
+                  <div
+                    className="text-left text-[10.5px] text-zinc-300 font-mono truncate"
+                    title={entry.uid == null ? undefined : `${ownerLabel(entry.uid)} (UID ${entry.uid})`}
+                  >
+                    {ownerLabel(entry.uid)}
+                  </div>
+                )}
+                {showRightsColumn && (
+                  <div className="flex text-right text-[10.5px] text-zinc-300 font-mono opacity-90 items-center justify-end gap-1">
                     <span className="truncate">{formatRights(entry.isDir, entry.permissions)}</span>
                     <button onClick={(e) => openMenu(e, entry)} title="Options"
                       className="opacity-60 hover:opacity-100 p-0.5 rounded hover:bg-white/10 text-zinc-400 hover:text-white shrink-0">
