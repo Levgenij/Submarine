@@ -10,6 +10,7 @@ import TunnelsPanel from "./TunnelsPanel";
 import InfoPanel from "./InfoPanel";
 import { CmdsPanel } from "./CmdsPanel";
 import { useIsCompact, useViewportWidth } from "../hooks/useViewport";
+import { RenameInput } from "../ui/renameInput";
 import { onRovingKeyDown } from "../ui/rovingKeys";
 
 // Compact "run this tab on its own dedicated SSH connection" toggle, shown in
@@ -453,6 +454,9 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
   // window-space, matching the pattern used by the session tab menu at
   // App level.
   const [plusMenu, setPlusMenu] = useState<{ x: number; y: number } | null>(null);
+  // Right-click / double-click menu on a terminal tab. Renamed titles flow
+  // through `terminals` (bubbled via onTerminalsChange) to Wall and splits.
+  const [termMenu, setTermMenu] = useState<{ x: number; y: number; termId: string; renaming?: boolean } | null>(null);
   // On narrow viewports the side-by-side terminal+tool layout doesn't fit.
   // We collapse to a stacked single-pane view: when a tool is open, the
   // tool takes full width and the terminal is hidden behind a back-chip.
@@ -1054,7 +1058,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4 sm:mb-6">
             <div>
               <h2 className="text-base sm:text-xl font-black uppercase tracking-wider sm:tracking-[0.2em] break-words">
-                {session.serverName}
+                {session.customName || session.serverName}
               </h2>
               <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest mt-1">
                 {status === 'connecting' ? 'Establishing Connection...' : 'Connection Failed'}
@@ -1145,7 +1149,13 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
           const isFocusedHalf = activeTab === t.id;
           const isSplitPartner = !!(splitTerminals.includes(t.id) && !isFocusedHalf);
           return (
-          <div key={t.id} className="group relative flex items-center">
+          <div key={t.id} className="group relative flex items-center"
+            onContextMenu={(e) => { e.preventDefault(); setTermMenu({ x: e.clientX, y: e.clientY, termId: t.id }); }}
+            onDoubleClick={(e) => {
+              if ((e.target as Element).closest('[aria-label="Close terminal"]')) return;
+              setTermMenu({ x: e.clientX, y: e.clientY, termId: t.id, renaming: true });
+            }}
+          >
             <button
               onClick={() => {
                 // Clicking a tab NOT participating in the current split
@@ -1352,6 +1362,45 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
         </>,
         document.body
       )}
+
+      {termMenu && (() => {
+        const term = terminals.find(t => t.id === termMenu.termId);
+        if (!term) return null;
+        return createPortal(
+          <>
+            <div
+              className="fixed inset-0 z-[9998]"
+              onClick={() => setTermMenu(null)}
+              onContextMenu={(e) => { e.preventDefault(); setTermMenu(null); }}
+            />
+            <div
+              style={{ left: Math.min(termMenu.x, window.innerWidth - 240), top: Math.min(termMenu.y, window.innerHeight - 60) }}
+              className="fixed z-[9999] w-[220px] bg-[#15151a] border border-white/10 rounded-lg shadow-2xl py-1 text-[11.5px]"
+            >
+              {termMenu.renaming ? (
+                <RenameInput
+                  initialValue={term.title}
+                  placeholder="Tab title…"
+                  onCommit={(v) => {
+                    const title = v.trim();
+                    if (title) setTerminals(prev => prev.map(x => x.id === term.id ? { ...x, title } : x));
+                    setTermMenu(null);
+                  }}
+                  onCancel={() => setTermMenu(null)}
+                />
+              ) : (
+                <button
+                  onClick={() => setTermMenu(m => m && { ...m, renaming: true })}
+                  className="w-full flex items-center gap-2.5 px-3 py-1.5 hover:bg-white/[0.06] text-zinc-200 hover:text-white text-left"
+                >
+                  <span className="flex-1">Rename tab</span>
+                </button>
+              )}
+            </div>
+          </>,
+          document.body
+        );
+      })()}
 
       {/* Disconnection / auto-reconnect banner. Pinned to the top so it's
           visible whether the terminal or SFTP is in focus. The disabled

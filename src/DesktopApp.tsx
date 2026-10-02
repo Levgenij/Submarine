@@ -14,6 +14,7 @@ import logoUrl from "./assets/logo.png";
 import PasswordField from "./components/PasswordField";
 import QuickConnectModal, { QuickAuth } from "./components/QuickConnectModal";
 import { useConfirm, useTextPrompt } from "./ui/confirm";
+import { RenameInput } from "./ui/renameInput";
 import { useIsNarrow } from "./hooks/useViewport";
 import { Sidebar } from "./components/Sidebar";
 import { NodeGrid } from "./components/NodeGrid";
@@ -30,8 +31,10 @@ const appWindow = getCurrentWindow();
 // Sessions can be either DB-backed (saved node, `serverId > 0`) or quick
 // connect (one-shot, `serverId === 0` and `quickAuth` populated). SessionView
 // forwards `quickAuth` to `initiate_connection` which uses it instead of
-// looking up the DB row.
-type Session = { id: string; serverId: number; serverName: string; mirrors?: string; runOnConnect?: string; quickAuth?: QuickAuth | null };
+// looking up the DB row. `customName` is a display-only tab label set via
+// "Rename tab"; `serverName` stays the backend identity everywhere else.
+type Session = { id: string; serverId: number; serverName: string; customName?: string; mirrors?: string; runOnConnect?: string; quickAuth?: QuickAuth | null };
+const tabLabel = (s: Session) => s.customName || s.serverName;
 
 const hexToRgb = (hex: string) => {
   const r = parseInt(hex.slice(1, 3), 16);
@@ -64,8 +67,10 @@ function DesktopApp() {
   // colour on each tab. Cleared when a session is closed.
   const [sessionStatuses, setSessionStatuses] = useState<Record<string, string>>({});
   // Right-click menu pinned to a session tab. Closed by any click outside or
-  // by choosing one of the menu items.
-  const [tabMenu, setTabMenu] = useState<{ x: number; y: number; sessionId: string } | null>(null);
+  // by choosing one of the menu items. `renaming` swaps the Rename item for
+  // an inline editor.
+  const [tabMenu, setTabMenu] = useState<{ x: number; y: number; sessionId: string; renaming?: boolean } | null>(null);
+  const sessionTabRefs = useRef(new Map<string, HTMLDivElement>());
   // Sessions merged into the current session-view canvas. When a session
   // tab is being viewed and this set is non-empty, its SessionView renders
   // side-by-side with each merged partner instead of full-width. Used by
@@ -589,6 +594,22 @@ function DesktopApp() {
   const sessionsRef = useRef(sessions);
   useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
 
+  // F2 renames the active session tab. Skipped while typing in any field,
+  // which includes xterm's hidden textarea: F2 stays with mc, htop and vim.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'F2' || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey || !activeView.startsWith('session-')) return;
+      if ((e.target as Element | null)?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+      // Zero-sized when the desktop tab strip is hidden (mobile layout).
+      const rect = sessionTabRefs.current.get(activeView)?.getBoundingClientRect();
+      if (!rect?.width) return;
+      e.preventDefault();
+      setTabMenu({ x: rect.left, y: rect.bottom + 4, sessionId: activeView, renaming: true });
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [activeView]);
+
   // Intercept BOTH the in-app X button (which calls appWindow.close()) AND
   // OS-level closes (Alt+F4, taskbar context-menu close, system shutdown).
   // Both paths fire `onCloseRequested`. Showing a confirm when at least one
@@ -816,7 +837,7 @@ function DesktopApp() {
                     <span className="truncate flex-1 text-left text-[11px] font-bold">
                       {isWall
                         ? `Wall${wallItems.length > 0 ? ` · ${wallItems.length} pinned` : ''}`
-                        : cur ? cur.serverName : `${sessions.length} open session${sessions.length === 1 ? '' : 's'}`}
+                        : cur ? tabLabel(cur) : `${sessions.length} open session${sessions.length === 1 ? '' : 's'}`}
                     </span>
                     {mergedSessionIds.length > 0 && (
                       <span className="shrink-0 h-4 px-1 rounded-full bg-primary/25 text-primary text-[9px] font-bold flex items-center gap-0.5">
@@ -858,7 +879,7 @@ function DesktopApp() {
                           }`}
                         >
                           <span className={`w-2 h-2 rounded-full shrink-0 ${dot}`} />
-                          <span className="text-[12px] font-semibold truncate flex-1">{s.serverName}</span>
+                          <span className="text-[12px] font-semibold truncate flex-1">{tabLabel(s)}</span>
                           {isMerged && !isActive && (
                             <span className="text-[9px] font-bold uppercase tracking-wider text-primary/60">Split-in</span>
                           )}
@@ -1007,9 +1028,14 @@ function DesktopApp() {
                 if (!mergedSessionIds.includes(s.id)) setMergedSessionIds([]);
                 setActiveView(s.id);
               }}
+              ref={(el) => { if (el) sessionTabRefs.current.set(s.id, el); else sessionTabRefs.current.delete(s.id); }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setTabMenu({ x: e.clientX, y: e.clientY, sessionId: s.id });
+              }}
+              onDoubleClick={(e) => {
+                if ((e.target as Element).closest('button')) return;
+                setTabMenu({ x: e.clientX, y: e.clientY, sessionId: s.id, renaming: true });
               }}
               // No max-width / no truncate: the user explicitly wants full
               // node names visible even when many sessions are open. The tab
@@ -1019,7 +1045,7 @@ function DesktopApp() {
               // `whitespace-nowrap` keeps long names on a single line; without
               // it a tab with a 30-char hostname would wrap into a two-line
               // pill and break the row's height.
-              title={isMergedTab ? `${s.serverName} · split beside current view (Ctrl-click to unpair)` : s.serverName}
+              title={`${s.customName ? `${s.customName} (${s.serverName})` : s.serverName}${isMergedTab ? ' · split beside current view (Ctrl-click to unpair)' : ''}`}
               className={`group no-drag flex items-center h-7 px-2.5 sm:px-4 rounded-full cursor-pointer transition-all shrink-0 mr-1 ${
                 activeView === s.id
                   ? 'bg-primary/15 text-primary border border-primary/40 shadow-inner shadow-primary/10'
@@ -1050,7 +1076,7 @@ function DesktopApp() {
                   the same tab pill roughly 30% more legible characters per
                   pixel (uppercase is wider per glyph) without changing the
                   strip height, which stays h-7. */}
-              <span className="text-[11px] font-semibold whitespace-nowrap tracking-tight">{s.serverName}</span>
+              <span className="text-[11px] font-semibold whitespace-nowrap tracking-tight">{tabLabel(s)}</span>
               {/* Mobile-only actions trigger. On phone we surface the same
                   tabMenu (Reconnect / Disconnect / Close) here since there
                   is no right-click on touch — a single kebab is a cleaner
@@ -1258,7 +1284,7 @@ function DesktopApp() {
                           "bg-rose-500"
                         }`} />
                         <span className="truncate text-[11px] font-medium text-zinc-200 flex-1">
-                          {s.serverName}
+                          {tabLabel(s)}
                         </span>
                       </label>
                     );
@@ -1302,6 +1328,7 @@ function DesktopApp() {
         const targetIsActive = activeView === targetId;
         const currentMerges = targetIsActive ? mergedSessionIds : [];
         const others = sessions.filter(s => s.id !== targetId);
+        const target = sessions.find(s => s.id === targetId);
         return (
         <>
           <div className="fixed inset-0 z-[60]" onClick={() => setTabMenu(null)} onContextMenu={(e) => { e.preventDefault(); setTabMenu(null); }} />
@@ -1309,6 +1336,23 @@ function DesktopApp() {
             className="fixed z-[70] bg-[#15151a] border border-white/10 rounded-md shadow-2xl py-1 min-w-[240px] text-[11px] no-drag"
             style={{ left: Math.min(tabMenu.x, window.innerWidth - 260), top: Math.min(tabMenu.y, window.innerHeight - 380) }}
           >
+            {target && (tabMenu.renaming ? (
+              <RenameInput
+                initialValue={tabLabel(target)}
+                placeholder="Tab name… (empty resets)"
+                onCommit={(v) => {
+                  const name = v.trim();
+                  setSessions(prev => prev.map(s => s.id === targetId ? { ...s, customName: name || undefined } : s));
+                  setTabMenu(null);
+                }}
+                onCancel={() => setTabMenu(null)}
+              />
+            ) : (
+              <button
+                className="w-full text-left px-3 py-1.5 hover:bg-primary/15 hover:text-primary text-zinc-200 flex items-center gap-2"
+                onClick={() => setTabMenu(m => m && { ...m, renaming: true })}
+              >Rename tab</button>
+            ))}
             <button
               className="w-full text-left px-3 py-1.5 hover:bg-primary/15 hover:text-primary text-zinc-200 flex items-center gap-2"
               onClick={() => {
@@ -1426,7 +1470,7 @@ function DesktopApp() {
                           "bg-rose-500"
                         }`} />
                         <span className="truncate text-[11px] font-medium text-zinc-200 flex-1">
-                          {s.serverName}
+                          {tabLabel(s)}
                         </span>
                       </label>
                     );
@@ -1778,7 +1822,7 @@ function DesktopApp() {
                                 'bg-rose-500'
                               }`} />
                               <span className="font-bold text-zinc-200 uppercase tracking-wider truncate flex-1">
-                                {sess.serverName}
+                                {tabLabel(sess)}
                               </span>
                               <button
                                 onClick={(e) => {
@@ -1797,7 +1841,7 @@ function DesktopApp() {
                             </div>
                           )}
                           <ErrorBoundary
-                            label={sess.serverName}
+                            label={tabLabel(sess)}
                             onReset={() => {
                               setSessions(prev => prev.filter(s => s.id !== sess.id));
                               if (activeView === sess.id) setActiveView("nodes");
@@ -1916,7 +1960,7 @@ function DesktopApp() {
                             <div className="h-7 shrink-0 flex items-center gap-2 px-2 border-b border-white/5 bg-[#141418] text-[10.5px] select-none">
                               <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotTone}`} />
                               <span className="font-bold text-zinc-200 uppercase tracking-wider truncate">
-                                {sess.serverName}
+                                {tabLabel(sess)}
                               </span>
                               <span className="text-zinc-600">·</span>
                               <span className="text-zinc-400 truncate flex-1">
@@ -2004,7 +2048,7 @@ function DesktopApp() {
                                     'bg-rose-500'
                                   }`} />
                                   <span className="text-[11px] font-bold text-zinc-200 truncate flex-1">
-                                    {s.serverName}
+                                    {tabLabel(s)}
                                   </span>
                                   <span className="text-[9px] uppercase tracking-wider text-zinc-500">
                                     {terms.length} term{terms.length === 1 ? '' : 's'}
