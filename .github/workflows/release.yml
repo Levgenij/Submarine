@@ -397,6 +397,11 @@ jobs:
             done
           done
           echo "$NDK_BIN" >> "$GITHUB_PATH"
+          # setup-android publishes ANDROID_NDK_ROOT through $GITHUB_ENV.
+          # ${{ env.ANDROID_NDK_ROOT }} does not see that, so copying it in
+          # an env: block blanks NDK_HOME and Tauri rejects the NDK.
+          echo "NDK_HOME=$ANDROID_NDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_ROOT" >> "$GITHUB_ENV"
           ls -la "$NDK_BIN" | grep -E '(ranlib|ar|strip)$' | head -20
 
       - name: Install npm deps
@@ -453,12 +458,15 @@ jobs:
       # and the matching find/copy loop here.
       - name: Build Android APK
         env:
-          NDK_HOME: ${{ env.ANDROID_NDK_ROOT }}
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_ROOT }}
           SUBMARINE_KEYSTORE_PASSWORD: ${{ secrets.SUBMARINE_KEYSTORE_PASSWORD }}
           SUBMARINE_KEY_ALIAS: ${{ secrets.SUBMARINE_KEY_ALIAS }}
           SUBMARINE_KEY_PASSWORD: ${{ secrets.SUBMARINE_KEY_PASSWORD }}
-        run: npm run android:build
+        run: |
+          if [ -z "$NDK_HOME" ] || [ ! -d "$NDK_HOME" ]; then
+            echo "::error::NDK_HOME is '${NDK_HOME:-unset}' (ANDROID_NDK_ROOT is '${ANDROID_NDK_ROOT:-unset}')"
+            exit 1
+          fi
+          npm run android:build
 
       - name: Stage Android artifacts
         shell: bash
