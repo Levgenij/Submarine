@@ -7,6 +7,7 @@ import {
 import CloudPanel from "./CloudPanel";
 import AboutPanel from "./AboutPanel";
 import { bookmarksKeyPrefix } from "./SftpWorkspace";
+import { snapshotKey } from "../sessionSnapshot";
 import logoUrl from "../assets/logo.png";
 import { IS_ANDROID } from "../util/platform";
 import { useTextPrompt, useConfirm } from "../ui/confirm";
@@ -275,6 +276,7 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
       // Server ids restart in a new profile of the same name; its servers must not inherit these.
       const prefix = bookmarksKeyPrefix(name);
       Object.keys(localStorage).filter((k) => k.startsWith(prefix)).forEach((k) => localStorage.removeItem(k));
+      localStorage.removeItem(snapshotKey(name));
       await reload();
       refreshCloud();
     } catch (e: any) {
