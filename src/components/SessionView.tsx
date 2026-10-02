@@ -391,8 +391,13 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
   // docker-exec session into a specific container (spawned from the Info
   // panel). Container slots stay otherwise identical — same xterm, same
   // events — they just point the backend at `open_container_terminal`.
+  // A session reopened from the snapshot seeds its tabs from
+  // `initialTerminals`, already validated by parseSnapshot.
   const [terminals, setTerminals] = useState<{id: string, title: string, container?: { name: string; useSudo: boolean }}[]>(() => {
-    return [{ id: `${session.id}-term-0`, title: '1' }];
+    const seeds: { title: string; container?: { name: string; useSudo: boolean } }[] | undefined = session.initialTerminals;
+    return seeds?.length
+      ? seeds.map((t, i) => ({ ...t, id: `${session.id}-term-${i}` }))
+      : [{ id: `${session.id}-term-0`, title: '1' }];
   });
   // Bumped on every successful reconnect. TerminalView watches this prop
   // and re-opens its PTY on change WITHOUT disposing its xterm instance,
@@ -411,7 +416,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
     setActiveTool(null);
   };
 
-  const [activeTab, setActiveTab] = useState<string>(`${session.id}-term-0`);
+  const [activeTab, setActiveTab] = useState<string>(() => `${session.id}-term-${session.initialActiveIndex ?? 0}`);
   // Bubble our terminals + active-tab up to the parent (App) whenever
   // they change so the Wall pinboard and any other App-level consumers
   // don't have to duplicate the per-session terminal book-keeping.

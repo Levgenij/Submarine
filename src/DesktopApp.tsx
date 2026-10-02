@@ -15,6 +15,7 @@ import PasswordField from "./components/PasswordField";
 import QuickConnectModal, { QuickAuth } from "./components/QuickConnectModal";
 import { useConfirm, useTextPrompt } from "./ui/confirm";
 import { RenameInput } from "./ui/renameInput";
+import { buildSnapshot, parseSnapshot, snapshotKey, type SnapTerm } from "./sessionSnapshot";
 import { useIsNarrow } from "./hooks/useViewport";
 import { Sidebar } from "./components/Sidebar";
 import { NodeGrid } from "./components/NodeGrid";
@@ -33,7 +34,12 @@ const appWindow = getCurrentWindow();
 // forwards `quickAuth` to `initiate_connection` which uses it instead of
 // looking up the DB row. `customName` is a display-only tab label set via
 // "Rename tab"; `serverName` stays the backend identity everywhere else.
-type Session = { id: string; serverId: number; serverName: string; customName?: string; mirrors?: string; runOnConnect?: string; quickAuth?: QuickAuth | null };
+// `initialTerminals` / `initialActiveIndex` seed SessionView's tabs for a
+// session reopened from the saved snapshot.
+type Session = {
+  id: string; serverId: number; serverName: string; customName?: string; mirrors?: string; runOnConnect?: string;
+  quickAuth?: QuickAuth | null; initialTerminals?: SnapTerm[]; initialActiveIndex?: number;
+};
 const tabLabel = (s: Session) => s.customName || s.serverName;
 
 const hexToRgb = (hex: string) => {
@@ -107,7 +113,9 @@ function DesktopApp() {
   const handleTerminalsChange = useCallback((sid: string, terms: SessionTerm[], activeTermId: string) => {
     setSessionTerminals(prev => {
       const cur = prev[sid];
-      if (cur && cur.length === terms.length && cur.every((t, i) => t.id === terms[i].id && t.title === terms[i].title)) {
+      if (cur && cur.length === terms.length && cur.every((t, i) =>
+        t.id === terms[i].id && t.title === terms[i].title &&
+        t.container?.name === terms[i].container?.name && t.container?.useSudo === terms[i].container?.useSudo)) {
         return prev;
       }
       return { ...prev, [sid]: terms };
@@ -237,6 +245,8 @@ function DesktopApp() {
     // "pull collaborators' changes" timer — your own edits still push ~6s after
     // you stop typing regardless of this.
     syncIntervalMin: Math.max(1, parseInt(localStorage.getItem('submarine-sync-interval-min') || '5', 10) || 5),
+    // Reopen last run's servers and terminal tabs on unlock. Opt-in.
+    restoreSessions: localStorage.getItem('submarine-restore-sessions') === 'on',
   });
 
   useEffect(() => {
@@ -249,6 +259,7 @@ function DesktopApp() {
     localStorage.setItem('submarine-terminal-font-size', appSettings.terminalFontSize.toString());
     localStorage.setItem('submarine-auto-sync', appSettings.autoSync ? 'on' : 'off');
     localStorage.setItem('submarine-sync-interval-min', String(appSettings.syncIntervalMin));
+    localStorage.setItem('submarine-restore-sessions', appSettings.restoreSessions ? 'on' : 'off');
     // Tell already-mounted terminals to re-fit with the new font size.
     // Without this dispatch the listener in TerminalView is dead code and
     // users have to close+reopen every terminal to see a size change.
@@ -545,9 +556,13 @@ function DesktopApp() {
   // flow on a single screen. By the time it fires `onUnlocked`, the
   // backend has both selected the profile AND decrypted the DB — we just
   // flip the UI and refresh data.
+  // True from unlock until its staging finishes. React renders the unlocked
+  // but still empty strip in between, and the snapshot effect must not save it.
+  const restorePendingRef = useRef(false);
   const handleProfileUnlocked = async (name: string) => {
     setActiveProfile(name);
     setIsUnlocked(true);
+    restorePendingRef.current = true;
     addLog(`Profile "${name}" unlocked.`, "success");
     refreshAll();
     // Attribute future edits to the signed-in cloud account so shared/multi-
@@ -556,31 +571,46 @@ function DesktopApp() {
     invoke<{ signed_in: boolean; email: string | null }>("cloud_status")
       .then((s) => invoke("set_editor_label", { label: s.signed_in && s.email ? s.email : "" }))
       .catch(() => {});
-    // Autostart sweep: load servers directly (refreshAll is also doing this
-    // in parallel, but its state update is async and we can't read `servers`
-    // back here without a stale-closure race), pick the ones flagged
-    // autostart, and stage them all into the sessions tab strip in one
-    // setSessions call. The user lands focused on the first autostart node;
-    // each new SessionView component then kicks off its own connect on mount.
+    // Autostart sweep + session restore: load servers directly (refreshAll is
+    // also doing this in parallel, but its state update is async and we can't
+    // read `servers` back here without a stale-closure race), then stage the
+    // snapshot's sessions (when restore is on) followed by autostart-flagged
+    // nodes into the tab strip in one setSessions call. Each new SessionView
+    // kicks off its own connect on mount. Neither path passes runOnConnect:
+    // those commands only run when the user opens a node by hand.
     try {
       const list = await invoke<any[]>("get_servers");
-      const toStart = list.filter((s) => s.autostart);
-      if (toStart.length === 0) return;
-      const newSessions = toStart.map((s) => ({
-        id: `session-${s.id}`,
-        serverId: s.id,
-        serverName: s.name,
-        mirrors: s.mirrors,
-      }));
-      setSessions((prev: any[]) => {
+      // Locked again while loading: these servers belong to a closed profile.
+      if (!restorePendingRef.current) return;
+      const byId = new Map<number, any>(list.map((s) => [s.id, s]));
+      const snap = appSettings.restoreSessions
+        ? parseSnapshot(localStorage.getItem(snapshotKey(name)), (id) => byId.has(id))
+        : { sessions: [], activeServerId: null };
+      const restoredIds = new Set(snap.sessions.map((r) => r.serverId));
+      const toStart = list.filter((s) => s.autostart && !restoredIds.has(s.id));
+      const base = (s: any): Session => ({ id: `session-${s.id}`, serverId: s.id, serverName: s.name, mirrors: s.mirrors });
+      const newSessions: Session[] = [
+        ...snap.sessions.map((r) => ({
+          ...base(byId.get(r.serverId)),
+          customName: r.customName,
+          initialTerminals: r.terminals,
+          initialActiveIndex: r.activeIndex,
+        })),
+        ...toStart.map(base),
+      ];
+      if (newSessions.length === 0) return;
+      setSessions((prev) => {
         const seen = new Set(prev.map((p) => p.id));
         const fresh = newSessions.filter((n) => !seen.has(n.id));
         return [...prev, ...fresh];
       });
-      setActiveView(newSessions[0].id);
-      addLog(`Autostart: opened ${newSessions.length} node${newSessions.length === 1 ? "" : "s"}.`, "info");
+      setActiveView(snap.activeServerId != null ? `session-${snap.activeServerId}` : newSessions[0].id);
+      if (snap.sessions.length > 0) addLog(`Restored ${snap.sessions.length} session${snap.sessions.length === 1 ? "" : "s"}.`, "info");
+      if (toStart.length > 0) addLog(`Autostart: opened ${toStart.length} node${toStart.length === 1 ? "" : "s"}.`, "info");
     } catch (e) {
       addLog(`AUTOSTART_LOAD_FAILED: ${e}`, "error");
+    } finally {
+      restorePendingRef.current = false;
     }
   };
 
@@ -593,6 +623,22 @@ function DesktopApp() {
   // the user opening/closing tabs and either over- or under-confirm.
   const sessionsRef = useRef(sessions);
   useEffect(() => { sessionsRef.current = sessions; }, [sessions]);
+
+  // Open-session snapshot, rewritten on every layout change while restore is
+  // on and dropped when it is off. Skipped while locked (logout empties the
+  // strip) and while an unlock is still staging, so neither can overwrite
+  // the snapshot restore reads.
+  useEffect(() => {
+    if (!isUnlocked || !activeProfile || restorePendingRef.current) return;
+    try {
+      if (!appSettings.restoreSessions) {
+        localStorage.removeItem(snapshotKey(activeProfile));
+        return;
+      }
+      const snap = buildSnapshot({ sessions, terminalsBySession: sessionTerminals, activeTermBySession: sessionActiveTerm, activeView });
+      localStorage.setItem(snapshotKey(activeProfile), JSON.stringify(snap));
+    } catch { /* storage full or unavailable: nothing to restore next time */ }
+  }, [appSettings.restoreSessions, isUnlocked, activeProfile, sessions, sessionTerminals, sessionActiveTerm, activeView]);
 
   // F2 renames the active session tab. Skipped while typing in any field,
   // which includes xterm's hidden textarea: F2 stays with mc, htop and vim.
@@ -664,9 +710,12 @@ function DesktopApp() {
 
     // Reset all client state so the picker starts fresh — no stale
     // servers/credentials/sessions leaking across profile contexts.
+    restorePendingRef.current = false;
     setIsUnlocked(false);
     setActiveProfile(null);
     setSessions([]);
+    setSessionTerminals({});
+    setSessionActiveTerm({});
     setActiveView("nodes");
     setServers([]); setCredentials([]); setSshKeys([]); setFolders([]); setCommands([]);
     addLog("Profile locked.", "info");
