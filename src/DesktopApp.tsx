@@ -37,7 +37,9 @@ const appWindow = getCurrentWindow();
 // connect (one-shot, `serverId === 0` and `quickAuth` populated). SessionView
 // forwards `quickAuth` to `initiate_connection` which uses it instead of
 // looking up the DB row.
-type Session = { id: string; serverId: number; serverName: string; mirrors?: string; runOnConnect?: string; quickAuth?: QuickAuth | null };
+// `serverUuid` is the saved server's sync id, which keys this device's own
+// per-server settings (the Shell button, see util/shellSync.ts).
+type Session = { id: string; serverId: number; serverName: string; serverUuid?: string | null; mirrors?: string; runOnConnect?: string; quickAuth?: QuickAuth | null };
 
 const hexToRgb = (hex: string) => {
   const r = parseInt(hex.slice(1, 3), 16);
@@ -597,6 +599,7 @@ function DesktopApp() {
         serverId: s.id,
         serverName: s.name,
         mirrors: s.mirrors,
+        serverUuid: s.uuid ?? null,
       }));
       setSessions((prev: any[]) => {
         const seen = new Set(prev.map((p) => p.id));
@@ -695,6 +698,7 @@ function DesktopApp() {
         // MirrorsPanel can pre-populate "Saved on this node" without
         // another round-trip to the backend.
         mirrors: server.mirrors,
+        serverUuid: server.uuid ?? null,
         // Commands to auto-run once on the first terminal (see SessionView).
         runOnConnect: server.run_on_connect || "",
       }]);
@@ -1608,6 +1612,7 @@ function DesktopApp() {
               <SettingsPanel
                 settings={appSettings}
                 setSettings={setAppSettings}
+                servers={servers}
                 isMobile={isMobile}
                 onOpenLogs={() => setActiveView("logs")}
               />

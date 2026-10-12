@@ -4899,7 +4899,7 @@ async fn get_servers(state: tauri::State<'_, DbState>) -> Result<Vec<serde_json:
     // ORDER BY (position, id): `position` is the manual drag-to-reorder rank
     // (default 0 for never-reordered rows), and id breaks ties so the order is
     // stable and, before any reorder, identical to the old rowid order.
-    let mut stmt = conn.prepare("SELECT id, name, host, port, username, password, credential_id, folder_id, proxy_type, proxy_host, proxy_port, tunnels, auth_type, key_id, autostart, mirrors, color, notes, run_on_connect, jump_host_id, updated_at, edited_by, position FROM servers ORDER BY position, id")
+    let mut stmt = conn.prepare("SELECT id, name, host, port, username, password, credential_id, folder_id, proxy_type, proxy_host, proxy_port, tunnels, auth_type, key_id, autostart, mirrors, color, notes, run_on_connect, jump_host_id, updated_at, edited_by, position, uuid FROM servers ORDER BY position, id")
         .map_err(|e| format!("[DATABASE] PREPARE_FAILED: {}", e))?;
 
     let rows = stmt.query_map([], |row| {
@@ -4930,6 +4930,10 @@ async fn get_servers(state: tauri::State<'_, DbState>) -> Result<Vec<serde_json:
             "edited_by": row.get::<_, Option<String>>(21)?,
             // Manual drag-to-reorder rank (see ORDER BY above).
             "position": row.get::<_, i64>(22).unwrap_or(0),
+            // The sync id: the same on every device, and unlike `id` never
+            // reused by another profile's server. Keys this device's own
+            // per-server settings (see src/util/shellSync.ts).
+            "uuid": row.get::<_, Option<String>>(23)?,
         }))
     }).map_err(|e| format!("[DATABASE] QUERY_MAPPING_FAILED: {}", e))?;
 
@@ -9196,6 +9200,185 @@ async fn pick_local_directory() -> Result<Option<String>, String> {
     {
         let path = rfd::AsyncFileDialog::new().pick_folder().await;
         Ok(path.map(|p| p.path().to_string_lossy().into_owned()))
+    }
+}
+
+// ----- Shell config sync commands -------------------------------------------
+// "Push my shell config": a one-shot push of this device's dotfiles to the
+// server of an open session (see mirror.rs' shell_sync_* functions). Which
+// files go where, and which servers offer the button, are this device's own
+// settings (src/util/shellSync.ts): nothing about it is in the vault or
+// synced. Never automatic on connect.
+
+/// Prints the account's login shell between markers, so that whatever its
+/// startup files print can't be taken for it.
+const SHELL_SYNC_PROBE_SCRIPT: &str = "printf '__SUB_SHELL__%s__SUB_SHELL__\\n' \"$SHELL\"\n";
+
+#[derive(serde::Serialize)]
+struct ShellSyncProbe {
+    remote_shell: String,
+    // Empty when this device has no login shell to compare (Windows).
+    local_shell: String,
+    shell_mismatch: bool,
+}
+
+fn shell_basename(path: &str) -> String {
+    std::path::Path::new(path.trim())
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// The account's login shell next to this device's, for a note in the push
+/// dialog: the files of one shell do nothing for another. Nothing is run on
+/// the server when this device has no login shell to compare.
+#[tauri::command]
+async fn shell_sync_probe(
+    state: tauri::State<'_, SshState>,
+    session_id: String,
+) -> Result<ShellSyncProbe, String> {
+    let local_shell = shell_basename(&std::env::var("SHELL").unwrap_or_default());
+    if local_shell.is_empty() {
+        return Ok(ShellSyncProbe { remote_shell: String::new(), local_shell, shell_mismatch: false });
+    }
+    let result = run_info_script(&state, &session_id, SHELL_SYNC_PROBE_SCRIPT, 10).await?;
+    let remote_shell = result.data.split("__SUB_SHELL__").nth(1).unwrap_or("").trim().to_string();
+    let remote_name = shell_basename(&remote_shell);
+    let shell_mismatch = !remote_name.is_empty() && local_shell != remote_name;
+    Ok(ShellSyncProbe { remote_shell, local_shell, shell_mismatch })
+}
+
+/// The pairs as typed, checked before anything is opened on the server. A
+/// local path is a full path or starts with `~`, exists, isn't the whole home
+/// folder, and passes the policy an upload's source does; the remote side is
+/// a place below the home folder there. Every problem is reported, one per
+/// line.
+fn shell_sync_targets(pairs: &[mirror::ShellSyncPair]) -> Result<Vec<mirror::ShellSyncTarget>, String> {
+    if pairs.is_empty() {
+        return Err("Nothing to push yet: add files in Settings → Shell config sync.".into());
+    }
+    let home = directories::UserDirs::new().and_then(|d| d.home_dir().canonicalize().ok());
+    let mut targets = Vec::new();
+    let mut problems = Vec::new();
+    for pair in pairs {
+        let local = pair.local.trim();
+        let remote = pair.remote.trim();
+        let remote_shown = if remote.is_empty() { "~" } else { remote };
+        if local.is_empty() {
+            problems.push(format!("→ {}: no local file or folder", remote_shown));
+            continue;
+        }
+        let expanded = expand_home(local);
+        if local == "~" || local == "~/" || local == "~\\" {
+            problems.push(format!("{}: pick files or folders in the home folder, not all of it", local));
+            continue;
+        }
+        if !expanded.is_absolute() {
+            problems.push(format!("{}: give a full path, or one that starts with ~", local));
+            continue;
+        }
+        let resolved = match guard_local_path(&expanded.to_string_lossy(), false) {
+            Ok(p) => p,
+            Err(e) => {
+                problems.push(format!("{}: {}", local, e));
+                continue;
+            }
+        };
+        if home.as_deref() == Some(resolved.as_path()) {
+            problems.push(format!("{}: pick files or folders in the home folder, not all of it", local));
+            continue;
+        }
+        let rel = match mirror::shell_sync_remote_rel(remote) {
+            Ok(r) => r,
+            Err(e) => {
+                problems.push(format!("{} → {}: {}", local, remote_shown, e));
+                continue;
+            }
+        };
+        if rel.is_empty() && !resolved.is_dir() {
+            problems.push(format!("{} → {}: give the file a name on the server", local, remote_shown));
+            continue;
+        }
+        targets.push(mirror::ShellSyncTarget { local: resolved, rel });
+    }
+    if problems.is_empty() { Ok(targets) } else { Err(problems.join("\n")) }
+}
+
+#[tauri::command]
+async fn shell_sync_preview(
+    ssh: tauri::State<'_, SshState>,
+    session_id: String,
+    pairs: Vec<mirror::ShellSyncPair>,
+) -> Result<mirror::ShellSyncReport, String> {
+    let targets = shell_sync_targets(&pairs)?;
+    let handle = {
+        let conns = ssh.connections.lock().await;
+        conns.get(&session_id).cloned()
+            .ok_or_else(|| "Session not connected".to_string())?
+    };
+    mirror::shell_sync_preview(handle, targets).await
+}
+
+#[tauri::command]
+async fn shell_sync_push(
+    ssh: tauri::State<'_, SshState>,
+    session_id: String,
+    pairs: Vec<mirror::ShellSyncPair>,
+) -> Result<mirror::ShellSyncPushReport, String> {
+    let targets = shell_sync_targets(&pairs)?;
+    let handle = {
+        let conns = ssh.connections.lock().await;
+        conns.get(&session_id).cloned()
+            .ok_or_else(|| "Session not connected".to_string())?
+    };
+    mirror::shell_sync_push(handle, targets).await
+}
+
+#[cfg(test)]
+mod shell_sync_tests {
+    use super::*;
+
+    fn pair(local: &str, remote: &str) -> mirror::ShellSyncPair {
+        mirror::ShellSyncPair { local: local.into(), remote: remote.into() }
+    }
+
+    #[test]
+    fn shell_basename_takes_the_last_path_component() {
+        assert_eq!(shell_basename("/usr/bin/zsh"), "zsh");
+        assert_eq!(shell_basename("/bin/bash\n"), "bash"); // trailing newline from `echo $SHELL`
+        assert_eq!(shell_basename(""), "");
+    }
+
+    #[test]
+    fn shell_sync_targets_takes_existing_full_paths_and_places_below_home() {
+        let dir = std::env::temp_dir().join(format!("sub-shellsync-t-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("rc");
+        std::fs::write(&file, b"x").unwrap();
+        let file_s = file.to_string_lossy().into_owned();
+        let dir_s = dir.to_string_lossy().into_owned();
+
+        let ok = shell_sync_targets(&[pair(&file_s, "~/.zshrc"), pair(&dir_s, "~")]).unwrap();
+        assert_eq!(ok.iter().map(|t| t.rel.as_str()).collect::<Vec<_>>(), [".zshrc", ""]);
+
+        assert!(shell_sync_targets(&[]).is_err());
+        for (local, remote) in [
+            ("rc", ".zshrc"),           // relative
+            ("~", "x"),                 // the whole home folder
+            ("", ".zshrc"),             // nothing
+            (file_s.as_str(), "~"),     // a file in the home folder's place
+            (file_s.as_str(), "../x"),  // out of the home folder
+            (file_s.as_str(), "/etc/x"),
+        ] {
+            assert!(shell_sync_targets(&[pair(local, remote)]).is_err(), "{local} -> {remote}");
+        }
+        let missing = dir.join("missing").to_string_lossy().into_owned();
+        assert!(shell_sync_targets(&[pair(&missing, ".x")]).is_err());
+        // Every problem is reported, not just the first.
+        let both = shell_sync_targets(&[pair("rc", ".a"), pair(&missing, ".b")]).unwrap_err();
+        assert_eq!(both.lines().count(), 2, "{both}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 
@@ -14659,6 +14842,7 @@ pub fn run() {
             cmd_history_add, cmd_history_list, cmd_history_clear,
             add_note, edit_note, delete_note, get_notes,
             mirror_dry_run, start_mirror, stop_mirror, list_mirrors, pick_local_directory,
+            shell_sync_probe, shell_sync_preview, shell_sync_push,
             add_credential, edit_credential, delete_credential,
             add_ssh_key, edit_ssh_key, delete_ssh_key,
             pick_ssh_key_file, read_ssh_key_file, import_ssh_key_file,

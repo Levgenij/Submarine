@@ -2,7 +2,7 @@ import { useState, useEffect, useLayoutEffect, useRef, useCallback, memo } from 
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { TerminalSquare, Folder, FolderUp, Network, AlertTriangle, Check, X, ShieldAlert, KeyRound, Play, Library, Info, Container, Plus, SplitSquareHorizontal, Columns, Rows, RotateCw, Loader2, PanelRight, PanelLeft, PanelBottom, PanelTop, Maximize2, Minimize2 } from "lucide-react";
+import { TerminalSquare, Folder, FolderUp, Network, AlertTriangle, Check, X, ShieldAlert, KeyRound, Play, Library, Info, Container, Plus, SplitSquareHorizontal, Columns, Rows, RotateCw, Loader2, PanelRight, PanelLeft, PanelBottom, PanelTop, Maximize2, Minimize2, UploadCloud } from "lucide-react";
 import TerminalView from "./TerminalView";
 import SftpWorkspace, { type SftpView } from "./SftpWorkspace";
 import TunnelsPanel from "./TunnelsPanel";
@@ -11,6 +11,15 @@ import { CmdsPanel } from "./CmdsPanel";
 import { RenameInput } from "../ui/renameInput";
 import { useIsCompact } from "../hooks/useViewport";
 import { fontFamilyCss, readFontFamily, readFontSize } from "../util/terminalFont";
+import { readShellSyncPairs, useShellSyncServer, type ShellSyncPair } from "../util/shellSync";
+import { readUseLocalShell } from "../util/terminalShell";
+import { useSlideOverFocus } from "../ui/slideOverFocus";
+
+// What the shell-config push commands answer (mirror.rs' ShellSync* types).
+type ShellSyncShells = { remote_shell: string; local_shell: string; shell_mismatch: boolean };
+type ShellSyncEntry = { local: string; remote: string; size: number; action: string; reason: string | null; crlf: boolean };
+type ShellSyncReport = { home: string; entries: ShellSyncEntry[]; total_bytes: number };
+type ShellSyncPushResult = { pushed: number; bytes: number; failed: { remote: string; error: string }[]; backup: string | null };
 
 // Where the tool panel (SFTP, Ports, Library, Info) sits around the terminal.
 // Remembered per device like the panel's size; compact windows ignore it and
@@ -607,6 +616,92 @@ const SessionViewImpl = ({ session, profile, displayName, onClose, addLog, onSta
   }, [isActiveView]);
 
   const [activeTool, setActiveTool] = useState<'sftp' | 'tunnels' | 'mirrors' | 'cmds' | 'info' | null>(null);
+
+  // "Push shell config": a one-shot push, not a dockable tool pane like the
+  // four above, so it gets its own preview/confirm dialog. Offered on the
+  // servers picked in Settings → Shell config sync (this device's choice).
+  const shellSyncOffered = useShellSyncServer(session.serverUuid);
+  const [shellSyncOpen, setShellSyncOpen] = useState(false);
+  const [shellSyncBusy, setShellSyncBusy] = useState(false);
+  const [shellSyncError, setShellSyncError] = useState<string | null>(null);
+  // The pairs the preview was made for: a push sends exactly those.
+  const [shellSyncPairs, setShellSyncPairs] = useState<ShellSyncPair[]>([]);
+  const [shellSyncShells, setShellSyncShells] = useState<ShellSyncShells | null>(null);
+  const [shellSyncReport, setShellSyncReport] = useState<ShellSyncReport | null>(null);
+  // A push with failures stays open to list them.
+  const [shellSyncResult, setShellSyncResult] = useState<ShellSyncPushResult | null>(null);
+  // Bumped on each opening, so that an answer meant for an earlier one is
+  // dropped.
+  const shellSyncRun = useRef(0);
+  const shellSyncPanelRef = useSlideOverFocus(shellSyncOpen);
+
+  const fmtBytes = (n: number) => {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  };
+
+  const openShellSync = async () => {
+    const run = ++shellSyncRun.current;
+    const pairs = readShellSyncPairs();
+    setShellSyncOpen(true);
+    setShellSyncError(null);
+    setShellSyncReport(null);
+    setShellSyncResult(null);
+    setShellSyncShells(null);
+    setShellSyncPairs(pairs);
+    if (pairs.length === 0) {
+      setShellSyncError("Nothing to push yet: add files in Settings → Shell config sync.");
+      return;
+    }
+    setShellSyncBusy(true);
+    // Which shell the account logs into, for a note. Not asked when new
+    // terminals start this computer's own shell anyway (Settings → Use my
+    // default shell), and never in the way of the preview.
+    if (!readUseLocalShell()) {
+      invoke<ShellSyncShells>("shell_sync_probe", { sessionId: session.id })
+        .then((s) => { if (run === shellSyncRun.current) setShellSyncShells(s); }, () => {});
+    }
+    try {
+      const report = await invoke<ShellSyncReport>("shell_sync_preview", { sessionId: session.id, pairs });
+      if (run === shellSyncRun.current) setShellSyncReport(report);
+    } catch (e: any) {
+      if (run === shellSyncRun.current) setShellSyncError(String(e));
+    } finally {
+      if (run === shellSyncRun.current) setShellSyncBusy(false);
+    }
+  };
+
+  const confirmShellSync = async () => {
+    if (!shellSyncReport) return;
+    setShellSyncBusy(true);
+    setShellSyncError(null);
+    try {
+      const result = await invoke<ShellSyncPushResult>("shell_sync_push", { sessionId: session.id, pairs: shellSyncPairs });
+      const files = `${result.pushed} file${result.pushed === 1 ? "" : "s"} (${fmtBytes(result.bytes)})`;
+      const kept = result.backup ? `; the files it replaced are in ${result.backup}` : "";
+      if (result.failed.length === 0) {
+        addLog(`Shell config: pushed ${files} to ${session.serverName}${kept}.`, "success");
+        setShellSyncOpen(false);
+      } else {
+        addLog(`Shell config: pushed ${files} to ${session.serverName}, ${result.failed.length} failed${kept}.`, "warn");
+        setShellSyncResult(result);
+      }
+    } catch (e: any) {
+      setShellSyncError(String(e));
+    } finally {
+      setShellSyncBusy(false);
+    }
+  };
+
+  // A push under way: closing then would leave its outcome nowhere to show.
+  const shellSyncPushing = shellSyncBusy && !!shellSyncReport;
+  const closeShellSync = () => {
+    if (shellSyncPushing) return;
+    shellSyncRun.current++;
+    setShellSyncBusy(false);
+    setShellSyncOpen(false);
+  };
   // Split-pane state — an ORDERED array of terminal IDs that currently
   // share the main pane. `[]` or a single-id array means "no split, use
   // the usual absolute-overlap layout"; length ≥ 2 means the panes tile
@@ -1420,7 +1515,7 @@ const SessionViewImpl = ({ session, profile, displayName, onClose, addLog, onSta
           full chrome and 2-3 sessions side-by-side would fight for
           vertical space with duplicate toolbars. */}
       {!chromeless && (
-      <div className="h-12 border-b border-white/5 bg-[#121214]/50 flex items-center px-2 sm:px-4 shrink-0 justify-between gap-1">
+      <div inert={shellSyncOpen ? "" : undefined} className="h-12 border-b border-white/5 bg-[#121214]/50 flex items-center px-2 sm:px-4 shrink-0 justify-between gap-1">
         <div
           className="flex items-center gap-1 overflow-x-auto no-scrollbar flex-1 mr-1 sm:mr-4 mask-fade-right"
           onWheel={(e) => { e.currentTarget.scrollLeft += e.deltaY; }}
@@ -1568,6 +1663,22 @@ const SessionViewImpl = ({ session, profile, displayName, onClose, addLog, onSta
               </button>
             );
           })}
+          {/* "Push shell config": only on the servers picked in Settings →
+              Shell config sync, not all of them. Unlike the four tabs above
+              it doesn't dock a panel: it's a one-shot push, so it opens a
+              preview/confirm dialog instead (see shellSyncOpen below). */}
+          {shellSyncOffered && (
+            <button
+              onClick={openShellSync}
+              disabled={status !== 'connected'}
+              title="Push shell config: your files from Settings → Shell config sync, to this server"
+              aria-label="Push shell config"
+              className="h-10 sm:h-8 px-2.5 rounded-lg flex items-center gap-1.5 transition-all text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:border-white/20 hover:text-white disabled:opacity-40 disabled:pointer-events-none"
+            >
+              <UploadCloud size={14} className="shrink-0" />
+              <span className="hidden md:inline text-[11px] font-semibold tracking-tight">Shell</span>
+            </button>
+          )}
           {/* Where the tool pane sits around the terminal. Compact windows
               show the tool full screen, so there is nothing to place. */}
           {!isCompact && (
@@ -1783,6 +1894,8 @@ const SessionViewImpl = ({ session, profile, displayName, onClose, addLog, onSta
           which shows it alone the same way. */}
       <div
         ref={mainAreaRef}
+        // Behind the push dialog: Tab can't reach the terminal under it.
+        inert={shellSyncOpen ? "" : undefined}
         className={`flex-1 flex overflow-hidden relative bg-[#09090b] ${toolAlone ? "" : DOCK_FLEX[toolDock]}`}
       >
         {/* Left Panel: Active Terminals.
@@ -2084,6 +2197,172 @@ const SessionViewImpl = ({ session, profile, displayName, onClose, addLog, onSta
           </div>
         </div>
       </div>
+
+      {/* Push shell config — preview/confirm dialog. Scoped to this session
+          (absolute, not a document.body portal) like promptOverlay above,
+          since it only makes sense for the session whose toolbar button
+          opened it. The session behind it is inert while it's open. */}
+      {shellSyncOpen && (() => {
+        const entries = shellSyncReport?.entries ?? [];
+        const pushes = entries.filter((e) => e.action === "new" || e.action === "update" || e.action === "server-newer");
+        const replaces = pushes.some((e) => e.action !== "new");
+        const badge = (e: ShellSyncEntry): [string, string] => {
+          switch (e.action) {
+            case "new": return ["new", "text-emerald-400"];
+            case "update": return ["update", "text-amber-400"];
+            case "server-newer": return ["newer on the server", "text-rose-400"];
+            case "skip-private": return [`not pushed: ${e.reason ?? "private"}`, "text-zinc-500"];
+            case "skip-link": return ["a link there: left alone", "text-zinc-500"];
+            case "skip-folder": return ["a folder there: left alone", "text-zinc-500"];
+            default: return ["not a file there: left alone", "text-zinc-500"];
+          }
+        };
+        const remoteShell = shellSyncShells?.remote_shell.split("/").pop() || "another shell";
+        return (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={`shell-sync-title-${session.id}`}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.stopPropagation();
+                closeShellSync();
+              }
+            }}
+            className="absolute inset-0 z-50 flex items-start justify-center bg-black/70 backdrop-blur-sm p-4 sm:p-8 overflow-y-auto"
+          >
+            <div
+              ref={shellSyncPanelRef}
+              tabIndex={-1}
+              className="max-w-xl w-full mt-6 sm:mt-12 bg-[#121215] border border-white/10 rounded-2xl shadow-2xl overflow-hidden outline-none"
+            >
+              <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2 min-w-0">
+                  <UploadCloud size={15} className="text-primary shrink-0" />
+                  <h3 id={`shell-sync-title-${session.id}`} className="text-sm font-semibold text-zinc-100 truncate">
+                    Push shell config → {session.serverName}
+                  </h3>
+                </div>
+                <button
+                  onClick={closeShellSync}
+                  disabled={shellSyncPushing}
+                  aria-label="Close"
+                  className="shrink-0 text-zinc-500 hover:text-white transition-colors disabled:opacity-40"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+
+              <div className="px-5 py-4 space-y-3 max-h-[60vh] overflow-y-auto">
+                {shellSyncBusy && !shellSyncReport && (
+                  <div className="flex items-center gap-2 text-sm text-zinc-400 py-4">
+                    <Loader2 size={14} className="animate-spin" /> Checking what would change…
+                  </div>
+                )}
+
+                {shellSyncError && (
+                  <div className="flex items-start gap-2 text-[12px] text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2.5">
+                    <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                    <span className="whitespace-pre-line break-words min-w-0">{shellSyncError}</span>
+                  </div>
+                )}
+
+                {shellSyncShells?.shell_mismatch && !shellSyncResult && (
+                  <div className="flex items-start gap-2 text-[12px] text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2.5">
+                    <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                    <span>
+                      This computer's shell is <strong>{shellSyncShells.local_shell}</strong>, but this account
+                      logs into <strong>{remoteShell}</strong> on the server: files for {shellSyncShells.local_shell} are
+                      only read there once the account's shell changes, or with Settings → Use my default shell.
+                    </span>
+                  </div>
+                )}
+
+                {shellSyncResult && (
+                  <div className="space-y-2">
+                    <p className="text-[12px] text-zinc-300">
+                      Pushed {shellSyncResult.pushed} file{shellSyncResult.pushed === 1 ? "" : "s"}. These failed:
+                    </p>
+                    <div className="rounded-lg border border-red-500/20 divide-y divide-white/5 overflow-hidden">
+                      {shellSyncResult.failed.map((f, i) => (
+                        <div key={i} className="px-3 py-2 text-[12px]">
+                          <div className="truncate text-zinc-200" title={f.remote}>{f.remote}</div>
+                          <div className="text-red-400 break-words">{f.error}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {shellSyncResult.backup && (
+                      <p className="text-[11px] text-zinc-500">The files it replaced are in {shellSyncResult.backup} on the server.</p>
+                    )}
+                  </div>
+                )}
+
+                {shellSyncReport && !shellSyncResult && (
+                  entries.length === 0 ? (
+                    <p className="text-sm text-zinc-400 py-2">Everything is up to date: nothing to push.</p>
+                  ) : (
+                    <>
+                      <p className="text-[11px] text-zinc-500">
+                        {pushes.length === 0
+                          ? "Nothing to push"
+                          : `${pushes.length} file${pushes.length === 1 ? "" : "s"} · ${fmtBytes(shellSyncReport.total_bytes)}`}
+                        {" "}· into {shellSyncReport.home} on the server
+                      </p>
+                      <div className="rounded-lg border border-white/10 divide-y divide-white/5 overflow-hidden">
+                        {entries.map((e, i) => {
+                          const [text, tone] = badge(e);
+                          const sends = pushes.includes(e);
+                          return (
+                            <div key={i} className="px-3 py-2 text-[12px]">
+                              <div className="flex items-center gap-2">
+                                <span className={`flex-1 min-w-0 truncate ${sends ? "text-zinc-300" : "text-zinc-500"}`} title={`${e.local} → ${e.remote}`}>
+                                  {e.remote}
+                                </span>
+                                {sends && <span className="shrink-0 text-zinc-500">{fmtBytes(e.size)}</span>}
+                                <span className={`shrink-0 text-[10px] font-bold uppercase tracking-wide ${tone}`}>{text}</span>
+                              </div>
+                              {e.crlf && (
+                                <p className="mt-0.5 text-[11px] text-amber-300">
+                                  Windows line endings: a shell on the server reads the extra \r as part of each line.
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {replaces && (
+                        <p className="text-[11px] text-zinc-500">
+                          A file it replaces is moved to ~/.submarine-trash on the server first and keeps its permissions.
+                        </p>
+                      )}
+                    </>
+                  )
+                )}
+              </div>
+
+              <div className="px-5 py-3.5 border-t border-white/5 flex items-center justify-end gap-2">
+                <button
+                  onClick={closeShellSync}
+                  disabled={shellSyncPushing}
+                  className="h-8 px-3 rounded-lg text-xs font-semibold text-zinc-300 hover:bg-white/5 transition-colors disabled:opacity-40"
+                >
+                  {shellSyncResult ? "Close" : "Cancel"}
+                </button>
+                {!shellSyncResult && (
+                  <button
+                    onClick={confirmShellSync}
+                    disabled={shellSyncBusy || pushes.length === 0}
+                    className="h-8 px-3 rounded-lg text-xs font-semibold bg-primary/10 text-primary hover:bg-primary/20 transition-colors disabled:opacity-40 disabled:pointer-events-none flex items-center gap-1.5"
+                  >
+                    {shellSyncPushing ? <Loader2 size={13} className="animate-spin" /> : <UploadCloud size={13} />}
+                    Push
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 

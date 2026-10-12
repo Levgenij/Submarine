@@ -1,9 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Settings, Palette, RefreshCw, List, Cloud, Minus, Plus } from "lucide-react";
+import { Settings, Palette, RefreshCw, List, Cloud, Minus, Plus, ArrowRight, X } from "lucide-react";
 import {
   MAX_FONT_SIZE, MIN_FONT_SIZE, clampFontSize, fontFamilyCss,
   isFontAvailable, primaryFontName, sanitizeFontFamily,
 } from "../util/terminalFont";
+import {
+  ShellSyncPair, localPathProblem, readShellSyncPairs, readShellSyncServers, remotePathProblem,
+  setShellSyncServer, writeShellSyncPairs,
+} from "../util/shellSync";
 import { invoke } from "@tauri-apps/api/core";
 import CopyValue from "./CopyValue";
 import FontPicker from "./FontPicker";
@@ -205,7 +209,119 @@ function TerminalFontSettings({ settings, setSettings }: any) {
   );
 }
 
-const SettingsPanel = ({ settings, setSettings, onOpenLogs }: any) => {
+// What the Shell button in a session's toolbar pushes, and which servers show
+// it. Both are this device's own (see util/shellSync.ts): the files are this
+// machine's, so neither is in the vault. Shell-agnostic on purpose: a plain
+// local/remote list, for whatever shell the user runs.
+function ShellConfigSyncSettings({ servers }: { servers: any[] }) {
+  const [pairs, setPairs] = useState<ShellSyncPair[]>(() => readShellSyncPairs());
+  const [chosen, setChosen] = useState<string[]>(() => readShellSyncServers());
+
+  const persist = (next: ShellSyncPair[]) => {
+    setPairs(next);
+    writeShellSyncPairs(next);
+  };
+  const toggle = (uuid: string, on: boolean) => {
+    setShellSyncServer(uuid, on);
+    setChosen(readShellSyncServers());
+  };
+  // Saved servers (a quick connect has no sync id), by name.
+  const choices = servers
+    .filter((s) => typeof s.uuid === "string" && s.uuid)
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+
+  return (
+    <div className="bg-[#121215] border border-white/5 rounded-2xl p-6 shadow-xl space-y-4">
+      <div>
+        <div className="text-sm font-semibold text-zinc-100">Shell config sync</div>
+        <p className="text-[12px] text-zinc-400 leading-relaxed mt-1">
+          Files and folders from this computer for the Shell button in a session's toolbar to push
+          to that server: your shell config, theme, plugins. The place on the server is below its
+          home folder, so one list works whatever the user name. You see what would change before
+          anything is sent, and a file it replaces is kept in ~/.submarine-trash on the server.
+          Keys, credentials, command history and .git folders are never pushed.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        {pairs.map((pair, i) => {
+          const problem = localPathProblem(pair.local) ?? remotePathProblem(pair.remote);
+          return (
+            <div key={i} className="space-y-1">
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={pair.local}
+                  onChange={(e) => persist(pairs.map((p, idx) => idx === i ? { ...p, local: e.target.value } : p))}
+                  placeholder="~/.zshrc"
+                  aria-label="File or folder on this computer"
+                  spellCheck={false}
+                  className="flex-1 min-w-0 bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-primary/50"
+                />
+                <ArrowRight size={14} className="text-zinc-600 shrink-0" />
+                <input
+                  type="text"
+                  value={pair.remote}
+                  onChange={(e) => persist(pairs.map((p, idx) => idx === i ? { ...p, remote: e.target.value } : p))}
+                  placeholder=".zshrc"
+                  aria-label="Place on the server, below its home folder"
+                  spellCheck={false}
+                  className="flex-1 min-w-0 bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-primary/50"
+                />
+                <button
+                  onClick={() => persist(pairs.filter((_, idx) => idx !== i))}
+                  aria-label="Remove pair"
+                  title="Remove pair"
+                  className="shrink-0 p-2 rounded-lg text-zinc-500 hover:bg-white/10 hover:text-rose-400 transition-colors"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+              {problem && <p className="text-[11px] text-amber-300 pl-1">{problem}</p>}
+            </div>
+          );
+        })}
+        {pairs.length === 0 && (
+          <p className="text-[12px] text-zinc-500 italic">Nothing to push yet.</p>
+        )}
+      </div>
+
+      <button
+        onClick={() => persist([...pairs, { local: "", remote: "" }])}
+        className="flex items-center gap-1.5 text-xs font-semibold text-primary hover:text-primary/80 transition-colors"
+      >
+        <Plus size={14} /> Add pair
+      </button>
+
+      <div className="pt-4 border-t border-white/5">
+        <div className="text-[12px] font-semibold text-zinc-200">Push to</div>
+        <p className="text-[12px] text-zinc-500 mt-0.5">
+          The servers that show the Shell button. Only this device keeps the choice.
+        </p>
+        {choices.length === 0 ? (
+          <p className="text-[12px] text-zinc-500 italic mt-2">No saved servers yet.</p>
+        ) : (
+          <div className="mt-2 max-h-56 overflow-y-auto custom-scrollbar space-y-0.5 pr-1">
+            {choices.map((s) => (
+              <label key={s.uuid} className="flex items-center gap-2.5 px-2 py-1.5 rounded-lg hover:bg-white/[0.03] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={chosen.includes(s.uuid)}
+                  onChange={(e) => toggle(s.uuid, e.target.checked)}
+                  className="accent-primary w-4 h-4 shrink-0"
+                />
+                <span className="text-[13px] text-zinc-200 truncate">{s.name}</span>
+                <span className="text-[11px] text-zinc-500 truncate">{s.host}</span>
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any) => {
   const accentColors = [
     { name: 'Light Blue', value: '#60a5fa' },
     { name: 'Sky', value: '#38bdf8' },
@@ -328,7 +444,10 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs }: any) => {
           </div>
 
           <TerminalFontSettings settings={settings} setSettings={setSettings} />
+
           <DefaultShellSetting settings={settings} setSettings={setSettings} />
+          
+          <ShellConfigSyncSettings servers={servers} />
         </section>
 
         {/* Activity Section — moved out of the sidebar so the top-level
