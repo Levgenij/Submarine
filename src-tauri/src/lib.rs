@@ -23,6 +23,7 @@ mod docker;
 mod archive;
 mod hlc;
 mod identity;
+mod portable;
 mod fonts;
 mod webkit_sandbox;
 #[cfg(test)]
@@ -15502,6 +15503,15 @@ pub fn run() {
         webkit_sandbox::configure();
     }
 
+    // Portable mode: with a `submarine-data` folder next to the executable,
+    // every app directory moves into it - profiles, cloud token, window state,
+    // and the webview's data (localStorage, i.e. the UI preferences). Decided
+    // here, once, and applied before the app is built because Tauri reads the
+    // override out of the config and derives the webview's data dir from it.
+    // Without the folder nothing is touched. See portable.rs.
+    let mut context = tauri::generate_context!();
+    portable::apply(context.config_mut());
+
     let builder = tauri::Builder::default();
     // Save/restore the main window's last size + position to a JSON file
     // in app_data_dir. Keeps the user's preferred geometry across launches
@@ -15605,10 +15615,11 @@ pub fn run() {
             monitor_resume, monitor_pause, monitor_resume_all, monitor_pause_all,
             monitor_get_settings, monitor_set_settings,
             about::app_info, about::check_for_updates, about::open_external_url,
+            portable::get_storage_info,
             fonts::list_system_fonts,
             clipboard_read_text
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }
 

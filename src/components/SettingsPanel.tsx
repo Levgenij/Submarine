@@ -10,7 +10,17 @@ import {
   setShellSyncServer, writeShellSyncPairs,
 } from "../util/shellSync";
 import FontPicker from "./FontPicker";
+import CopyValue from "./CopyValue";
 import { loadInstalledFonts } from "../util/systemFonts";
+
+// Where this install keeps its data (see src-tauri/src/portable.rs). `portable`
+// means a `submarine-data` folder next to the executable is in use; `warning`
+// is set when such a folder exists but couldn't be written to.
+interface StorageInfo {
+  portable: boolean;
+  data_dir: string;
+  warning: string | null;
+}
 
 const PrefToggle = ({ checked, onToggle, label }: { checked: boolean; onToggle: () => void; label: string }) => (
   <button
@@ -337,6 +347,13 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any)
     { name: 'Deep Space', value: '#0d0d10' },
   ];
 
+  // Read-only storage summary from the backend: where data lives and whether
+  // a `submarine-data` folder next to the exe (portable mode) is in use.
+  const [storage, setStorage] = useState<StorageInfo | null>(null);
+  useEffect(() => {
+    invoke<StorageInfo>("get_storage_info").then(setStorage).catch(() => setStorage(null));
+  }, []);
+
   return (
     <div className="flex-1 p-4 sm:p-10 overflow-y-auto custom-scrollbar animate-in">
       <header className="mb-6 sm:mb-10">
@@ -531,6 +548,24 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any)
           </div>
 
           <div className="bg-[#121215] border border-white/5 rounded-2xl p-6 space-y-4 shadow-xl">
+            {storage && (
+              <div className="space-y-1.5 pb-4 border-b border-white/5">
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-black text-zinc-500 uppercase tracking-wider">Data folder</span>
+                  {storage.portable && (
+                    <span className="px-1.5 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider text-primary bg-primary/10 border border-primary/30">
+                      Portable
+                    </span>
+                  )}
+                </div>
+                <CopyValue value={storage.data_dir} className="max-w-full text-zinc-300">
+                  <span className="font-mono text-[11.5px] break-all select-text">{storage.data_dir}</span>
+                </CopyValue>
+                {storage.warning && (
+                  <p className="text-[11.5px] text-amber-400/90 leading-relaxed">{storage.warning}</p>
+                )}
+              </div>
+            )}
             <p className="text-sm text-zinc-400 leading-relaxed">
               These preferences are persisted in your local environment. Resetting will revert all UI aesthetics to factory defaults.
             </p>
