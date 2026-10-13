@@ -2,7 +2,8 @@ import { useState, useEffect, useLayoutEffect, useRef, useCallback, memo, type R
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { TerminalSquare, Folder, Network, AlertTriangle, Check, X, ShieldAlert, KeyRound, Play, Library, Info, Container, Plus, SplitSquareHorizontal, Columns, Rows, RotateCw, CloudUpload, Loader2, Maximize2, Minimize2 } from "lucide-react";
+import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
+import { TerminalSquare, Folder, Network, AlertTriangle, Check, X, ShieldAlert, KeyRound, Play, Library, Info, Container, Plus, SplitSquareHorizontal, Columns, Rows, RotateCw, CloudUpload, Loader2, Maximize2, Minimize2, PanelRight, PanelLeft, PanelBottom, PanelTop } from "lucide-react";
 import TerminalView from "./TerminalView";
 import SftpWorkspace from "./SftpWorkspace";
 import TunnelsPanel from "./TunnelsPanel";
@@ -138,6 +139,33 @@ type ToolId = typeof TOOLS[number]['id'];
 // cluster each pane portals in next to them (`slot`): its own controls
 // (Dedicated session, refresh), then full screen and the close button.
 const TOOL_FULL_KEY = "submarine-tool-full";
+
+// Where the tool panel sits around the terminal. Remembered per device like
+// the panel's size. Compact windows ignore it and show the tool alone.
+type ToolDock = "right" | "left" | "bottom" | "top";
+const TOOL_DOCK_KEY = "submarine-tool-dock";
+const DOCK_OPTIONS: { id: ToolDock; label: string; Icon: typeof PanelRight }[] = [
+  { id: "right", label: "Right of the terminal", Icon: PanelRight },
+  { id: "left", label: "Left of the terminal", Icon: PanelLeft },
+  { id: "bottom", label: "Below the terminal", Icon: PanelBottom },
+  { id: "top", label: "Above the terminal", Icon: PanelTop },
+];
+// The panel is the last element in the DOM. Reversing the flex direction
+// moves it without remounting the terminals.
+const DOCK_FLEX: Record<ToolDock, string> = {
+  right: "flex-row",
+  left: "flex-row-reverse",
+  bottom: "flex-col",
+  top: "flex-col-reverse",
+};
+// Above or below the terminal the panel has a height of its own. The
+// terminal always keeps at least MIN_TERMINAL_HEIGHT.
+const MIN_TOOL_HEIGHT = 160;
+const MIN_TERMINAL_HEIGHT = 120;
+
+// One OS window, and every session stays mounted. Open, drag, shrink, and
+// unmount all enqueue here so each setSize lands before the next outerSize read.
+let windowResizeChain: Promise<void> = Promise.resolve();
 
 // Toolbar button: give the panel the terminal's room, or bring the terminal
 // back. The terminal keeps running either way. Omitted while compact, where
@@ -729,17 +757,39 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
     setToolFull(full);
     try { localStorage.setItem(TOOL_FULL_KEY, full ? "1" : "0"); } catch { /* ignore */ }
   };
+  // Which side of the terminal the tool pane docks on. Right and left use the
+  // width above. Above or below, the pane spans the full width and uses its
+  // own height. Picking a position clears full screen; closing the tool does not.
+  const [toolDock, setToolDock] = useState<ToolDock>(() => {
+    try {
+      const v = localStorage.getItem(TOOL_DOCK_KEY);
+      return v === "left" || v === "bottom" || v === "top" ? v : "right";
+    } catch { return "right"; }
+  });
+  const setToolDockPersisted = (d: ToolDock) => {
+    if (d !== toolDock) setToolFullPersisted(false);
+    setToolDock(d);
+    try { localStorage.setItem(TOOL_DOCK_KEY, d); } catch { /* ignore */ }
+  };
+  const dockTopBottom = toolDock === "bottom" || toolDock === "top";
+  const [toolPanelHeight, setToolPanelHeight] = useState<number>(() => {
+    let saved = NaN;
+    try { saved = parseInt(localStorage.getItem("submarine-tool-panel-height") || "", 10); } catch { /* ignore */ }
+    if (Number.isFinite(saved) && saved >= MIN_TOOL_HEIGHT) return saved;
+    return Math.max(MIN_TOOL_HEIGHT, Math.round((window.innerHeight || 800) * 0.45));
+  });
+  const [dockMenu, setDockMenu] = useState<{ x: number; y: number } | null>(null);
   // The tool is shown without the terminal: always on a compact window, and
   // by choice on a roomy one.
   const toolAlone = isCompact || toolFull;
   const fullToggle = isCompact ? null : (
     <FullToggle full={toolFull} onToggle={() => setToolFullPersisted(!toolFull)} />
   );
-  // Width of the tool tab row in the toolbar: it spans the pane plus the 4px
-  // resize divider, or the whole window when the tool is alone (compact or
-  // full screen). Derived, not measured, so its labels are right on the first
-  // frame and track a drag exactly.
-  const toolBarWidth = toolAlone ? viewportWidth : toolPanelWidth + 4;
+  // Width the tool tab row is sized from. Beside the terminal it matches the
+  // pane plus the 4px divider. Alone (compact or full screen), or docked
+  // above or below, the pane is the full window width. Derived, not measured,
+  // so labels are right on the first frame and track a drag exactly.
+  const toolBarWidth = toolAlone || dockTopBottom ? viewportWidth : toolPanelWidth + 4;
   const toolBarWide = toolBarWidth >= 580;
 
   const initiatedRef = useRef(false);
@@ -1093,26 +1143,122 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
     return () => window.removeEventListener(evt, onReconnect);
   }, [session.id, customPassword]);
 
-  // ---- Tool pane sizing ----------------------------------------------------
-  // The pane and the terminal share the window. Dragging the divider only
-  // changes the pane width. The window itself is never resized from here.
+  // ---- Tool pane sizing + window growth ------------------------------------
+  // Left or right, and only while this session is the one on screen, the
+  // terminal column stays the same width: opening the pane or dragging the
+  // divider grows the window with it. Above or below, a background tab, full
+  // screen, or a compact window gives that width back. The split itself still
+  // moves; those cases do not change the window.
+  const toolWidthRef = useRef(toolPanelWidth);
+  useEffect(() => { toolWidthRef.current = toolPanelWidth; }, [toolPanelWidth]);
+  const mainAreaRef = useRef<HTMLDivElement | null>(null);
+  const toolPanelRef = useRef<HTMLDivElement | null>(null);
+
+  const adjustWindowWidth = (deltaPx: number) => {
+    if (!deltaPx) return windowResizeChain;
+    const step = windowResizeChain.then(async () => {
+      try {
+        const appWindow = getCurrentWindow();
+        const size = await appWindow.outerSize();
+        const scale = await appWindow.scaleFactor();
+        const logical = size.toLogical(scale);
+        const next = Math.max(640, Math.round(logical.width + deltaPx));
+        await appWindow.setSize(new LogicalSize(next, Math.round(logical.height)));
+      } catch (e) {
+        console.error("window resize failed", e);
+      }
+    });
+    windowResizeChain = step.catch(() => {});
+    return step;
+  };
+
+  // Grow only while this session is in front and a left or right pane is
+  // sharing the window with the terminal. Leaving the tab, closing the tool,
+  // full screen, a compact window, or a top or bottom dock gives the width back.
+  const windowGrownRef = useRef(false);
+  useEffect(() => {
+    const want = isActiveView && !!activeTool && !dockTopBottom && !toolAlone;
+    if (want && !windowGrownRef.current) {
+      windowGrownRef.current = true;
+      adjustWindowWidth(toolWidthRef.current + 4);
+    } else if (!want && windowGrownRef.current) {
+      windowGrownRef.current = false;
+      adjustWindowWidth(-(toolWidthRef.current + 4));
+    }
+    // adjustWindowWidth reads the width ref; it must not re-run on every drag.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isActiveView, activeTool, dockTopBottom, toolAlone]);
+
+  // Closing the session tab while a side pane is open gives the width back.
+  useEffect(() => {
+    return () => {
+      if (!windowGrownRef.current) return;
+      windowGrownRef.current = false;
+      adjustWindowWidth(-(toolWidthRef.current + 4));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const startToolResize = (e: React.MouseEvent) => {
     e.preventDefault();
+    if (dockTopBottom) {
+      const startY = e.clientY;
+      const area = mainAreaRef.current?.clientHeight ?? window.innerHeight;
+      const maxHeight = Math.max(MIN_TOOL_HEIGHT, area - MIN_TERMINAL_HEIGHT - 4);
+      // A height saved in a taller window shows capped, so start from the box.
+      const startHeight = Math.min(maxHeight, toolPanelRef.current?.getBoundingClientRect().height ?? toolPanelHeight);
+      const sign = toolDock === "bottom" ? 1 : -1;
+      let latest = startHeight;
+      const onMove = (ev: MouseEvent) => {
+        latest = Math.round(Math.max(MIN_TOOL_HEIGHT, Math.min(maxHeight, startHeight + sign * (startY - ev.clientY))));
+        setToolPanelHeight(latest);
+      };
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        try { localStorage.setItem("submarine-tool-panel-height", String(latest)); }
+        catch { /* ignore */ }
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+      return;
+    }
     const startX = e.clientX;
-    const startWidth = toolPanelWidth;
-    let latest = startWidth;
+    const startWidth = toolWidthRef.current;
+    let lastSentWidth = startWidth;
+    let pendingWidth = startWidth;
+    let raf = 0;
+
+    const sendDragDelta = () => {
+      const delta = pendingWidth - lastSentWidth;
+      if (delta === 0) return;
+      lastSentWidth = pendingWidth;
+      adjustWindowWidth(delta);
+    };
 
     const onMove = (ev: MouseEvent) => {
-      // Dragging LEFT (cursor moves left) widens the tool pane.
-      latest = Math.max(240, Math.min(900, startWidth + (startX - ev.clientX)));
-      setToolPanelWidth(latest);
+      // Dragging toward the terminal widens the pane: left for a pane on the
+      // right, right for a pane on the left.
+      const pulled = toolDock === "left" ? ev.clientX - startX : startX - ev.clientX;
+      const next = Math.max(240, Math.min(900, startWidth + pulled));
+      pendingWidth = next;
+      toolWidthRef.current = next;
+      setToolPanelWidth(next);
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        sendDragDelta();
+      });
     };
 
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
-      try { localStorage.setItem("submarine-tool-panel-width", String(latest)); }
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+      // The frame may not have run, so the last drag step is still unsent.
+      sendDragDelta();
+      try { localStorage.setItem("submarine-tool-panel-width", String(toolWidthRef.current)); }
       catch { /* ignore */ }
     };
 
@@ -1401,6 +1547,13 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
   }
 
   // Connected State with Nested Tabs
+  const toolbarStacked = !!activeTool && !toolAlone && dockTopBottom;
+  const toolbarOnLeft = !!activeTool && !toolAlone && toolDock === "left";
+  const DockIcon = (DOCK_OPTIONS.find((o) => o.id === toolDock) ?? DOCK_OPTIONS[0]).Icon;
+  const openDockMenu = (e: React.MouseEvent<HTMLButtonElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    setDockMenu({ x: r.right, y: r.bottom + 4 });
+  };
   return (
     <div className="relative flex-1 flex flex-col bg-background overflow-hidden animate-in fade-in">
       {/* Auth prompts during an auto-reconnect. The full-screen view above
@@ -1415,9 +1568,19 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
           full chrome and 2-3 sessions side-by-side would fight for
           vertical space with duplicate toolbars. */}
       {!chromeless && (
-      <div inert={shellInert} className={`h-12 border-b border-white/5 bg-[#121214]/50 flex items-center shrink-0 justify-between gap-1 ${activeTool ? 'pl-2 sm:pl-4' : 'px-2 sm:px-4'}`}>
+      <div
+        inert={shellInert}
+        className={toolbarStacked
+          ? `border-b border-white/5 bg-[#121214]/50 shrink-0 flex flex-col ${toolDock === "top" ? "flex-col-reverse" : ""}`
+          : `h-12 border-b border-white/5 bg-[#121214]/50 flex items-center shrink-0 justify-between gap-1 ${
+              activeTool ? (toolbarOnLeft ? "pr-2 sm:pr-4 flex-row-reverse" : "pl-2 sm:pl-4") : "px-2 sm:px-4"
+            }`
+        }
+      >
         <div
-          className={`flex items-center gap-1 overflow-x-auto no-scrollbar flex-1 mr-1 sm:mr-4 mask-fade-right ${activeTool && toolAlone ? 'hidden' : ''}`}
+          className={`flex items-center gap-1 overflow-x-auto no-scrollbar mask-fade-right ${activeTool && toolAlone ? "hidden" : ""} ${
+            toolbarStacked ? "h-12 w-full px-2 sm:px-4" : `flex-1 ${toolbarOnLeft ? "ml-1 sm:ml-4" : "mr-1 sm:mr-4"}`
+          }`}
           onWheel={(e) => { e.currentTarget.scrollLeft += e.deltaY; }}
         >
         {terminals.map(t => {
@@ -1536,21 +1699,36 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
           </button>
         </div>
 
-        {/* Tool rail: icon + text label. The label collapses to icon-only on
-            narrow viewports (below md) so the terminal tab strip keeps its
-            horizontal real estate when space is tight; the full description
-            stays in the tooltip either way. Only shown while the tool pane
-            is closed. An open pane puts the same tools here as tabs, lined
-            up over the pane: pane width plus the 4px resize divider. When the
-            tool is alone (compact or full screen) the pane is full width, so
-            the tabs take the whole row and the terminal tabs are hidden. */}
+        {/* Tool rail while the pane is closed. An open pane puts the same
+            tools here as tabs, lined up over the pane: pane width plus the
+            4px divider, on the right or the left with the dock. Above or
+            below, that strip spans the full toolbar width: above the terminal
+            tabs when the pane is on top, below them when the pane is on the
+            bottom. Compact and full screen hide the terminal tabs. */}
         {activeTool && (
           <div
-            style={toolAlone ? undefined : { width: `${toolBarWidth}px` }}
-            className={`self-stretch min-w-0 flex items-stretch gap-2 px-2 ${toolAlone ? 'flex-1' : 'shrink-0 border-l border-white/5'}`}
+            style={toolbarStacked || toolAlone ? undefined : { width: `${toolBarWidth}px` }}
+            className={`min-w-0 flex items-stretch gap-2 px-2 ${
+              toolAlone
+                ? "self-stretch flex-1"
+                : toolbarStacked
+                  ? `h-12 w-full ${toolDock === "top" ? "border-b" : "border-t"} border-white/5`
+                  : `self-stretch shrink-0 ${toolbarOnLeft ? "border-r border-white/5" : "border-l border-white/5"}`
+            }`}
           >
             <ToolTabs active={activeTool} onSelect={setActiveTool} showLabels={toolBarWidth >= 420} />
             <div className="flex-1" />
+            {!isCompact && (
+              <button
+                onClick={openDockMenu}
+                title="Panel position"
+                aria-label="Panel position"
+                aria-haspopup="menu"
+                className="w-8 h-8 self-center rounded-lg flex items-center justify-center shrink-0 text-zinc-400 hover:text-white hover:bg-white/5 transition-colors"
+              >
+                <DockIcon size={16} />
+              </button>
+            )}
             <div ref={setToolHeaderSlot} className="flex items-center gap-3 shrink-0" />
           </div>
         )}
@@ -1580,6 +1758,17 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
             >
               <CloudUpload size={16} className="shrink-0" />
               <span className="hidden md:inline">Shell</span>
+            </button>
+          )}
+          {!isCompact && (
+            <button
+              onClick={openDockMenu}
+              title="Panel position"
+              aria-label="Panel position"
+              aria-haspopup="menu"
+              className="h-10 sm:h-9 px-3 rounded-lg flex items-center gap-2 text-[13px] font-medium text-zinc-400 hover:text-zinc-100 hover:bg-white/5 transition-colors"
+            >
+              <DockIcon size={16} className="shrink-0" />
             </button>
           )}
         </div>
@@ -1655,6 +1844,38 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                 That way the picker is anchored to the tab it operates
                 on and users don't have to know two entry points for the
                 same feature. */}
+          </div>
+        </>,
+        document.body
+      )}
+
+      {dockMenu && createPortal(
+        <>
+          <div
+            className="fixed inset-0 z-[9998]"
+            onClick={() => setDockMenu(null)}
+            onContextMenu={(e) => { e.preventDefault(); setDockMenu(null); }}
+          />
+          <div
+            role="menu"
+            aria-label="Panel position"
+            style={{ left: Math.max(8, Math.min(dockMenu.x - 210, window.innerWidth - 218)), top: Math.min(dockMenu.y, window.innerHeight - 170) }}
+            className="fixed z-[9999] w-[210px] bg-[#15151a] border border-white/10 rounded-lg shadow-2xl py-1 text-[11.5px]"
+          >
+            <div className="px-3 pt-1 pb-1.5 text-[9.5px] font-bold uppercase tracking-wider text-zinc-500">Panel position</div>
+            {DOCK_OPTIONS.map(({ id, label, Icon }) => (
+              <button
+                key={id}
+                role="menuitemradio"
+                aria-checked={toolDock === id}
+                onClick={() => { setToolDockPersisted(id); setDockMenu(null); }}
+                className="w-full flex items-center gap-2.5 px-3 py-1.5 hover:bg-white/[0.06] text-zinc-200 hover:text-white text-left"
+              >
+                <Icon size={13} className={toolDock === id ? "text-primary" : "text-zinc-500"} />
+                <span className="flex-1">{label}</span>
+                {toolDock === id && <Check size={12} className="text-primary" />}
+              </button>
+            ))}
           </div>
         </>,
         document.body
@@ -1745,13 +1966,19 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
         })()
       )}
 
-      {/* Tab Content Split Pane. Side-by-side on a roomy desktop. On a
-          narrow viewport (`isCompact`), or when the open tool is full screen
-          (`toolFull`), the tool is alone: the terminal pane and the resize
-          divider hide, and the panel takes the area. Terminals stay mounted
-          (CSS hidden, not unmounted) and are marked inactive while alone.
-          Closing the tool brings the terminal back and leaves the flag set. */}
-      <div inert={shellInert} className="flex-1 flex overflow-hidden relative bg-[#09090b]">
+      {/* Tab Content Split Pane. On a roomy window the tool docks right, left,
+          below, or above the terminal. Reversing the flex direction moves the
+          pane without remounting the terminals. On a narrow viewport
+          (`isCompact`), or when the open tool is full screen (`toolFull`),
+          the tool is alone: the terminal pane and the resize divider hide,
+          and the panel takes the area. Terminals stay mounted (CSS hidden,
+          not unmounted) and are marked inactive while alone. Closing the
+          tool brings the terminal back and leaves the flag set. */}
+      <div
+        ref={mainAreaRef}
+        inert={shellInert}
+        className={`flex-1 flex min-h-0 overflow-hidden relative bg-[#09090b] ${toolAlone ? "" : DOCK_FLEX[toolDock]}`}
+      >
         {/* Left Panel: Active Terminals.
             When a tool is alone (compact or full screen), hide this pane so
             the tool fills the session. Terminals stay mounted (no PTY
@@ -1765,7 +1992,11 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
             hidden, so switching a tab that isn't in the split preserves
             its scrollback. The tiles fill the whole left panel; the tool
             side panel continues to work exactly as before. */}
-        <div className={`h-full relative ${activeTool && toolAlone ? 'hidden' : 'flex-1 min-w-0'}`}>
+        <div className={`relative ${
+          activeTool && toolAlone ? "hidden"
+            : dockTopBottom && !toolAlone ? "w-full flex-1 min-h-0"
+            : "h-full flex-1 min-w-0"
+        }`}>
           {splitTerminals.length >= 2 && !isCompact ? (
             <div className={`absolute inset-0 flex ${splitOrientation === "h" ? "flex-row" : "flex-col"}`}>
               {splitTerminals.map((termId, slotIdx) => {
@@ -1930,7 +2161,9 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
         {activeTool && !toolAlone && (
           <div
             onMouseDown={startToolResize}
-            className="w-1 shrink-0 cursor-col-resize bg-white/5 hover:bg-primary/40 transition-colors"
+            className={`shrink-0 bg-white/5 hover:bg-primary/40 transition-colors ${
+              dockTopBottom ? "h-1 cursor-row-resize" : "w-1 cursor-col-resize"
+            }`}
             title="Drag to resize"
           />
         )}
@@ -1942,8 +2175,13 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
             tree was torn down. Other tools still conditional-render: they
             don't carry live state worth preserving across switches. */}
         <div
-          style={activeTool && !toolAlone ? { width: `${toolPanelWidth}px` } : undefined}
-          className={`${activeTool ? (toolAlone ? 'flex-1 min-w-0' : 'shrink-0') : 'hidden'} bg-[#121214]/95 flex flex-col h-full overflow-hidden ${activeTool ? 'animate-in' : ''}`}
+          ref={toolPanelRef}
+          style={activeTool && !toolAlone
+            ? (dockTopBottom
+                ? { height: `${toolPanelHeight}px`, maxHeight: `calc(100% - ${MIN_TERMINAL_HEIGHT + 4}px)` }
+                : { width: `${toolPanelWidth}px` })
+            : undefined}
+          className={`${activeTool ? (toolAlone ? "flex-1 min-w-0" : "shrink-0") : "hidden"} bg-[#121214]/95 flex flex-col ${dockTopBottom && !toolAlone ? "w-full min-h-0" : "h-full"} overflow-hidden ${activeTool ? "animate-in" : ""}`}
         >
           {activeTool === 'sftp' && (
             <div className="flex-1 flex flex-col overflow-hidden">

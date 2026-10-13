@@ -10,7 +10,7 @@ import TransfersBar, { Transfer } from "./TransfersBar";
 import { createLocalProvider } from "../fs/localProvider";
 import { createRemoteProvider } from "../fs/remoteProvider";
 import { dropQueued, useQueuedTransfers } from "../fs/transferQueue";
-import { useElementWidth } from "../hooks/useViewport";
+import { useElementWidth, useIsNarrow } from "../hooks/useViewport";
 import { onRovingKeyDown } from "../ui/rovingKeys";
 
 // Root (sudo) mode for the remote pane. See `sftp_set_elevated` in lib.rs.
@@ -61,7 +61,9 @@ interface SftpWorkspaceProps {
 export const bookmarksKeyPrefix = (profile: string) => `submarine-sftp-bookmarks:${profile}:`;
 
 type SftpView = "files" | "mirror";
-type FilesLayout = "tabs" | "split";
+// "split" is Local above Remote. The name predates "side" and stays because
+// it is what earlier versions saved.
+type FilesLayout = "tabs" | "split" | "side";
 type FilesSide = "local" | "remote";
 
 // Cursor-following drag ghost, isolated into its own component so that the
@@ -109,19 +111,24 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
   const [view, setView] = useState<SftpView>("files");
   // Files layout: "tabs" (one side full height) is the default because the
   // side panel is narrow on most desktop setups and "split" squeezed each
-  // FilePanel into 5-6 rows. "split" stays available for users who want
-  // simultaneous Local+Remote visibility (drag-drop still works there).
-  // Persisted globally (not per-session) — pure layout preference.
+  // FilePanel into 5-6 rows. "split" and "side" stay available for users who
+  // want simultaneous Local+Remote visibility (drag-drop still works there).
+  // Persisted globally (not per-session) - pure layout preference.
   const [layout, setLayout] = useState<FilesLayout>(() => {
     try {
       const v = localStorage.getItem("submarine-sftp-layout");
-      return v === "split" ? "split" : "tabs";
+      return v === "split" || v === "side" ? v : "tabs";
     } catch { return "tabs"; }
   });
   const setLayoutPersisted = (l: FilesLayout) => {
     setLayout(l);
-    try { localStorage.setItem("submarine-sftp-layout", l); } catch { /* quota — ignore */ }
+    try { localStorage.setItem("submarine-sftp-layout", l); } catch { /* quota - ignore */ }
   };
+  // Two lists side by side don't fit a phone-width window: there "side"
+  // shows as the stacked split, and the saved choice comes back once the
+  // window is wider.
+  const isNarrow = useIsNarrow();
+  const shownLayout: FilesLayout = layout === "side" && isNarrow ? "split" : layout;
   // Active side in tabs mode. We persist it per (session) so the user
   // returns to the side they were last using, not always Local.
   const sideStorageKey = `submarine-sftp-side-${sessionId}`;
@@ -135,8 +142,8 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
     setActiveSide(s);
     try { localStorage.setItem(sideStorageKey, s); } catch { /* ignore */ }
   };
-  // What the Local / Remote / Split switcher shows as selected.
-  const panelMode: FilesSide | "split" = layout === "split" ? "split" : activeSide;
+  // What the Local / Remote / Split / Side switcher shows as selected.
+  const panelMode: FilesSide | "split" | "side" = layout === "tabs" ? activeSide : layout;
   // Files / Mirror drop to icons when the pane is dragged too narrow for
   // both the tabs and the panel switcher.
   const subBarRef = useRef<HTMLDivElement>(null);
@@ -505,6 +512,7 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
               { id: "local", label: "Local", hint: "Local files at full height" },
               { id: "remote", label: "Remote", hint: "Remote files at full height" },
               { id: "split", label: "Split", hint: "Show both panels stacked (drag-drop between them)" },
+              { id: "side", label: "Side", hint: "Show both panels side by side (drag-drop between them)" },
             ] as const).map(({ id, label, hint }) => {
               const on = panelMode === id;
               return (
@@ -515,7 +523,7 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
                   tabIndex={on ? 0 : -1}
                   title={hint}
                   onClick={() => {
-                    if (id === "split") { setLayoutPersisted("split"); return; }
+                    if (id === "split" || id === "side") { setLayoutPersisted(id); return; }
                     setLayoutPersisted("tabs");
                     setActiveSidePersisted(id);
                   }}
@@ -538,15 +546,16 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
           Both FilePanels are ALWAYS mounted (one is just CSS-hidden in
           tabs mode) so cd state, scroll position, and selection survive a
           tab toggle. */}
-      <div className={`${view === "files" ? "flex-1 flex flex-col min-h-0" : "hidden"}`}>
-        {/* Local panel — visible in split mode (top), or in tabs mode when
-            Local is the active side. Hidden via CSS (not unmounted) when
-            on the inactive tab so its directory and provider state
-            survive a side-swap. */}
+      <div className={`${view === "files" ? `flex-1 flex min-h-0 ${shownLayout === "side" ? "flex-row" : "flex-col"}` : "hidden"}`}>
+        {/* Both panels stay mounted. Split stacks them; side puts them in a
+            row. Tabs hides the inactive one with CSS so its directory and
+            selection survive a side swap. */}
         <div className={
-          layout === "split"
+          shownLayout === "split"
             ? "flex-1 min-h-0 border-b border-white/10"
-            : activeSide === "local" ? "flex-1 min-h-0" : "hidden"
+            : shownLayout === "side"
+              ? "flex-1 min-w-0 min-h-0 border-r border-white/10"
+              : activeSide === "local" ? "flex-1 min-h-0" : "hidden"
         }>
           <FilePanel
             ref={localRef}
@@ -564,9 +573,11 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
             bookmarksKey={bookmarksKey("local")}          />
         </div>
         <div className={
-          layout === "split"
+          shownLayout === "split"
             ? "flex-1 min-h-0"
-            : activeSide === "remote" ? "flex-1 min-h-0" : "hidden"
+            : shownLayout === "side"
+              ? "flex-1 min-w-0 min-h-0"
+              : activeSide === "remote" ? "flex-1 min-h-0" : "hidden"
         }>
           <FilePanel
             ref={remoteRef}
