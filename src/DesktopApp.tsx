@@ -37,8 +37,10 @@ const appWindow = getCurrentWindow();
 // "Rename tab"; `serverName` stays the backend identity everywhere else.
 // `initialTerminals` / `initialActiveIndex` seed SessionView's tabs for a
 // session reopened from the saved snapshot.
+// `serverUuid` is the saved server's sync id. It keys this device's Shell
+// button (see util/shellSync.ts). Quick connect leaves it unset.
 type Session = {
-  id: string; serverId: number; serverName: string; customName?: string; mirrors?: string; runOnConnect?: string;
+  id: string; serverId: number; serverName: string; serverUuid?: string | null; customName?: string; mirrors?: string; runOnConnect?: string;
   quickAuth?: QuickAuth | null; initialTerminals?: SnapTerm[]; initialActiveIndex?: number;
 };
 const tabLabel = (s: Session) => s.customName || s.serverName;
@@ -567,7 +569,7 @@ function DesktopApp() {
         : { sessions: [], activeServerId: null };
       const restoredIds = new Set(snap.sessions.map((r) => r.serverId));
       const toStart = list.filter((s) => s.autostart && !restoredIds.has(s.id));
-      const base = (s: any): Session => ({ id: `session-${s.id}`, serverId: s.id, serverName: s.name, mirrors: s.mirrors });
+      const base = (s: any): Session => ({ id: `session-${s.id}`, serverId: s.id, serverName: s.name, serverUuid: s.uuid ?? null, mirrors: s.mirrors });
       const newSessions: Session[] = [
         ...snap.sessions.map((r) => ({
           ...base(byId.get(r.serverId)),
@@ -712,6 +714,7 @@ function DesktopApp() {
         // MirrorsPanel can pre-populate "Saved on this node" without
         // another round-trip to the backend.
         mirrors: server.mirrors,
+        serverUuid: server.uuid ?? null,
         // Commands to auto-run once on the first terminal (see SessionView).
         runOnConnect: server.run_on_connect || "",
       }]);
@@ -1609,6 +1612,7 @@ function DesktopApp() {
               <SettingsPanel
                 settings={appSettings}
                 setSettings={setAppSettings}
+                servers={servers}
                 isMobile={isMobile}
                 onOpenLogs={() => setActiveView("logs")}
               />

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, memo, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { TerminalSquare, Folder, Network, AlertTriangle, Check, X, ShieldAlert, KeyRound, Play, Library, Info, Container, Plus, SplitSquareHorizontal, Columns, Rows, RotateCw } from "lucide-react";
+import { TerminalSquare, Folder, Network, AlertTriangle, Check, X, ShieldAlert, KeyRound, Play, Library, Info, Container, Plus, SplitSquareHorizontal, Columns, Rows, RotateCw, CloudUpload, Loader2 } from "lucide-react";
 import TerminalView from "./TerminalView";
 import SftpWorkspace from "./SftpWorkspace";
 import TunnelsPanel from "./TunnelsPanel";
@@ -12,6 +12,19 @@ import { useIsCompact, useViewportWidth } from "../hooks/useViewport";
 import { RenameInput } from "../ui/renameInput";
 import { onRovingKeyDown } from "../ui/rovingKeys";
 import { fontFamilyCss, readFontFamily, readFontSize } from "../util/terminalFont";
+import { readShellSyncPairs, useShellSyncServer, type ShellSyncPair } from "../util/shellSync";
+
+// What the shell-config push commands answer (mirror.rs' ShellSync* types).
+type ShellSyncShells = { remote_shell: string; local_shell: string; shell_mismatch: boolean };
+type ShellSyncEntry = { local: string; remote: string; size: number; action: string; reason: string | null; crlf: boolean };
+type ShellSyncReport = { home: string; entries: ShellSyncEntry[]; total_bytes: number };
+type ShellSyncPushResult = { pushed: number; bytes: number; failed: { remote: string; error: string }[]; backup: string | null };
+
+const fmtBytes = (n: number) => {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+};
 
 // Compact "run this tab on its own dedicated SSH connection" toggle, shown in
 // the session toolbar for SFTP and Ports. The status dot reflects the live
@@ -514,6 +527,87 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
   }, [isActiveView]);
 
   const [activeTool, setActiveTool] = useState<ToolId | null>(null);
+
+  // "Push shell config": a one-shot push, not a dockable tool pane, so it
+  // gets its own preview/confirm dialog. Offered on the servers picked in
+  // Settings - Shell config sync (this device's choice).
+  const shellSyncOffered = useShellSyncServer(session.serverUuid);
+  const [shellSyncOpen, setShellSyncOpen] = useState(false);
+  const [shellSyncBusy, setShellSyncBusy] = useState(false);
+  const [shellSyncError, setShellSyncError] = useState<string | null>(null);
+  // The pairs the preview was made for: a push sends exactly those.
+  const [shellSyncPairs, setShellSyncPairs] = useState<ShellSyncPair[]>([]);
+  const [shellSyncShells, setShellSyncShells] = useState<ShellSyncShells | null>(null);
+  const [shellSyncReport, setShellSyncReport] = useState<ShellSyncReport | null>(null);
+  // A push with failures stays open to list them.
+  const [shellSyncResult, setShellSyncResult] = useState<ShellSyncPushResult | null>(null);
+  // Bumped on each opening, so that an answer meant for an earlier one is dropped.
+  const shellSyncRun = useRef(0);
+  const shellSyncPanelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (shellSyncOpen) shellSyncPanelRef.current?.focus();
+  }, [shellSyncOpen]);
+
+  const openShellSync = async () => {
+    const run = ++shellSyncRun.current;
+    const pairs = readShellSyncPairs();
+    setShellSyncOpen(true);
+    setShellSyncError(null);
+    setShellSyncReport(null);
+    setShellSyncResult(null);
+    setShellSyncShells(null);
+    setShellSyncPairs(pairs);
+    if (pairs.length === 0) {
+      setShellSyncError("Nothing to push yet: add files in Settings - Shell config sync.");
+      return;
+    }
+    setShellSyncBusy(true);
+    // Which shell the account logs into, for a note. Always asked: there is
+    // no "use this computer's shell" switch yet, and shell_sync_probe does
+    // nothing when $SHELL is empty. Never in the way of the preview.
+    invoke<ShellSyncShells>("shell_sync_probe", { sessionId: session.id })
+      .then((s) => { if (run === shellSyncRun.current) setShellSyncShells(s); }, () => {});
+    try {
+      const report = await invoke<ShellSyncReport>("shell_sync_preview", { sessionId: session.id, pairs });
+      if (run === shellSyncRun.current) setShellSyncReport(report);
+    } catch (e: any) {
+      if (run === shellSyncRun.current) setShellSyncError(String(e));
+    } finally {
+      if (run === shellSyncRun.current) setShellSyncBusy(false);
+    }
+  };
+
+  const confirmShellSync = async () => {
+    if (!shellSyncReport) return;
+    setShellSyncBusy(true);
+    setShellSyncError(null);
+    try {
+      const result = await invoke<ShellSyncPushResult>("shell_sync_push", { sessionId: session.id, pairs: shellSyncPairs });
+      const files = `${result.pushed} file${result.pushed === 1 ? "" : "s"} (${fmtBytes(result.bytes)})`;
+      const kept = result.backup ? `; the files it replaced are in ${result.backup}` : "";
+      if (result.failed.length === 0) {
+        addLog(`Shell config: pushed ${files} to ${session.serverName}${kept}.`, "success");
+        setShellSyncOpen(false);
+      } else {
+        addLog(`Shell config: pushed ${files} to ${session.serverName}, ${result.failed.length} failed${kept}.`, "warn");
+        setShellSyncResult(result);
+      }
+    } catch (e: any) {
+      setShellSyncError(String(e));
+    } finally {
+      setShellSyncBusy(false);
+    }
+  };
+
+  // A push under way: closing then would leave its outcome nowhere to show.
+  const shellSyncPushing = shellSyncBusy && !!shellSyncReport;
+  const closeShellSync = () => {
+    if (shellSyncPushing) return;
+    shellSyncRun.current++;
+    setShellSyncBusy(false);
+    setShellSyncOpen(false);
+  };
+  const shellInert = shellSyncOpen ? true : undefined;
   // Right end of the tool tab row, where the open pane's ToolPanelActions portal in.
   const [toolHeaderSlot, setToolHeaderSlot] = useState<HTMLDivElement | null>(null);
   // Split-pane state — an ORDERED array of terminal IDs that currently
@@ -1204,7 +1298,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
 
   // Connected State with Nested Tabs
   return (
-    <div className="flex-1 flex flex-col bg-background overflow-hidden animate-in fade-in">
+    <div className="relative flex-1 flex flex-col bg-background overflow-hidden animate-in fade-in">
       {/* Auth prompts during an AUTO-RECONNECT. The full-screen view above only
           renders on the first connect (reconnectAttempt===0); once a reconnect
           cycle is running we show the terminal behind a slim banner, so a
@@ -1225,7 +1319,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
           full chrome and 2-3 sessions side-by-side would fight for
           vertical space with duplicate toolbars. */}
       {!chromeless && (
-      <div className={`h-12 border-b border-white/5 bg-[#121214]/50 flex items-center shrink-0 justify-between gap-1 ${activeTool ? 'pl-2 sm:pl-4' : 'px-2 sm:px-4'}`}>
+      <div inert={shellInert} className={`h-12 border-b border-white/5 bg-[#121214]/50 flex items-center shrink-0 justify-between gap-1 ${activeTool ? 'pl-2 sm:pl-4' : 'px-2 sm:px-4'}`}>
         <div
           className={`flex items-center gap-1 overflow-x-auto no-scrollbar flex-1 mr-1 sm:mr-4 mask-fade-right ${activeTool && isCompact ? 'hidden' : ''}`}
           onWheel={(e) => { e.currentTarget.scrollLeft += e.deltaY; }}
@@ -1377,6 +1471,20 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
               <span className="hidden md:inline">{label}</span>
             </button>
           ))}
+          {/* One-shot push, not a tool pane: only on the servers picked in
+              Settings - Shell config sync. Opens a preview, then pushes. */}
+          {shellSyncOffered && (
+            <button
+              onClick={openShellSync}
+              disabled={status !== 'connected'}
+              title="Push shell config: your files from Settings - Shell config sync, to this server"
+              aria-label="Push shell config"
+              className="h-10 sm:h-9 px-3 rounded-lg flex items-center gap-2 text-[13px] font-medium text-zinc-400 hover:text-zinc-100 hover:bg-white/5 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+            >
+              <CloudUpload size={16} className="shrink-0" />
+              <span className="hidden md:inline">Shell</span>
+            </button>
+          )}
         </div>
         )}
       </div>
@@ -1514,7 +1622,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
             isWaiting    ? `Auto-reconnect in ${countdown}s · attempt ${reconnectAttempt}` :
                            "Session disconnected";
           return (
-            <div className={`shrink-0 px-4 py-2 border-b flex items-center justify-between gap-3 animate-in fade-in ${tone}`}>
+            <div inert={shellInert} className={`shrink-0 px-4 py-2 border-b flex items-center justify-between gap-3 animate-in fade-in ${tone}`}>
               <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider">
                 <AlertTriangle size={14} />
                 <span>{heading}</span>
@@ -1546,7 +1654,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
           "back to terminal" affordance (clicking the active tool toggles
           it off). This avoids squeezing a usable terminal + tool into a
           mobile-sized window. */}
-      <div className="flex-1 flex overflow-hidden relative bg-[#09090b]">
+      <div inert={shellInert} className="flex-1 flex overflow-hidden relative bg-[#09090b]">
         {/* Left Panel: Active Terminals.
             On compact + activeTool, hide entirely so the tool fills the
             screen. Terminals stay mounted (no PTY teardown) — just CSS
@@ -1814,6 +1922,171 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
           </div>
         </div>
       </div>
+
+      {/* Push shell config: preview, then confirm. Scoped to this session
+          (absolute, not a document.body portal). The session behind it is
+          inert while it's open. Escape closes it, unless a push is in flight. */}
+      {shellSyncOpen && (() => {
+        const entries = shellSyncReport?.entries ?? [];
+        const pushes = entries.filter((e) => e.action === "new" || e.action === "update" || e.action === "server-newer");
+        const replaces = pushes.some((e) => e.action !== "new");
+        const badge = (e: ShellSyncEntry): [string, string] => {
+          switch (e.action) {
+            case "new": return ["new", "text-emerald-400"];
+            case "update": return ["update", "text-amber-400"];
+            case "server-newer": return ["newer on the server", "text-rose-400"];
+            case "skip-private": return [`not pushed: ${e.reason ?? "private"}`, "text-zinc-500"];
+            case "skip-link": return ["a link there: left alone", "text-zinc-500"];
+            case "skip-folder": return ["a folder there: left alone", "text-zinc-500"];
+            default: return ["not a file there: left alone", "text-zinc-500"];
+          }
+        };
+        const remoteShell = shellSyncShells?.remote_shell.split("/").pop() || "another shell";
+        return (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={`shell-sync-title-${session.id}`}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.stopPropagation();
+                closeShellSync();
+              }
+            }}
+            className="absolute inset-0 z-50 flex items-start justify-center bg-black/70 backdrop-blur-sm p-4 sm:p-8 overflow-y-auto"
+          >
+            <div
+              ref={shellSyncPanelRef}
+              tabIndex={-1}
+              className="max-w-xl w-full mt-6 sm:mt-12 bg-[#121215] border border-white/10 rounded-2xl shadow-2xl overflow-hidden outline-none"
+            >
+              <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2 min-w-0">
+                  <CloudUpload size={15} className="text-primary shrink-0" />
+                  <h3 id={`shell-sync-title-${session.id}`} className="text-sm font-semibold text-zinc-100 truncate">
+                    Push shell config - {session.serverName}
+                  </h3>
+                </div>
+                <button
+                  onClick={closeShellSync}
+                  disabled={shellSyncPushing}
+                  aria-label="Close"
+                  className="shrink-0 text-zinc-500 hover:text-white transition-colors disabled:opacity-40"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+
+              <div className="px-5 py-4 space-y-3 max-h-[60vh] overflow-y-auto">
+                {shellSyncBusy && !shellSyncReport && (
+                  <div className="flex items-center gap-2 text-sm text-zinc-400 py-4">
+                    <Loader2 size={14} className="animate-spin" /> Checking what would change...
+                  </div>
+                )}
+
+                {shellSyncError && (
+                  <div className="flex items-start gap-2 text-[12px] text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2.5">
+                    <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                    <span className="whitespace-pre-line break-words min-w-0">{shellSyncError}</span>
+                  </div>
+                )}
+
+                {shellSyncShells?.shell_mismatch && !shellSyncResult && (
+                  <div className="flex items-start gap-2 text-[12px] text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2.5">
+                    <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                    <span>
+                      This computer's shell is <strong>{shellSyncShells.local_shell}</strong>, but this account
+                      logs into <strong>{remoteShell}</strong> on the server: files for {shellSyncShells.local_shell} are
+                      only read there once the account's shell changes.
+                    </span>
+                  </div>
+                )}
+
+                {shellSyncResult && (
+                  <div className="space-y-2">
+                    <p className="text-[12px] text-zinc-300">
+                      Pushed {shellSyncResult.pushed} file{shellSyncResult.pushed === 1 ? "" : "s"}. These failed:
+                    </p>
+                    <div className="rounded-lg border border-red-500/20 divide-y divide-white/5 overflow-hidden">
+                      {shellSyncResult.failed.map((f, i) => (
+                        <div key={i} className="px-3 py-2 text-[12px]">
+                          <div className="truncate text-zinc-200" title={f.remote}>{f.remote}</div>
+                          <div className="text-red-400 break-words">{f.error}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {shellSyncResult.backup && (
+                      <p className="text-[11px] text-zinc-500">The files it replaced are in {shellSyncResult.backup} on the server.</p>
+                    )}
+                  </div>
+                )}
+
+                {shellSyncReport && !shellSyncResult && (
+                  entries.length === 0 ? (
+                    <p className="text-sm text-zinc-400 py-2">Everything is up to date: nothing to push.</p>
+                  ) : (
+                    <>
+                      <p className="text-[11px] text-zinc-500">
+                        {pushes.length === 0
+                          ? "Nothing to push"
+                          : `${pushes.length} file${pushes.length === 1 ? "" : "s"} · ${fmtBytes(shellSyncReport.total_bytes)}`}
+                        {" "}· into {shellSyncReport.home} on the server
+                      </p>
+                      <div className="rounded-lg border border-white/10 divide-y divide-white/5 overflow-hidden">
+                        {entries.map((e, i) => {
+                          const [text, tone] = badge(e);
+                          const sends = pushes.includes(e);
+                          return (
+                            <div key={i} className="px-3 py-2 text-[12px]">
+                              <div className="flex items-center gap-2">
+                                <span className={`flex-1 min-w-0 truncate ${sends ? "text-zinc-300" : "text-zinc-500"}`} title={`${e.local} -> ${e.remote}`}>
+                                  {e.remote}
+                                </span>
+                                {sends && <span className="shrink-0 text-zinc-500">{fmtBytes(e.size)}</span>}
+                                <span className={`shrink-0 text-[10px] font-bold uppercase tracking-wide ${tone}`}>{text}</span>
+                              </div>
+                              {e.crlf && (
+                                <p className="mt-0.5 text-[11px] text-amber-300">
+                                  Windows line endings: a shell on the server reads the extra \r as part of each line.
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {replaces && (
+                        <p className="text-[11px] text-zinc-500">
+                          A file it replaces is moved to ~/.submarine-trash on the server first and keeps its permissions.
+                        </p>
+                      )}
+                    </>
+                  )
+                )}
+              </div>
+
+              <div className="px-5 py-3.5 border-t border-white/5 flex items-center justify-end gap-2">
+                <button
+                  onClick={closeShellSync}
+                  disabled={shellSyncPushing}
+                  className="h-8 px-3 rounded-lg text-xs font-semibold text-zinc-300 hover:bg-white/5 transition-colors disabled:opacity-40"
+                >
+                  {shellSyncResult ? "Close" : "Cancel"}
+                </button>
+                {!shellSyncResult && (
+                  <button
+                    onClick={confirmShellSync}
+                    disabled={shellSyncBusy || pushes.length === 0}
+                    className="h-8 px-3 rounded-lg text-xs font-semibold bg-primary/10 text-primary hover:bg-primary/20 transition-colors disabled:opacity-40 disabled:pointer-events-none flex items-center gap-1.5"
+                  >
+                    {shellSyncPushing ? <Loader2 size={13} className="animate-spin" /> : <CloudUpload size={13} />}
+                    Push
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 
