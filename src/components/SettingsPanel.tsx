@@ -5,6 +5,7 @@ import {
   isFontAvailable, primaryFontName, sanitizeFontFamily,
 } from "../util/terminalFont";
 import FontPicker from "./FontPicker";
+import { loadInstalledFonts } from "../util/systemFonts";
 
 const PrefToggle = ({ checked, onToggle, label }: { checked: boolean; onToggle: () => void; label: string }) => (
   <button
@@ -50,7 +51,25 @@ function TerminalFontSettings({ settings, setSettings }: any) {
     commitTimer.current = window.setTimeout(() => commitFamily(v), 500);
   };
 
-  const installed = useMemo(() => isFontAvailable(familyDraft), [familyDraft]);
+  // Families installed on this device: the list the picker shows. The canvas
+  // probe in isFontAvailable can miss a font the webview does draw (seen on
+  // macOS, #59), and a font picked under "Installed on this device" must not
+  // then be called missing. No warning until the list is in, so it can't
+  // flash on and off; if the list can't be read, the probe decides alone.
+  const [listed, setListed] = useState<Set<string> | null>(null);
+  useEffect(() => {
+    let alive = true;
+    loadInstalledFonts().then(
+      (fonts) => { if (alive) setListed(new Set(fonts.map((f) => f.family.toLowerCase()))); },
+      () => { if (alive) setListed(new Set()); },
+    );
+    return () => { alive = false; };
+  }, []);
+
+  const installed = useMemo(
+    () => listed === null || listed.has(primaryFontName(familyDraft).toLowerCase()) || isFontAvailable(familyDraft),
+    [familyDraft, listed],
+  );
   const previewFamily = fontFamilyCss(familyDraft);
 
   return (
