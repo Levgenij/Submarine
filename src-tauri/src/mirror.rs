@@ -1551,8 +1551,16 @@ async fn run_mirror(
     // own events waiting until all of it is sent.
     let mut backlog: VecDeque<PathBuf> = VecDeque::new();
     const BACKLOG_AT_ONCE: usize = 16;
+    // process_event sets this when the watched folder itself is no longer a
+    // directory, and deletes nothing in that case. The loop stops before the
+    // rest of a not-found burst can remove anything on the server.
+    let mut local_root_gone = false;
 
     loop {
+        if local_root_gone {
+            shutdown(debouncer, forward_join).await;
+            return Err(LOCAL_ROOT_GONE.to_string());
+        }
         tokio::select! {
             biased;
             _ = &mut stop_rx => {
@@ -1578,7 +1586,8 @@ async fn run_mirror(
                 let in_batch: HashSet<PathBuf> = paths.iter().cloned().collect();
                 for path in paths {
                     let mut found = process_event(&app, &session_id, &mirror_id, &local_root, &spec,
-                                                  &*sftp, &status, &path).await;
+                                                  &*sftp, &status, &path, &mut local_root_gone).await;
+                    if local_root_gone { break; }
                     found.retain(|entry| !in_batch.contains(entry));
                     {
                         let mut s = status.lock().await;
@@ -1592,7 +1601,8 @@ async fn run_mirror(
                 for _ in 0..BACKLOG_AT_ONCE {
                     let Some(path) = backlog.pop_front() else { break };
                     let found = process_event(&app, &session_id, &mirror_id, &local_root, &spec,
-                                              &*sftp, &status, &path).await;
+                                              &*sftp, &status, &path, &mut local_root_gone).await;
+                    if local_root_gone { break; }
                     {
                         let mut s = status.lock().await;
                         s.queue_depth = s.queue_depth.saturating_sub(1).saturating_add(found.len() as u32);
@@ -1662,12 +1672,26 @@ async fn entries_of_new_remote_dir(
     Ok(entries)
 }
 
+/// Why a mirror stops when the folder it mirrors goes away.
+const LOCAL_ROOT_GONE: &str = "The local folder is gone (deleted, renamed, or on a drive or share \
+that went away). The mirror stopped, and nothing more is deleted on the server. Start it again once \
+the folder is back.";
+
+/// Whether the folder being mirrored is still there. When it isn't (it was
+/// renamed or deleted, its drive was unplugged, its share unmounted), every
+/// path in it reads as "not found", and that is not the user deleting those
+/// files one by one.
+async fn local_root_present(local_root: &Path) -> bool {
+    tokio::fs::metadata(local_root).await.map(|m| m.is_dir()).unwrap_or(false)
+}
+
 /// Apply a single debounced FS event. Because the debouncer collapses
 /// bursts, we only care about the *current* state of the path: still
 /// present → upload (overwrites), gone → delete on remote.
 ///
 /// Returns more paths to handle the same way: the entries of a directory
-/// that was new to the server.
+/// that was new to the server. Sets `local_root_gone` when that folder is
+/// no longer a directory: nothing was deleted, and the watcher must stop.
 async fn process_event(
     app: &AppHandle,
     session_id: &str,
@@ -1677,6 +1701,7 @@ async fn process_event(
     sftp: &SftpSession,
     status: &Arc<Mutex<MirrorStatus>>,
     path: &Path,
+    local_root_gone: &mut bool,
 ) -> Vec<PathBuf> {
     // Excludes — apply BEFORE we look at metadata so we don't even stat
     // huge dirs like node_modules.
@@ -1738,6 +1763,13 @@ async fn process_event(
             // remapping ownership) and would trigger a real remote delete
             // if we lumped them together — an unrecoverable hard-rm when
             // spec.soft_delete=false.
+            //
+            // And only while the mirrored folder itself is there: without
+            // it, everything in it reads as gone (see local_root_present).
+            if !local_root_present(local_root).await {
+                *local_root_gone = true;
+                return Vec::new();
+            }
             let res = if spec.soft_delete {
                 sftp_soft_delete(session_id, sftp, &spec.remote, &remote).await
             } else {
@@ -1772,6 +1804,7 @@ async fn process_event(
 
 #[cfg(test)]
 mod tests {
+    use super::local_root_present;
     use crate::test_sftp::{self, Node::*};
 
     #[tokio::test]
@@ -1782,6 +1815,28 @@ mod tests {
         let left: Vec<String> = tree.lock().unwrap().keys().cloned().collect();
         assert_eq!(left, ["/srv", "/srv/keep"]);
         super::sftp_hard_delete("mirror-hard-delete-test", &sftp, "/srv/old").await.expect("gone already is done");
+    }
+
+    #[tokio::test]
+    async fn a_mirrored_folder_that_is_gone_is_told_apart_from_deleted_files() {
+        let dir = std::env::temp_dir().join(format!("submarine-mirror-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("file.txt"), b"x").unwrap();
+        assert!(local_root_present(&dir).await);
+        // A file in it going away doesn't make the folder gone.
+        std::fs::remove_file(dir.join("file.txt")).unwrap();
+        assert!(local_root_present(&dir).await);
+        // A file where the folder was is no folder to mirror.
+        assert!(!local_root_present(&dir.join("sub").join("missing")).await);
+        std::fs::write(dir.join("plain"), b"x").unwrap();
+        assert!(!local_root_present(&dir.join("plain")).await);
+        // Renamed away: gone, under the name the mirror knows.
+        let moved = dir.with_extension("moved");
+        let _ = std::fs::remove_dir_all(&moved);
+        std::fs::rename(&dir, &moved).unwrap();
+        assert!(!local_root_present(&dir).await);
+        let _ = std::fs::remove_dir_all(&moved);
     }
 
     /// The first sync uploads several files at once. Each one makes the folders
