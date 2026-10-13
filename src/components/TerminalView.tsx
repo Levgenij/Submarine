@@ -9,6 +9,7 @@ import { useIsNarrow } from '../hooks/useViewport';
 import { MobileKeyBar, ModifiersState, ModKey, SpecialKey } from './MobileKeyBar';
 import { useBroadcast } from '../ui/broadcast';
 import HistorySearchOverlay from './HistorySearchOverlay';
+import { fontFamilyCss, readFontFamily, readFontSize } from '../util/terminalFont';
 import { IS_ANDROID } from '../util/platform';
 
 // Does the recent remote OUTPUT look like a no-echo password / passphrase
@@ -462,8 +463,8 @@ const TerminalView = ({
 
     const term = new Terminal({
       cursorBlink: true,
-      fontSize: parseInt(localStorage.getItem('submarine-terminal-font-size') || '14'),
-      fontFamily: 'Consolas, "Courier New", monospace',
+      fontSize: readFontSize(),
+      fontFamily: fontFamilyCss(readFontFamily()),
       theme: {
         background: '#09090b',
         foreground: '#e4e4e7',
@@ -820,13 +821,30 @@ const TerminalView = ({
     });
     resizeObserver.observe(terminalRef.current);
     
-    // Handle Settings Change
+    // Handle Settings Change - font size and face apply live to open terminals.
+    let fontDisposed = false;
+    // A newer change can start another fonts.load before the previous one
+    // settles. Only the latest generation may apply.
+    let fontApplyGen = 0;
     const handleSettingsChange = () => {
-      const newSize = parseInt(localStorage.getItem('submarine-terminal-font-size') || '14');
-      if (term.options.fontSize !== newSize) {
-        term.options.fontSize = newSize;
-        fitAddon.fit();
-      }
+      const generation = ++fontApplyGen;
+      const size = readFontSize();
+      const family = fontFamilyCss(readFontFamily());
+      if (term.options.fontSize === size && term.options.fontFamily === family) return;
+      const apply = () => {
+        if (fontDisposed || generation !== fontApplyGen) return;
+        term.options.fontSize = size;
+        term.options.fontFamily = family;
+        try {
+          fitAddon.fit();
+          term.refresh(0, Math.max(0, term.rows - 1));
+        } catch { /* hidden tab (0×0) - the ResizeObserver refits on show */ }
+      };
+      // Wait until the face is ready so xterm measures the real glyph width,
+      // not the fallback's (a mis-measured cell leaves gaps or overlaps).
+      const fonts = (document as any).fonts;
+      if (fonts?.load) fonts.load(`${size}px ${family}`).then(apply, apply);
+      else apply();
     };
     window.addEventListener('submarine-settings-changed', handleSettingsChange);
 
@@ -872,6 +890,7 @@ const TerminalView = ({
     window.visualViewport?.addEventListener('resize', onVvResize);
 
     return () => {
+      fontDisposed = true;
       window.removeEventListener('submarine-settings-changed', handleSettingsChange);
       resizeObserver.disconnect();
       onDataDisposable.dispose();
