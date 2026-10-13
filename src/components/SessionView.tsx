@@ -14,51 +14,100 @@ import { RenameInput } from "../ui/renameInput";
 import { onRovingKeyDown } from "../ui/rovingKeys";
 
 // Compact "run this tab on its own dedicated SSH connection" toggle, shown in
-// the SFTP and Port-Forwarding tab headers. The status dot reflects the live
+// the session toolbar for SFTP and Ports. The status dot reflects the live
 // state of the dedicated connection: green = up, amber (pulsing) = opening /
 // applies-on-connect, red = couldn't be established (falling back to the main
 // session). No dot when the toggle is off.
-const SepToggle = ({ on, onToggle, status, title, onReconnect, showLabel = true }: {
+//
+// The visible word is "Dedicated". Hovering it, or moving keyboard focus to
+// it, shows a short guide: what the option does (`hint`), when the terminal's
+// connection is used anyway, and what the dot's colors mean.
+const SEP_GUIDE_WIDTH = 264;
+const SEP_GUIDE_HEIGHT = 136; // enough for the longest hint; only used to pick a side
+const SepToggle = ({ on, onToggle, status, hint, onReconnect, showLabel = true }: {
   on: boolean;
   onToggle: (v: boolean) => void;
   status: 'ready' | 'pending' | 'failed' | 'off';
-  title: string;
+  hint: string;
   onReconnect?: () => void;
-  /** False in a narrow pane: just the box, the label moves to the tooltip. */
+  /** False in a narrow toolbar: just the box. The guide still names the option. */
   showLabel?: boolean;
-}) => (
-  <span className="flex items-center gap-1.5">
-    <label className="group flex items-center gap-2 text-[13px] text-zinc-300 hover:text-white cursor-pointer select-none" title={title}>
-      <input type="checkbox" className="peer sr-only" aria-label="Dedicated session" checked={on} onChange={(e) => onToggle(e.target.checked)} />
-      <span className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-primary/50 ${
-        on ? 'bg-primary border-primary text-black' : 'border-zinc-500 group-hover:border-zinc-300'
-      }`}>
-        {on && <Check size={12} strokeWidth={3} />}
-      </span>
-      {showLabel && <span className="font-medium whitespace-nowrap">Dedicated session</span>}
-      {on && (
-        <span
-          className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-            status === 'ready' ? 'bg-emerald-400' : status === 'failed' ? 'bg-red-400' : 'bg-amber-400 animate-pulse'
-          }`}
-        />
-      )}
-    </label>
-    {/* Reconnect just the dedicated connection — outside the <label> so a
-        click can't toggle the checkbox. Shown whenever the toggle is on and
-        no connect attempt is already in flight; also the retry affordance
-        after a red (failed) dot. */}
-    {on && onReconnect && status !== 'pending' && (
-      <button
-        onClick={onReconnect}
-        title="Reconnect the dedicated session"
-        className="p-0.5 rounded text-zinc-500 hover:text-white hover:bg-white/10 transition-colors"
+}) => {
+  // The label's box while its guide shows; null while it is hidden.
+  const [guideAt, setGuideAt] = useState<{ left: number; top: number; bottom: number } | null>(null);
+  const showGuide = (label: HTMLElement) => {
+    const r = label.getBoundingClientRect();
+    setGuideAt({ left: r.left, top: r.top, bottom: r.bottom });
+  };
+  return (
+    <span className="flex items-center gap-1.5">
+      <label
+        className="group flex items-center gap-2 text-[13px] text-zinc-300 hover:text-white cursor-pointer select-none"
+        // Touch screens fake a hover on tap, which would leave the guide up
+        // after every toggle, so only a real pointer opens it.
+        onMouseEnter={(e) => { if (window.matchMedia('(hover: hover)').matches) showGuide(e.currentTarget); }}
+        onMouseLeave={() => setGuideAt(null)}
+        // Keyboard focus only: a mouse click focuses the checkbox too, and
+        // the guide would then outlive the pointer leaving.
+        onFocus={(e) => { if (e.target.matches(':focus-visible')) showGuide(e.currentTarget); }}
+        onBlur={() => setGuideAt(null)}
       >
-        <RotateCw size={12} />
-      </button>
-    )}
-  </span>
-);
+        <input type="checkbox" className="peer sr-only" aria-label="Dedicated session" checked={on} onChange={(e) => onToggle(e.target.checked)} />
+        <span className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-primary/50 ${
+          on ? 'bg-primary border-primary text-black' : 'border-zinc-500 group-hover:border-zinc-300'
+        }`}>
+          {on && <Check size={12} strokeWidth={3} />}
+        </span>
+        {showLabel && <span className="font-medium whitespace-nowrap">Dedicated</span>}
+        {on && (
+          <span
+            className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+              status === 'ready' ? 'bg-emerald-400' : status === 'failed' ? 'bg-red-400' : 'bg-amber-400 animate-pulse'
+            }`}
+          />
+        )}
+      </label>
+      {/* Through a portal: the toolbar clips overflow. Below the label, or
+          above it when the viewport is short. */}
+      {guideAt && createPortal(
+        <div
+          role="tooltip"
+          style={{
+            width: SEP_GUIDE_WIDTH,
+            left: Math.max(8, Math.min(guideAt.left, window.innerWidth - SEP_GUIDE_WIDTH - 8)),
+            ...(guideAt.bottom + 6 + SEP_GUIDE_HEIGHT <= window.innerHeight
+              ? { top: guideAt.bottom + 6 }
+              : { bottom: window.innerHeight - guideAt.top + 6 }),
+          }}
+          className="fixed z-[9999] pointer-events-none bg-[#15151a] border border-white/10 rounded-lg shadow-2xl px-3 py-2 text-[11px] leading-snug text-zinc-300"
+        >
+          <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-zinc-100">Dedicated session</div>
+          <p>{hint}</p>
+          <p className="mt-1 text-zinc-400">When it is off, or that connection can't be opened, the terminal's connection is used.</p>
+          <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-zinc-400">
+            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />connected</span>
+            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-amber-400" />connecting</span>
+            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-red-400" />failed</span>
+          </p>
+        </div>,
+        document.body
+      )}
+      {/* Reconnect just the dedicated connection - outside the <label> so a
+          click can't toggle the checkbox. Shown whenever the toggle is on and
+          no connect attempt is already in flight; also the retry affordance
+          after a red (failed) dot. */}
+      {on && onReconnect && status !== 'pending' && (
+        <button
+          onClick={onReconnect}
+          title="Reconnect the dedicated session"
+          className="p-0.5 rounded text-zinc-500 hover:text-white hover:bg-white/10 transition-colors"
+        >
+          <RotateCw size={12} />
+        </button>
+      )}
+    </span>
+  );
+};
 
 const TOOLS = [
   { id: 'sftp',    icon: Folder,  label: 'SFTP',    hint: 'SFTP — file browser' },
@@ -1655,7 +1704,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   on={separateSftp}
                   onToggle={toggleSeparateSftp}
                   status={!separateSftp ? 'off' : sftpConnStatus === 'ready' ? 'ready' : sftpConnStatus === 'failed' ? 'failed' : 'pending'}
-                  title="Run SFTP over its own dedicated SSH connection instead of sharing the terminal's session"
+                  hint="SFTP runs on its own SSH connection, so large transfers don't slow the terminal down."
                   onReconnect={reconnectSftpConn}
                   showLabel={toolBarWide}
                 />
@@ -1683,7 +1732,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   on={separateFwd}
                   onToggle={toggleSeparateFwd}
                   status={!separateFwd ? 'off' : fwdConnStatus === 'ready' ? 'ready' : fwdConnStatus === 'failed' ? 'failed' : 'pending'}
-                  title="Run port-forwarding over its own dedicated SSH connection instead of sharing the terminal's session"
+                  hint="Port forwards run on their own SSH connection, so heavy traffic doesn't slow the terminal down."
                   onReconnect={reconnectFwdConn}
                   showLabel={toolBarWide}
                 />
