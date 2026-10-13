@@ -486,6 +486,18 @@ pub struct ClientHandler {
     /// tell "user dismissed the prompt" from "network drop", which used to
     /// surface as "Auth failed" in the UI.
     pub fp_outcome: std::sync::Arc<std::sync::atomic::AtomicI8>,
+    /// Set true the instant a fingerprint prompt is emitted and cleared once
+    /// the human answers (or the 90s wait times out). The connect driver
+    /// watches this same Arc so its 15s handshake timeout bounds only the
+    /// pre-prompt transport and key exchange: while a prompt is pending the
+    /// wait extends to the hard cap instead of killing the prompt with a
+    /// handshake-stall error. See `drive_connect_with_prompt_timeout`.
+    pub prompt_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// False for a secondary connection, and for a jump hop whose session id
+    /// contains `::`. Those connections have no fingerprint prompt of their
+    /// own, so an unknown or changed key is refused at once instead of
+    /// waiting on a prompt nobody can see.
+    pub prompt_allowed: bool,
 }
 
 impl client::Handler for ClientHandler {
@@ -595,6 +607,23 @@ impl client::Handler for ClientHandler {
             return Ok(true);
         }
 
+        if !self.prompt_allowed {
+            // A dedicated SFTP / port-forwarding connection, or a jump hop for
+            // one, cannot show a prompt. The primary connection normally
+            // verifies the host just before, so this only happens when the two
+            // reach hosts with different keys. Refuse, with no prompt event.
+            let _ = self.app.emit(&format!("session-log-{}", self.session_id), serde_json::json!({
+                "msg": if mismatch {
+                    "The host key has CHANGED. This connection was refused. Reconnect the session to review the key."
+                } else {
+                    "The host key is not trusted yet and this connection cannot ask, so it was refused. Reconnect the session to review the key."
+                },
+                "type": "error"
+            }));
+            self.fp_outcome.store(0, std::sync::atomic::Ordering::SeqCst);
+            return Ok(false);
+        }
+
         if mismatch {
             // Loud, distinct log line for the activity panel — this is the
             // SSH "REMOTE HOST IDENTIFICATION HAS CHANGED" moment.
@@ -609,6 +638,9 @@ impl client::Handler for ClientHandler {
             }));
         }
 
+        // Latch before the prompt is emitted. The connect driver reads this
+        // so the 15s handshake cap covers only the pre-prompt phase.
+        self.prompt_pending.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = self.app.emit(&format!("fingerprint-prompt-{}", self.session_id), serde_json::json!({
             "host": self.server_host,
             "keyType": key_type,
@@ -621,7 +653,7 @@ impl client::Handler for ClientHandler {
             "nonce": self.connect_nonce,
         }));
 
-        if let Some(rx) = self.fp_rx.take() {
+        let decision = if let Some(rx) = self.fp_rx.take() {
             // 90s is enough for a human to read the prompt, switch windows
             // to verify the fingerprint out-of-band, and click. The old 10s
             // window routinely tripped on attentive users and then surfaced
@@ -684,7 +716,11 @@ impl client::Handler for ClientHandler {
             }
         } else {
             Ok(false)
-        }
+        };
+        // The human window has resolved (accepted, rejected, or timed out).
+        // Clear the flag so the driver's prompt-aware timeout can settle.
+        self.prompt_pending.store(false, std::sync::atomic::Ordering::SeqCst);
+        decision
     }
 
     /// Inbound channel from a server-side `tcpip_forward` we set up earlier
