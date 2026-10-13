@@ -382,6 +382,31 @@ pub struct SshState {
     /// double-firing `session-disconnected-{id}` after the user has
     /// already reconnected.
     pub session_generation: Arc<Mutex<HashMap<String, u64>>>,
+    /// Secrets the user typed at connect time when the saved node, login, or key
+    /// had none. Keyed by `<base session id>|<target>`, so a reconnect or a
+    /// dedicated `::sftp` / `::fwd` secondary reuses what the user already
+    /// supplied instead of prompting again. See `PromptedSecrets`.
+    pub prompted_secrets: Arc<Mutex<HashMap<String, PromptedSecrets>>>,
+}
+
+/// Connect-time secrets the user typed when a saved node, login, or key had none.
+/// Held only in memory in `SshState::prompted_secrets`. The map key is the base
+/// session id plus the target, so a reconnect or a dedicated `::sftp` / `::fwd`
+/// secondary reuses what the user already supplied. Every field is `Zeroizing`,
+/// so the plaintext is wiped on drop. Never persisted, logged, emitted, or synced.
+/// The tab's entries are dropped when the base tab disconnects or the profile
+/// closes. Reaping a `::sftp` / `::fwd` secondary keeps them, because the tab is
+/// still alive. A single secret is cleared as soon as the server rejects it.
+#[derive(Clone, Default)]
+pub struct PromptedSecrets {
+    /// Accepted password for the node's own login.
+    pub password: Option<zeroize::Zeroizing<String>>,
+    /// Accepted passphrase that decrypted the node's own key.
+    pub passphrase: Option<zeroize::Zeroizing<String>>,
+    /// Accepted password for the ProxyJump bastion's login.
+    pub jump_password: Option<zeroize::Zeroizing<String>>,
+    /// Accepted passphrase that decrypted the ProxyJump bastion's key.
+    pub jump_passphrase: Option<zeroize::Zeroizing<String>>,
 }
 
 impl SshState {
@@ -453,6 +478,7 @@ impl SshState {
             transfer_cancels: Arc::new(Mutex::new(HashMap::new())),
             session_tunnel_specs: Arc::new(Mutex::new(HashMap::new())),
             session_generation: Arc::new(Mutex::new(HashMap::new())),
+            prompted_secrets: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

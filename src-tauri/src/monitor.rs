@@ -756,8 +756,10 @@ fn classify_auth(auth: &NodeAuth) -> Result<(Option<(String, Option<String>)>, O
         .filter(|p| !p.is_empty())
         .cloned();
     if key.is_none() && pass.is_none() {
+        // A node saved without its password is asked for it at connect time,
+        // but monitoring has no UI to ask on.
         return Err(
-            "No credential available — vault entry has neither a key nor a password".into(),
+            "No saved password or key for this node - monitoring can't ask for one; save the password to monitor it".into(),
         );
     }
     Ok((key, pass))
@@ -836,11 +838,29 @@ async fn connect_for_monitor(
                     Err(e) => last_err = Some(format!("publickey: {}", e)),
                 }
             }
+            // Monitoring has no UI to prompt on, so a key that needs a
+            // passphrase we don't have is a clear error, not a hang. The user
+            // saves the passphrase on the key to monitor it.
             Err(e) => {
-                last_err = Some(format!(
-                    "Could not decode private key (wrong passphrase or unsupported format): {}",
-                    e
-                ));
+                last_err = Some(match crate::classify_key_decode_error(pem, &e) {
+                    crate::KeyDecodeError::NeedsPassphrase => {
+                        let saved = passphrase.as_deref().is_some_and(|p| !p.is_empty());
+                        if saved {
+                            format!(
+                                "the saved passphrase doesn't unlock the SSH key for {}@{}",
+                                auth.username, auth.host,
+                            )
+                        } else {
+                            format!(
+                                "the SSH key for {}@{} is passphrase-protected but no passphrase is saved; monitoring can't ask for one - save it under Settings › SSH keys",
+                                auth.username, auth.host,
+                            )
+                        }
+                    }
+                    crate::KeyDecodeError::Malformed(message) => {
+                        format!("could not decode private key: {}", message)
+                    }
+                });
             }
         }
     }
