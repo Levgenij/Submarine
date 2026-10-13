@@ -10664,15 +10664,23 @@ fn rm_rf_outcome(result: Result<String, String>) -> Result<(), String> {
     }
 }
 
-/// Recursive delete over plain SFTP. RMDIR only removes empty directories, so
-/// files and symlinks go first (a symlink to a dir is unlinked, never
-/// followed) and dirs afterwards, deepest-first. Explicit stack instead of
-/// async recursion, same as sftp_download_dir. Whatever is already gone
-/// counts as removed, so a tree something else is deleting too still ends Ok.
+/// Recursive delete over plain SFTP. RMDIR is tried before READDIR: it
+/// removes an empty directory, and a Windows junction that LSTAT reports as
+/// a normal folder, without listing or deleting what that junction points
+/// at. A directory RMDIR refuses is emptied first (a symlink is unlinked,
+/// never followed) and removed afterwards, deepest-first. Explicit stack
+/// instead of async recursion, same as sftp_download_dir. Whatever is
+/// already gone counts as removed, so a tree something else is deleting too
+/// still ends Ok.
 pub(crate) async fn sftp_remove_tree(sftp: &russh_sftp::client::SftpSession, path: &str) -> Result<(), String> {
     let mut stack = vec![removable_dir_path(path)?.to_string()];
     let mut dirs = Vec::new();
     while let Some(dir) = stack.pop() {
+        // Success means this directory is gone. Do not list it: a junction
+        // looks like a normal folder, and its listing is the target.
+        if gone_is_ok(sftp.remove_dir(&dir).await).is_ok() {
+            continue;
+        }
         let read = match sftp.read_dir(&dir).await {
             Ok(read) => read,
             Err(e) if is_no_such_file(&e) => continue,
@@ -15278,6 +15286,12 @@ pub(crate) mod test_sftp {
         pub links_listed_as_dirs: bool,
         /// LSTAT of these paths fails with a bare Failure.
         pub lstat_fails: HashSet<String>,
+        /// RMDIR removes these directories even when paths sit under them.
+        /// A listing still shows those paths. LSTAT reports the directory
+        /// itself, which is how a Windows junction looks to SFTP.
+        pub junctions: HashSet<String>,
+        /// READDIR paths, when a test is watching.
+        pub reads: Option<Arc<Mutex<Vec<String>>>>,
     }
 
     pub fn tree(entries: &[(&str, Node)]) -> Tree {
@@ -15343,6 +15357,9 @@ pub(crate) mod test_sftp {
                 self.read.remove(&handle);
                 return Err(StatusCode::Eof);
             }
+            if let Some(reads) = &self.quirks.reads {
+                reads.lock().unwrap().push(handle.clone());
+            }
             let prefix = format!("{}/", handle);
             let files = self.tree.lock().unwrap().iter()
                 .filter_map(|(path, node)| {
@@ -15376,8 +15393,9 @@ pub(crate) mod test_sftp {
         }
 
         async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, StatusCode> {
+            let junction = self.quirks.junctions.contains(&path);
             match self.node(&path) {
-                Some(Node::Dir) if !self.has_children(&path) => {
+                Some(Node::Dir) if junction || !self.has_children(&path) => {
                     self.tree.lock().unwrap().remove(&path);
                     Ok(ok(id))
                 }
@@ -15822,6 +15840,27 @@ mod tests {
         super::sftp_remove_tree(&sftp, "/srv/site").await.unwrap();
         let left: Vec<String> = tree.lock().unwrap().keys().cloned().collect();
         assert_eq!(left, ["/data", "/data/precious", "/srv"], "the link's target must stay");
+    }
+
+    #[tokio::test]
+    async fn remove_tree_does_not_read_a_directory_rmdir_removes() {
+        use test_sftp::Node::*;
+        // `link` is a junction: LSTAT reports a normal folder, RMDIR removes
+        // it, and a listing would show the file it points at. That file must stay.
+        let tree = test_sftp::tree(&[
+            ("/srv", Dir), ("/srv/site", Dir), ("/srv/site/link", Dir),
+            ("/srv/site/link/precious", File),
+        ]);
+        let reads = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut quirks = test_sftp::Quirks::default();
+        quirks.junctions.insert("/srv/site/link".into());
+        quirks.reads = Some(std::sync::Arc::clone(&reads));
+        let sftp = test_sftp::connect(tree.clone(), quirks).await;
+        super::sftp_remove_tree(&sftp, "/srv/site/link").await.unwrap();
+        let seen = reads.lock().unwrap().clone();
+        assert!(seen.is_empty(), "RMDIR removed the directory, so it must not be listed: {:?}", seen);
+        let left: Vec<String> = tree.lock().unwrap().keys().cloned().collect();
+        assert_eq!(left, ["/srv", "/srv/site", "/srv/site/link/precious"]);
     }
 
     #[tokio::test]
