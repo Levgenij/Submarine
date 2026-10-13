@@ -161,6 +161,9 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
   // The ghost owns its own position state; we poke it imperatively so a
   // mousemove never re-renders this workspace (and its FilePanels).
   const ghostRef = useRef<DragGhostHandle>(null);
+  // This workspace root. Hover and mouseup ignore a [data-fs-pane] outside
+  // it, so a release over a tiled neighbor session does not send files there.
+  const rootRef = useRef<HTMLDivElement | null>(null);
 
   // Where a release over the OTHER pane would land: a folder row, the ".."
   // row or a path-bar segment, else that pane as a whole (its current
@@ -185,6 +188,11 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
     ghostRef.current?.show(drag);
     const hit = document.elementFromPoint(drag.x, drag.y);
     const pane = hit?.closest("[data-fs-pane]") ?? null;
+    // A pane outside this workspace belongs to a tiled neighbor session.
+    if (pane && !rootRef.current?.contains(pane)) {
+      markDropHover(null);
+      return;
+    }
     const overOtherPane = !!pane && pane.getAttribute("data-fs-pane") !== drag.paneId;
     markDropHover(overOtherPane ? hit!.closest("[data-fs-drop-path]") ?? pane : null);
   };
@@ -285,8 +293,8 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
   ) : null;
 
   // Cross-pane drop dispatch: when the user releases the mouse anywhere, look
-  // up which pane is under the cursor; if it differs from the source pane,
-  // run the transfer and refresh both panels.
+  // up which pane is under the cursor; if it differs from the source pane and
+  // sits inside this workspace, run the transfer and refresh both panels.
   useEffect(() => {
     const onMouseUp = (e: MouseEvent) => {
       const active = dragRef.current;
@@ -298,7 +306,7 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
       const hit = document.elementFromPoint(e.clientX, e.clientY);
       if (!hit) return;
       const pane = (hit as HTMLElement).closest("[data-fs-pane]") as HTMLElement | null;
-      if (!pane) return;
+      if (!pane || !rootRef.current?.contains(pane)) return;
       const targetPaneId = pane.getAttribute("data-fs-pane");
       if (!targetPaneId || targetPaneId === active.paneId) return;
 
@@ -331,7 +339,7 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
   }, []);
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#0a0a0c] relative">
+    <div ref={rootRef} className="flex-1 flex flex-col h-full overflow-hidden bg-[#0a0a0c] relative">
       {/* Sub-tab row — Files vs Mirror on the left, and for Files the
           panel switcher on the right: Local / Remote show one side at full
           height, Split stacks both (drag-drop between them). The Mirror
