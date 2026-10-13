@@ -34,7 +34,7 @@
 //! nuke the remote copy. The user can flip `soft_delete = false` per
 //! mirror if they actually want hard deletes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -256,8 +256,10 @@ async fn open_sftp(handle: &Arc<Mutex<russh::client::Handle<ClientHandler>>>) ->
 }
 
 /// Equivalent of `mkdir -p` over SFTP. Walks the path components and
-/// creates each missing intermediate directory. Treats AlreadyExists as
-/// success since two mirror tasks may race to create the same parent.
+/// creates each missing intermediate directory. A refused MKDIR is still
+/// success when the path is there afterwards: the first sync runs several
+/// transfers at once, and OpenSSH answers the loser with a bare "Failure",
+/// not "already exists".
 async fn sftp_mkdir_p(sftp: &SftpSession, path: &str) -> Result<(), String> {
     let parts: Vec<&str> = path.trim_start_matches('/').split('/').filter(|p| !p.is_empty()).collect();
     let mut cur = String::from("/");
@@ -266,11 +268,10 @@ async fn sftp_mkdir_p(sftp: &SftpSession, path: &str) -> Result<(), String> {
         cur.push_str(p);
         // Stat first so we don't churn through CREATE errors on every level.
         if sftp.metadata(&cur).await.is_ok() { continue; }
-        match sftp.create_dir(&cur).await {
-            Ok(_) => {}
-            Err(e) => {
-                let msg = e.to_string().to_lowercase();
-                if msg.contains("exist") || msg.contains("file exists") { continue; }
+        if let Err(e) = sftp.create_dir(&cur).await {
+            // Another transfer may have made this directory since the stat
+            // above. The error text cannot say so, so look again.
+            if sftp.metadata(&cur).await.is_err() {
                 return Err(format!("mkdir {}: {}", cur, e));
             }
         }
@@ -1544,8 +1545,16 @@ async fn run_mirror(
         let _ = forward_join.await;
     }
 
+    // Entries of directories that were new to the server (see process_event),
+    // waiting for their turn. They are taken a few at a time, so that a big
+    // directory moved into the mirror doesn't keep Stop or the watcher's
+    // own events waiting until all of it is sent.
+    let mut backlog: VecDeque<PathBuf> = VecDeque::new();
+    const BACKLOG_AT_ONCE: usize = 16;
+
     loop {
         tokio::select! {
+            biased;
             _ = &mut stop_rx => {
                 shutdown(debouncer, forward_join).await;
                 return Ok(());
@@ -1565,13 +1574,30 @@ async fn run_mirror(
                     s.queue_depth = s.queue_depth.saturating_add(paths.len() as u32);
                 }
                 emit_update(&app, &status.lock().await.clone()).await;
+                // An entry that is already in this batch gets its turn here.
+                let in_batch: HashSet<PathBuf> = paths.iter().cloned().collect();
                 for path in paths {
-                    process_event(&app, &session_id, &mirror_id, &local_root, &spec,
-                                  &*sftp, &status, &path).await;
+                    let mut found = process_event(&app, &session_id, &mirror_id, &local_root, &spec,
+                                                  &*sftp, &status, &path).await;
+                    found.retain(|entry| !in_batch.contains(entry));
                     {
                         let mut s = status.lock().await;
-                        s.queue_depth = s.queue_depth.saturating_sub(1);
+                        s.queue_depth = s.queue_depth.saturating_sub(1).saturating_add(found.len() as u32);
                     }
+                    backlog.extend(found);
+                    emit_update(&app, &status.lock().await.clone()).await;
+                }
+            }
+            _ = std::future::ready(()), if !backlog.is_empty() => {
+                for _ in 0..BACKLOG_AT_ONCE {
+                    let Some(path) = backlog.pop_front() else { break };
+                    let found = process_event(&app, &session_id, &mirror_id, &local_root, &spec,
+                                              &*sftp, &status, &path).await;
+                    {
+                        let mut s = status.lock().await;
+                        s.queue_depth = s.queue_depth.saturating_sub(1).saturating_add(found.len() as u32);
+                    }
+                    backlog.extend(found);
                     emit_update(&app, &status.lock().await.clone()).await;
                 }
             }
@@ -1579,9 +1605,69 @@ async fn run_mirror(
     }
 }
 
+/// Files and directories in `dir`, not links (same as `walk_local`: a link
+/// can point back at the folder it is in). A directory that cannot be read
+/// has no entries.
+async fn dir_entries(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(mut rd) = tokio::fs::read_dir(dir).await else { return found };
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        match entry.file_type().await {
+            Ok(kind) if !kind.is_symlink() && (kind.is_dir() || kind.is_file()) => {
+                found.push(entry.path());
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+/// Entries to upload for a directory the watcher just saw.
+///
+/// An excluded directory such as `node_modules` is named without a trailing
+/// slash, while the pattern is `node_modules/`, so the check uses `{rel}/`.
+/// Nothing is created in that case. A directory the server already has
+/// contributes no entries: a change inside it arrives as its own path. A
+/// link to a directory is not created (`metadata` would follow it). A real
+/// directory that is new is created, and its non-link children are returned
+/// for the watcher to send a few at a time.
+async fn entries_of_new_remote_dir(
+    sftp: &SftpSession,
+    local_root: &Path,
+    path: &Path,
+    rel: &str,
+    remote: &str,
+    excludes: &[String],
+) -> Result<Vec<PathBuf>, String> {
+    if is_excluded(&format!("{}/", rel), excludes) {
+        return Ok(Vec::new());
+    }
+    // Same skip-links rule as walk_local: a link is not a real directory.
+    let real_dir = tokio::fs::symlink_metadata(path).await.map(|meta| meta.is_dir()).unwrap_or(false);
+    if !real_dir {
+        return Ok(Vec::new());
+    }
+    if sftp.metadata(remote).await.is_ok() {
+        return Ok(Vec::new());
+    }
+    sftp_mkdir_p(sftp, remote).await?;
+    let mut entries = dir_entries(path).await;
+    entries.retain(|entry| {
+        let child = entry
+            .strip_prefix(local_root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        !child.is_empty() && !is_excluded(&child, excludes)
+    });
+    Ok(entries)
+}
+
 /// Apply a single debounced FS event. Because the debouncer collapses
 /// bursts, we only care about the *current* state of the path: still
 /// present → upload (overwrites), gone → delete on remote.
+///
+/// Returns more paths to handle the same way: the entries of a directory
+/// that was new to the server.
 async fn process_event(
     app: &AppHandle,
     session_id: &str,
@@ -1591,19 +1677,27 @@ async fn process_event(
     sftp: &SftpSession,
     status: &Arc<Mutex<MirrorStatus>>,
     path: &Path,
-) {
+) -> Vec<PathBuf> {
     // Excludes — apply BEFORE we look at metadata so we don't even stat
     // huge dirs like node_modules.
     let rel = path.strip_prefix(local_root).map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_default();
-    if rel.is_empty() || is_excluded(&rel, &spec.excludes) { return; }
-    let remote = match local_to_remote(path, local_root, &spec.remote) { Some(r) => r, None => return };
+    if rel.is_empty() || is_excluded(&rel, &spec.excludes) { return Vec::new(); }
+    let remote = match local_to_remote(path, local_root, &spec.remote) { Some(r) => r, None => return Vec::new() };
 
     match tokio::fs::metadata(path).await {
         Ok(meta) if meta.is_dir() => {
-            if let Err(e) = sftp_mkdir_p(sftp, &remote).await {
-                emit_log(app, session_id, mirror_id, "warn", "mkdir-fail",
-                         Some(rel), Some(e));
+            // Patterns name a directory with its slash (`node_modules/`).
+            // The event path has none, so check `{rel}/` before creating it.
+            if is_excluded(&format!("{}/", rel), &spec.excludes) {
+                return Vec::new();
+            }
+            match entries_of_new_remote_dir(sftp, local_root, path, &rel, &remote, &spec.excludes).await {
+                Ok(entries) => return entries,
+                Err(e) => {
+                    emit_log(app, session_id, mirror_id, "warn", "mkdir-fail",
+                             Some(rel), Some(e));
+                }
             }
         }
         Ok(meta) if meta.is_file() => {
@@ -1673,6 +1767,7 @@ async fn process_event(
                      Some(rel), Some(e.to_string()));
         }
     }
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -1687,6 +1782,150 @@ mod tests {
         let left: Vec<String> = tree.lock().unwrap().keys().cloned().collect();
         assert_eq!(left, ["/srv", "/srv/keep"]);
         super::sftp_hard_delete("mirror-hard-delete-test", &sftp, "/srv/old").await.expect("gone already is done");
+    }
+
+    /// The first sync uploads several files at once. Each one makes the folders
+    /// it needs, so two of them can both find a folder missing and both try to
+    /// create it. OpenSSH answers the second with "Failure", not "already exists".
+    #[tokio::test]
+    async fn transfers_that_need_the_same_new_folder_all_get_it() {
+        let tree = test_sftp::tree(&[("/srv", Dir)]);
+        let refused = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let quirks = test_sftp::Quirks {
+            mkdir_refused: Some(std::sync::Arc::clone(&refused)),
+            ..Default::default()
+        };
+        let sftp = test_sftp::connect(tree.clone(), quirks).await;
+        let made = tokio::join!(
+            super::sftp_mkdir_p(&sftp, "/srv/site/a"),
+            super::sftp_mkdir_p(&sftp, "/srv/site/b"),
+            super::sftp_mkdir_p(&sftp, "/srv/site/a/deep"),
+            super::sftp_mkdir_p(&sftp, "/srv/site"),
+        );
+        assert_eq!(made, (Ok(()), Ok(()), Ok(()), Ok(())));
+        let mut left: Vec<String> = tree.lock().unwrap().keys().cloned().collect();
+        left.sort();
+        assert_eq!(left, ["/srv", "/srv/site", "/srv/site/a", "/srv/site/a/deep", "/srv/site/b"]);
+        let refused = refused.lock().unwrap().clone();
+        assert!(
+            refused.iter().any(|path| path == "/srv/site"),
+            "a raced MKDIR must be refused, got {refused:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_folder_that_cannot_be_made_is_still_an_error() {
+        let tree = test_sftp::tree(&[("/srv", Dir), ("/srv/file", File)]);
+        let sftp = test_sftp::connect(tree.clone(), Default::default()).await;
+        let err = super::sftp_mkdir_p(&sftp, "/srv/file/sub/deeper").await.unwrap_err();
+        assert!(err.starts_with("mkdir /srv/file/sub:"), "{err}");
+        let mut left: Vec<String> = tree.lock().unwrap().keys().cloned().collect();
+        left.sort();
+        assert_eq!(left, ["/srv", "/srv/file"]);
+    }
+
+    #[tokio::test]
+    async fn an_excluded_folder_is_not_created_and_a_new_folder_lists_its_files() {
+        let root = std::env::temp_dir().join(format!(
+            "sub-mirror-newdir-{}-{}",
+            std::process::id(),
+            super::now_ms(),
+        ));
+        std::fs::create_dir_all(root.join("node_modules").join("pkg")).unwrap();
+        std::fs::write(root.join("node_modules").join("pkg").join("index.js"), b"x").unwrap();
+        std::fs::create_dir_all(root.join("moved").join("sub")).unwrap();
+        std::fs::write(root.join("moved").join("a.txt"), b"a").unwrap();
+        std::fs::write(root.join("moved").join("sub").join("b.txt"), b"b").unwrap();
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let link = root.join("moved").join("loop");
+        let via = root.join("via-link");
+        let make_link = |link: &std::path::Path, target: &std::path::Path| {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(target, link).unwrap();
+            #[cfg(windows)]
+            {
+                let out = std::process::Command::new("cmd")
+                    .args(["/C", "mklink", "/J"])
+                    .arg(link)
+                    .arg(target)
+                    .output()
+                    .expect("mklink");
+                assert!(
+                    out.status.success(),
+                    "the link for this test could not be made: {}",
+                    String::from_utf8_lossy(&out.stderr),
+                );
+            }
+        };
+        make_link(&link, &elsewhere);
+        make_link(&via, &root.join("moved"));
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(std::fs::symlink_metadata(&via).unwrap().file_type().is_symlink());
+
+        let tree = test_sftp::tree(&[("/srv", Dir)]);
+        let sftp = test_sftp::connect(tree.clone(), Default::default()).await;
+        let excluded = super::entries_of_new_remote_dir(
+            &sftp,
+            &root,
+            &root.join("node_modules"),
+            "node_modules",
+            "/srv/node_modules",
+            &[],
+        ).await.unwrap();
+        assert!(excluded.is_empty());
+        assert!(!tree.lock().unwrap().contains_key("/srv/node_modules"));
+
+        // A link to a directory is followed by metadata. It must not be created.
+        let via_entries = super::entries_of_new_remote_dir(
+            &sftp,
+            &root,
+            &via,
+            "via-link",
+            "/srv/via-link",
+            &[],
+        ).await.unwrap();
+        assert!(via_entries.is_empty());
+        assert!(!tree.lock().unwrap().contains_key("/srv/via-link"));
+
+        let mut names: Vec<String> = super::entries_of_new_remote_dir(
+            &sftp,
+            &root,
+            &root.join("moved"),
+            "moved",
+            "/srv/moved",
+            &[],
+        ).await.unwrap().iter().map(|path| path.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["a.txt", "sub"]);
+        assert!(tree.lock().unwrap().contains_key("/srv/moved"));
+        assert!(!tree.lock().unwrap().contains_key("/srv/moved/sub"));
+
+        let nested: Vec<String> = super::entries_of_new_remote_dir(
+            &sftp,
+            &root,
+            &root.join("moved").join("sub"),
+            "moved/sub",
+            "/srv/moved/sub",
+            &[],
+        ).await.unwrap().iter().map(|path| path.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(nested, ["b.txt"]);
+        assert!(tree.lock().unwrap().contains_key("/srv/moved/sub"));
+
+        // A later event for a directory the server already has uploads nothing.
+        let again = super::entries_of_new_remote_dir(
+            &sftp,
+            &root,
+            &root.join("moved"),
+            "moved",
+            "/srv/moved",
+            &[],
+        ).await.unwrap();
+        assert!(again.is_empty());
+
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir(&via);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

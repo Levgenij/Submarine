@@ -15649,6 +15649,8 @@ pub(crate) mod test_sftp {
         pub junctions: HashSet<String>,
         /// READDIR paths, when a test is watching.
         pub reads: Option<Arc<Mutex<Vec<String>>>>,
+        /// MKDIR paths refused because they were already present, when a test is watching.
+        pub mkdir_refused: Option<Arc<Mutex<Vec<String>>>>,
     }
 
     pub fn tree(entries: &[(&str, Node)]) -> Tree {
@@ -15736,6 +15738,28 @@ pub(crate) mod test_sftp {
                 return Err(StatusCode::Failure);
             }
             self.node(&path).map(|n| Attrs { id, attrs: attrs(n) }).ok_or(StatusCode::NoSuchFile)
+        }
+
+        async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, StatusCode> {
+            self.node(&path).map(|node| Attrs { id, attrs: attrs(node) }).ok_or(StatusCode::NoSuchFile)
+        }
+
+        async fn mkdir(&mut self, id: u32, path: String, _: FileAttributes) -> Result<Status, StatusCode> {
+            let parent = path.rsplit_once('/').map(|(parent, _)| parent).filter(|parent| !parent.is_empty());
+            if let Some(parent) = parent {
+                if self.node(parent) != Some(Node::Dir) {
+                    return Err(StatusCode::NoSuchFile);
+                }
+            }
+            // OpenSSH answers MKDIR of a path that is already there with a bare Failure.
+            if self.node(&path).is_some() {
+                if let Some(refused) = &self.quirks.mkdir_refused {
+                    refused.lock().unwrap().push(path);
+                }
+                return Err(StatusCode::Failure);
+            }
+            self.tree.lock().unwrap().insert(path, Node::Dir);
+            Ok(ok(id))
         }
 
         async fn remove(&mut self, id: u32, filename: String) -> Result<Status, StatusCode> {
