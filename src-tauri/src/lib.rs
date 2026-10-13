@@ -6671,18 +6671,49 @@ async fn initiate_connection(
                         let targets_w = Arc::clone(&session_forwarded_targets);
                         let my_gen = connect_generation;
                         tauri::async_runtime::spawn(async move {
+                            // Fallback liveness check for servers that do not
+                            // answer keepalive@openssh.com: open a session
+                            // channel and close it. Any answer counts as alive,
+                            // including a refusal (a MaxSessions-limited server
+                            // refuses the open). A timeout or a dead handle
+                            // counts as dead.
+                            async fn probe_with_channel<H: russh::client::Handler>(
+                                h: &russh::client::Handle<H>,
+                            ) -> bool {
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_secs(10),
+                                    h.channel_open_session(),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(ch)) => {
+                                        // Close cleanly so the server doesn't log a stuck session.
+                                        let _ = ch.close().await;
+                                        true
+                                    }
+                                    Ok(Err(russh::Error::ChannelOpenFailure(_))) => true,
+                                    _ => false,
+                                }
+                            }
+
                             // Two-tier liveness check:
                             //   - Every 2s: cheap is_closed() poll. Catches TCP
                             //     RST / FIN, russh's own teardown, AND — now that
                             //     the transport socket carries OS TCP keepalive
                             //     (see apply_tcp_keepalive) — kernel-detected
                             //     dead peers during long idle.
-                            //   - Slow active probe: open a tiny SSH channel to
-                            //     force a real round-trip, catching black-holes
-                            //     the kernel hasn't flagged yet. Primary every
-                            //     ~30s, dedicated `::sftp`/`::fwd` secondaries
-                            //     every ~60s (they matter less urgently and the
-                            //     probes multiply per-session overhead).
+                            //   - Slow active probe: a `keepalive@openssh.com`
+                            //     ping (`send_ping`) forces a real round-trip,
+                            //     catching black-holes the kernel hasn't flagged
+                            //     yet. Primary every ~30s, dedicated
+                            //     `::sftp`/`::fwd` secondaries every ~60s (they
+                            //     matter less urgently and the probes multiply
+                            //     per-session overhead). A channel open is only
+                            //     the fallback: it spends a MaxSessions slot, so
+                            //     a hardened or busy server refuses it, and a
+                            //     refusal still counts as alive. If the ping
+                            //     times out but the channel answers, later probes
+                            //     skip the ping and use the channel.
                             //     TWO consecutive probe failures are required
                             //     before declaring death: on poor networks a
                             //     single 10s latency spike is common, and the
@@ -6692,6 +6723,9 @@ async fn initiate_connection(
                             let probe_every: u32 = if sid_w.contains("::") { 30 } else { 15 };
                             let mut tick: u32 = 0;
                             let mut probe_strikes: u8 = 0;
+                            // Set once this server has left a keepalive unanswered but answered
+                            // a channel open: probe it that way from then on.
+                            let mut ping_unanswered = false;
                             loop {
                                 tokio::time::sleep(Duration::from_secs(2)).await;
                                 tick = tick.wrapping_add(1);
@@ -6725,40 +6759,69 @@ async fn initiate_connection(
                                 let mut dead = is_closed;
 
                                 if !dead && tick.is_multiple_of(probe_every) {
-                                    // Active probe: hold the handle lock long
-                                    // enough to start AND finish the round
-                                    // trip — concurrent commands wait, but
-                                    // that's fine, they would block on the
-                                    // same lock to open their own channel
-                                    // anyway. 10s timeout: generous enough
-                                    // that a congested-but-alive link doesn't
-                                    // strike out spuriously.
-                                    let probe = {
+                                    // Active probe: hold the handle lock only
+                                    // for one round trip, the same way a
+                                    // channel open does. send_ping borrows the
+                                    // handle until it finishes, so the lock
+                                    // covers that await and nothing past it.
+                                    // 10s timeout: generous enough that a
+                                    // congested-but-alive link doesn't strike
+                                    // out spuriously.
+                                    let alive = if ping_unanswered {
                                         let h = handle_arc.lock().await;
-                                        tokio::time::timeout(
-                                            Duration::from_secs(10),
-                                            h.channel_open_session(),
-                                        ).await
-                                    };
-                                    match probe {
-                                        Ok(Ok(ch)) => {
-                                            probe_strikes = 0;
-                                            // Close cleanly so the server
-                                            // doesn't log a stuck session.
-                                            let _ = ch.close().await;
-                                        }
-                                        _ => {
-                                            probe_strikes += 1;
-                                            if probe_strikes >= 2 {
-                                                dead = true;
-                                            } else {
-                                                // One strike: re-probe on the
-                                                // next 2s tick instead of a
-                                                // full interval away, so a
-                                                // real death still surfaces
-                                                // promptly.
-                                                tick = probe_every.wrapping_sub(1);
+                                        probe_with_channel(&h).await
+                                    } else {
+                                        let ping_alive = {
+                                            let h = handle_arc.lock().await;
+                                            match tokio::time::timeout(
+                                                Duration::from_secs(10),
+                                                h.send_ping(),
+                                            ).await {
+                                                // send_ping resolves on the
+                                                // server's reply, and also when
+                                                // the session dies mid-ping
+                                                // (the reply channel is
+                                                // dropped), so confirm the
+                                                // handle is still open.
+                                                Ok(Ok(())) => Some(!h.is_closed()),
+                                                Ok(Err(_)) => Some(false),
+                                                Err(_) if h.is_closed() => Some(false),
+                                                // No reply in time. Some
+                                                // servers never answer
+                                                // keepalive@openssh.com (or
+                                                // answer UNIMPLEMENTED, which
+                                                // russh drops). Ask with a
+                                                // channel, and if that answers,
+                                                // keep probing this server that
+                                                // way.
+                                                Err(_) => None,
                                             }
+                                        };
+                                        match ping_alive {
+                                            Some(up) => up,
+                                            None => {
+                                                let h = handle_arc.lock().await;
+                                                let up = probe_with_channel(&h).await;
+                                                if up {
+                                                    ping_unanswered = true;
+                                                }
+                                                up
+                                            }
+                                        }
+                                    };
+                                    if alive {
+                                        probe_strikes = 0;
+                                    } else {
+                                        probe_strikes += 1;
+                                        if probe_strikes >= 2 {
+                                            dead = true;
+                                        } else {
+                                            // One strike: re-probe on the
+                                            // next 2s tick instead of a
+                                            // full interval away, so a
+                                            // real death still surfaces
+                                            // promptly.
+                                            tick = probe_every.wrapping_sub(1);
                                         }
                                     }
                                 }
