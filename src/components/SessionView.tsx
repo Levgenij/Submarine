@@ -13,6 +13,7 @@ import { RenameInput } from "../ui/renameInput";
 import { onRovingKeyDown } from "../ui/rovingKeys";
 import { fontFamilyCss, readFontFamily, readFontSize } from "../util/terminalFont";
 import { readShellSyncPairs, useShellSyncServer, type ShellSyncPair } from "../util/shellSync";
+import { readUseLocalShell } from "../util/terminalShell";
 
 // What the shell-config push commands answer (mirror.rs' ShellSync* types).
 type ShellSyncShells = { remote_shell: string; local_shell: string; shell_mismatch: boolean };
@@ -562,11 +563,14 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
       return;
     }
     setShellSyncBusy(true);
-    // Which shell the account logs into, for a note. Always asked: there is
-    // no "use this computer's shell" switch yet, and shell_sync_probe does
-    // nothing when $SHELL is empty. Never in the way of the preview.
-    invoke<ShellSyncShells>("shell_sync_probe", { sessionId: session.id })
-      .then((s) => { if (run === shellSyncRun.current) setShellSyncShells(s); }, () => {});
+    // Which shell the account logs into, for a note. Not asked when new
+    // terminals start this computer's own shell (Settings - Use my default
+    // shell). shell_sync_probe does nothing when $SHELL is empty. Never in
+    // the way of the preview.
+    if (!readUseLocalShell()) {
+      invoke<ShellSyncShells>("shell_sync_probe", { sessionId: session.id })
+        .then((s) => { if (run === shellSyncRun.current) setShellSyncShells(s); }, () => {});
+    }
     try {
       const report = await invoke<ShellSyncReport>("shell_sync_preview", { sessionId: session.id, pairs });
       if (run === shellSyncRun.current) setShellSyncReport(report);

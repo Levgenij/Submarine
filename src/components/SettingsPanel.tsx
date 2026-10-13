@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Settings, Palette, RefreshCw, List, Cloud, History, Minus, Plus, ArrowRight, X } from "lucide-react";
 import {
   MAX_FONT_SIZE, MIN_FONT_SIZE, clampFontSize, fontFamilyCss,
@@ -284,6 +285,39 @@ function ShellConfigSyncSettings({ servers }: { servers: any[] }) {
   );
 }
 
+// "Use my default shell" (open_terminal in lib.rs): offered only where this
+// computer has a shell of its own to start, which the backend knows
+// (`local_shell`: none on Windows and Android, or without a safe $SHELL).
+function DefaultShellSetting({ settings, setSettings }: any) {
+  const [shell, setShell] = useState<string | null>(null);
+  useEffect(() => {
+    invoke<string | null>("local_shell").then(setShell, () => setShell(null));
+  }, []);
+  if (!shell) return null;
+  const name = shell.split("/").pop();
+  return (
+    <div className="bg-[#121215] border border-white/5 rounded-2xl p-6 shadow-xl">
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-zinc-100">Use my default shell</div>
+          <p className="text-[12px] text-zinc-400 leading-relaxed mt-1">
+            New terminals start {name}, the shell this computer uses, as a login shell on the
+            server in place of the account's own. {name} reads the server's own startup files;
+            nothing is copied from here. The server's welcome message isn't shown in these
+            terminals. A server without {name}, or one that can't start it this way (a Windows
+            server, some network devices), opens the account's own shell as before.
+          </p>
+        </div>
+        <PrefToggle
+          label="Use my default shell"
+          checked={!!settings.useLocalShell}
+          onToggle={() => setSettings((s: any) => ({ ...s, useLocalShell: !s.useLocalShell }))}
+        />
+      </div>
+    </div>
+  );
+}
+
 const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any) => {
   const accentColors = [
     { name: 'Light Blue', value: '#60a5fa' },
@@ -400,6 +434,7 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any)
           </div>
           
           <TerminalFontSettings settings={settings} setSettings={setSettings} />
+          <DefaultShellSetting settings={settings} setSettings={setSettings} />
         </section>
 
         <section className="break-inside-avoid mb-4 sm:mb-8">
