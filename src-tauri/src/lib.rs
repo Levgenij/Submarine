@@ -3778,46 +3778,234 @@ async fn generate_ssh_key(state: tauri::State<'_, DbState>, name: String) -> Res
     Ok(())
 }
 
+/// The `-----BEGIN ... PRIVATE KEY-----` line of a PEM key, skipping anything
+/// before it (`openssl ecparam -genkey` writes an `EC PARAMETERS` block first).
+/// Empty when there is none.
+fn pem_private_key_header(text: &str) -> &str {
+    text.lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("-----BEGIN ") && line.ends_with(" PRIVATE KEY-----"))
+        .unwrap_or("")
+}
+
+/// SEC1 ECDSA PEM encrypted the legacy way (`Proc-Type: 4,ENCRYPTED` plus
+/// `DEK-Info`). russh decrypts that encryption only for RSA, so no passphrase
+/// can unlock an EC key in this form.
+fn is_legacy_encrypted_ec_pem(text: &str) -> bool {
+    pem_private_key_header(text) == "-----BEGIN EC PRIVATE KEY-----"
+        && text.contains("Proc-Type: 4,ENCRYPTED")
+}
+
+const LEGACY_ENCRYPTED_EC_PEM: &str = "[SSH] UNSUPPORTED_KEY_FORMAT: This ECDSA key uses the legacy PEM encryption, which Submarine can only read for RSA keys. Re-save it in OpenSSH format with `ssh-keygen -p -f <file>` and import it again.";
+
+/// Key types the connect path can sign with.
+fn check_key_algorithm(algorithm: &ssh_key::Algorithm) -> Result<(), String> {
+    match algorithm {
+        ssh_key::Algorithm::Ed25519
+        | ssh_key::Algorithm::Rsa { .. }
+        | ssh_key::Algorithm::Ecdsa { .. } => Ok(()),
+        other => Err(format!(
+            "[SSH] UNSUPPORTED_KEY_TYPE: {} keys are not supported.",
+            other.as_str()
+        )),
+    }
+}
+
 /// Reject key formats the SSH client cannot use, so failures surface when the
 /// user enters the key rather than when they try to connect.
 fn validate_ssh_private_key(private_key: &str) -> Result<(), String> {
-    let trimmed = private_key.trim();
+    let trimmed = private_key.trim().replace("\r\n", "\n");
 
-    // PKCS#1 RSA PEM is decoded by russh's pure-Rust backend in every build.
-    if trimmed.starts_with("-----BEGIN RSA PRIVATE KEY-----") {
-        return Ok(());
-    }
-    if trimmed.starts_with("-----BEGIN DSA PRIVATE KEY-----")
-        || trimmed.starts_with("-----BEGIN EC PRIVATE KEY-----")
-    {
-        // DSA is dead; ECDSA in PEM (SEC1) needs an extra conversion russh
-        // doesn't do for us. Tell the user to convert and retry rather than
-        // pretending the format is fine.
-        return Err("[SSH] UNSUPPORTED_KEY_FORMAT: DSA / SEC1 ECDSA PEM keys aren't supported. Convert to OpenSSH format with `ssh-keygen -p -m PEM -f <file>` and re-import, or generate a fresh Ed25519 key.".into());
-    }
-
-    if trimmed.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----") {
-        // Inspect the algorithm without requiring the passphrase — the algorithm
-        // header is unencrypted even when the body is encrypted.
-        if let Ok(parsed) = ssh_key::PrivateKey::from_openssh(trimmed) {
-            match parsed.algorithm() {
-                ssh_key::Algorithm::Ed25519
-                | ssh_key::Algorithm::Rsa { .. }
-                | ssh_key::Algorithm::Ecdsa { .. } => {}
-                other => {
-                    return Err(format!(
-                        "[SSH] UNSUPPORTED_KEY_TYPE: {} keys are not supported.",
-                        other.as_str()
-                    ));
-                }
+    match pem_private_key_header(&trimmed) {
+        // PKCS#1 RSA PEM is decoded by russh's pure-Rust backend in every build.
+        "-----BEGIN RSA PRIVATE KEY-----" => Ok(()),
+        "-----BEGIN DSA PRIVATE KEY-----" => Err(
+            "[SSH] UNSUPPORTED_KEY_TYPE: DSA keys aren't supported. Generate a new key, e.g. with `ssh-keygen -t ed25519`.".into(),
+        ),
+        "-----BEGIN EC PRIVATE KEY-----" if is_legacy_encrypted_ec_pem(&trimmed) => {
+            Err(LEGACY_ENCRYPTED_EC_PEM.into())
+        }
+        // Unencrypted SEC1 (P-256, P-384, P-521) and PKCS#8 (ECDSA, Ed25519, RSA).
+        "-----BEGIN EC PRIVATE KEY-----" | "-----BEGIN PRIVATE KEY-----" => {
+            match russh::keys::decode_secret_key(&trimmed, None) {
+                Ok(key) => check_key_algorithm(&key.algorithm()),
+                Err(e) => Err(format!("[SSH] UNREADABLE_KEY: This key couldn't be read: {e}")),
             }
         }
-        // If parsing fails entirely (unexpected header layout), let it through;
-        // the connect path will surface a clearer error.
-        return Ok(());
+        // Encrypted PKCS#8 cannot be opened here. The passphrase is stored with
+        // the key and applied when connecting.
+        "-----BEGIN ENCRYPTED PRIVATE KEY-----" => Ok(()),
+        "-----BEGIN OPENSSH PRIVATE KEY-----" => {
+            // The algorithm header is unencrypted even when the body is
+            // encrypted. If parsing fails entirely, let it through; the connect
+            // path will surface a clearer error.
+            match ssh_key::PrivateKey::from_openssh(&trimmed) {
+                Ok(parsed) => check_key_algorithm(&parsed.algorithm()),
+                Err(_) => Ok(()),
+            }
+        }
+        _ => Err(
+            "[SSH] UNRECOGNIZED_KEY_FORMAT: Expected a private key in OpenSSH format (begins with -----BEGIN OPENSSH PRIVATE KEY-----) or PEM / PKCS#8 (-----BEGIN RSA PRIVATE KEY-----, -----BEGIN EC PRIVATE KEY-----, -----BEGIN PRIVATE KEY-----).".into(),
+        ),
+    }
+}
+
+/// Decode a stored private key for connect.
+///
+/// `\r\n` is normalized first. An unencrypted SEC1 or PKCS#8 key is decoded
+/// with no passphrase: russh treats any passphrase as "this PEM is encrypted"
+/// and fails an unencrypted key that was saved with a leftover passphrase.
+/// Encrypted PKCS#8 keeps the passphrase. A legacy encrypted EC PEM is refused
+/// with an `ssh-keygen -p` hint.
+pub(crate) fn decode_ssh_private_key(
+    private_key: &str,
+    passphrase: Option<&str>,
+) -> Result<PrivateKey, String> {
+    let normalized = private_key.replace("\r\n", "\n");
+    if is_legacy_encrypted_ec_pem(&normalized) {
+        return Err(LEGACY_ENCRYPTED_EC_PEM.into());
+    }
+    let header = pem_private_key_header(&normalized);
+    let clear_sec1_or_pkcs8 = matches!(
+        header,
+        "-----BEGIN EC PRIVATE KEY-----" | "-----BEGIN PRIVATE KEY-----"
+    );
+    let passphrase = if clear_sec1_or_pkcs8 { None } else { passphrase };
+    russh::keys::decode_secret_key(&normalized, passphrase).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod key_format_tests {
+    use super::{decode_ssh_private_key, pem_private_key_header, validate_ssh_private_key};
+    use ssh_key::{Algorithm, EcdsaCurve, PrivateKey};
+
+    // Throwaway P-521 SEC1 key (`openssl ecparam -name secp521r1 -genkey -noout`)
+    // and the same key under legacy PEM encryption (`openssl ec -aes128`).
+    const P521_SEC1: &str = concat!(
+        "-----BEGIN EC PRIVATE KEY-----", "\n",
+        "MIHcAgEBBEIAdufERUG0oeJ10N+Bv+X90N7yFqYVBx/b1zxWDFy7IenBbH3m19ZI", "\n",
+        "eS7CX304BsDAg7qsfA297eVCJbgAs2PHHMqgBwYFK4EEACOhgYkDgYYABAFcBODy", "\n",
+        "J0wHcbjtkyXarPWtaIpAw2TeU3I1KUpgQGmyg3oUjWPtf9E9a9dGSJUhRGmE9ipw", "\n",
+        "cQMWhP7kybfpf7a8kwCeXAhkPVAU++V1ZNvb3j/WADXg/1XQUgPGoxTAANxrTVJx", "\n",
+        "WQiIlFyELpoRIRG7ScgSAxUfuh7o0yXfIi47DpIEoA==", "\n",
+        "-----END EC PRIVATE KEY-----", "\n",
+    );
+    const P521_SEC1_LEGACY_ENC: &str = concat!(
+        "-----BEGIN EC PRIVATE KEY-----", "\n",
+        "Proc-Type: 4,ENCRYPTED", "\n",
+        "DEK-Info: AES-128-CBC,6AAE92543490CD1C0CC1379C8F41D8BC", "\n",
+        "", "\n",
+        "QdVrrcbttQm+FA+zAVdBsg8P27+fvItEE21uI1EcL3+iYzuvPdG3UxPCV7XvqA0H", "\n",
+        "QYw4rpmVz4t31gokcOYQHCtaOcNpQ5j4f8gC29w2E4uObL+Rj0IlmwAvNjKI84fb", "\n",
+        "t30+KLuzm+yzcgQIJhU5lv87q0qVpGTOYL3RFs0DdJIBUxXmX187CXzuhEeuG1uz", "\n",
+        "IIlyvlGWsUpld6yYnn6pdKFpW2YjsiUSPtCUtZj/C5vxJKz68NftkstD2UWzqx5f", "\n",
+        "lYt7UrW77+lzY3DWKcb3aoXlvDljQdFEfm/+bkVwjOE=", "\n",
+        "-----END EC PRIVATE KEY-----", "\n",
+    );
+
+    fn pkcs8_pem(key: &PrivateKey) -> String {
+        let mut buf = Vec::new();
+        russh::keys::encode_pkcs8_pem(key, &mut buf).expect("pkcs8 pem");
+        String::from_utf8(buf).expect("utf8")
     }
 
-    Err("[SSH] UNRECOGNIZED_KEY_FORMAT: Expected an OpenSSH-format private key (begins with -----BEGIN OPENSSH PRIVATE KEY-----) or RSA PEM.".into())
+    fn fresh(algorithm: Algorithm) -> PrivateKey {
+        PrivateKey::random(&mut rand::rng(), algorithm).expect("generate")
+    }
+
+    #[test]
+    fn header_scan_skips_a_leading_ec_parameters_block() {
+        let with_params = format!(
+            "-----BEGIN EC PARAMETERS-----\nBgUrgQQAIw==\n-----END EC PARAMETERS-----\n{P521_SEC1}"
+        );
+        assert_eq!(pem_private_key_header(&with_params), "-----BEGIN EC PRIVATE KEY-----");
+        assert_eq!(pem_private_key_header(P521_SEC1_LEGACY_ENC), "-----BEGIN EC PRIVATE KEY-----");
+        assert_eq!(validate_ssh_private_key(&with_params), Ok(()));
+        let key = decode_ssh_private_key(&with_params, Some("leftover")).expect("decodes");
+        assert!(matches!(
+            key.algorithm(),
+            Algorithm::Ecdsa { curve: EcdsaCurve::NistP521 }
+        ));
+    }
+
+    #[test]
+    fn sec1_p521_and_pkcs8_curves_are_accepted() {
+        assert_eq!(validate_ssh_private_key(P521_SEC1), Ok(()));
+        let sec1 = decode_ssh_private_key(P521_SEC1, None).expect("sec1");
+        assert!(matches!(
+            sec1.algorithm(),
+            Algorithm::Ecdsa { curve: EcdsaCurve::NistP521 }
+        ));
+
+        for curve in [EcdsaCurve::NistP256, EcdsaCurve::NistP384, EcdsaCurve::NistP521] {
+            let original = fresh(Algorithm::Ecdsa { curve });
+            let pem = pkcs8_pem(&original);
+            assert_eq!(pem_private_key_header(&pem), "-----BEGIN PRIVATE KEY-----");
+            assert_eq!(validate_ssh_private_key(&pem), Ok(()));
+            let decoded = decode_ssh_private_key(&pem, Some("leftover")).expect("pkcs8");
+            assert_eq!(decoded.algorithm(), Algorithm::Ecdsa { curve });
+            assert_eq!(decoded.public_key(), original.public_key());
+        }
+
+        let ed = fresh(Algorithm::Ed25519);
+        let pem = pkcs8_pem(&ed);
+        assert_eq!(validate_ssh_private_key(&pem), Ok(()));
+        let decoded = decode_ssh_private_key(&pem, Some("leftover")).expect("ed25519");
+        assert_eq!(decoded.algorithm(), Algorithm::Ed25519);
+        assert_eq!(decoded.public_key(), ed.public_key());
+
+        let rsa = PrivateKey::from(ssh_key::private::RsaKeypair::random(&mut rand::rng(), 2048).expect("rsa"));
+        let pem = pkcs8_pem(&rsa);
+        assert_eq!(validate_ssh_private_key(&pem), Ok(()));
+        let decoded = decode_ssh_private_key(&pem, Some("leftover")).expect("rsa");
+        assert!(matches!(decoded.algorithm(), Algorithm::Rsa { .. }));
+        assert_eq!(decoded.public_key(), rsa.public_key());
+    }
+
+    #[test]
+    fn leftover_passphrase_is_stripped_only_for_clear_sec1_and_pkcs8() {
+        assert!(
+            russh::keys::decode_secret_key(P521_SEC1, Some("leftover")).is_err(),
+            "russh rejects a clear SEC1 key when a passphrase is passed"
+        );
+        let crlf = P521_SEC1.replace('\n', "\r\n");
+        decode_ssh_private_key(&crlf, Some("leftover")).expect("helper strips the leftover passphrase");
+
+        let ed = fresh(Algorithm::Ed25519);
+        let clear = pkcs8_pem(&ed);
+        assert!(russh::keys::decode_secret_key(&clear, Some("leftover")).is_err());
+        decode_ssh_private_key(&clear, Some("leftover")).expect("pkcs8 leftover stripped");
+
+        let mut encrypted = Vec::new();
+        russh::keys::encode_pkcs8_pem_encrypted(&ed, b"pkcs8-pass", 16, &mut encrypted).expect("encrypt");
+        let encrypted = String::from_utf8(encrypted).expect("utf8");
+        assert_eq!(pem_private_key_header(&encrypted), "-----BEGIN ENCRYPTED PRIVATE KEY-----");
+        assert_eq!(validate_ssh_private_key(&encrypted), Ok(()));
+        assert!(decode_ssh_private_key(&encrypted, None).is_err());
+        assert!(decode_ssh_private_key(&encrypted, Some("not-the-passphrase")).is_err());
+        let decoded = decode_ssh_private_key(&encrypted, Some("pkcs8-pass")).expect("passphrase kept");
+        assert_eq!(decoded.public_key(), ed.public_key());
+    }
+
+    #[test]
+    fn dsa_and_legacy_encrypted_ec_are_refused() {
+        let dsa = "-----BEGIN DSA PRIVATE KEY-----\nAAAA\n-----END DSA PRIVATE KEY-----\n";
+        let err = validate_ssh_private_key(dsa).unwrap_err();
+        assert!(err.contains("DSA"), "{err}");
+
+        let err = validate_ssh_private_key(P521_SEC1_LEGACY_ENC).unwrap_err();
+        assert!(err.contains("ssh-keygen -p"), "{err}");
+        for pass in [None, Some("pem-pass")] {
+            let err = decode_ssh_private_key(P521_SEC1_LEGACY_ENC, pass).unwrap_err();
+            assert!(err.contains("ssh-keygen -p"), "{err}");
+        }
+
+        assert!(validate_ssh_private_key("not a key").unwrap_err().contains("UNRECOGNIZED_KEY_FORMAT"));
+        assert_eq!(
+            validate_ssh_private_key("-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n"),
+            Ok(())
+        );
+    }
 }
 
 #[tauri::command]
@@ -5961,10 +6149,9 @@ async fn connect_jump_host(
     // 5. Auth ladder: key → password → keyboard-interactive.
     let mut auth_res = if let Some((private_key, passphrase)) = key_data {
         log("Jump host: private key authentication...", "info");
-        let normalized_key = private_key.replace("\r\n", "\n");
-        match russh::keys::decode_secret_key(&normalized_key, passphrase.as_deref()) {
+        match decode_ssh_private_key(&private_key, passphrase.as_deref()) {
             Ok(keypair) => ssh_manager::authenticate_with_key(&mut session, &effective_user, keypair).await,
-            Err(e) => Err(russh::Error::from(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))),
+            Err(e) => Err(russh::Error::from(std::io::Error::new(std::io::ErrorKind::InvalidData, e))),
         }
     } else if let Some(pass) = password {
         log("Jump host: password authentication...", "info");
@@ -6629,8 +6816,7 @@ async fn initiate_connection(
                 
                 let mut auth_res = if let Some((private_key, passphrase)) = key_data {
                     emit_log("Attempting Private Key Authentication...", "info");
-                    let normalized_key = private_key.replace("\r\n", "\n");
-                    match russh::keys::decode_secret_key(&normalized_key, passphrase.as_deref()) {
+                    match decode_ssh_private_key(&private_key, passphrase.as_deref()) {
                         Ok(keypair) => {
                             ssh_manager::authenticate_with_key(&mut session, &effective_user, keypair).await
                         }
@@ -6638,7 +6824,7 @@ async fn initiate_connection(
                             emit_log(&format!("Failed to parse private key: {}", e), "error");
                             Err(russh::Error::from(std::io::Error::new(
                                 std::io::ErrorKind::InvalidData,
-                                e.to_string(),
+                                e,
                             )))
                         }
                     }
