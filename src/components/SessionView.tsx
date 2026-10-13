@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, memo, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { TerminalSquare, Folder, Network, AlertTriangle, Check, X, ShieldAlert, KeyRound, Play, Library, Info, Container, Plus, SplitSquareHorizontal, Columns, Rows, RotateCw } from "lucide-react";
 import TerminalView from "./TerminalView";
 import SftpWorkspace from "./SftpWorkspace";
@@ -834,86 +833,26 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
     return () => window.removeEventListener(evt, onReconnect);
   }, [session.id, customPassword]);
 
-  // ---- Tool pane sizing + window growth ------------------------------------
-  // Philosophy: the terminal column is sacred. Opening a tool pane or
-  // dragging the divider grows or shrinks the OS window in lockstep so the
-  // terminal's pixel width never changes underneath the user.
-
-  const appWindow = getCurrentWindow();
-  const toolWidthRef = useRef(toolPanelWidth);
-  useEffect(() => { toolWidthRef.current = toolPanelWidth; }, [toolPanelWidth]);
-
-  const adjustWindowWidth = async (deltaPx: number) => {
-    try {
-      const size = await appWindow.outerSize();
-      const scale = await appWindow.scaleFactor();
-      const logical = size.toLogical(scale);
-      const next = Math.max(640, Math.round(logical.width + deltaPx));
-      await appWindow.setSize(new LogicalSize(next, Math.round(logical.height)));
-    } catch (e) {
-      console.error("window resize failed", e);
-    }
-  };
-
-  // Grow the window when the tool pane is opened, shrink when it's closed.
-  // The +4 accounts for the resize divider itself.
-  const prevActiveToolRef = useRef<typeof activeTool>(null);
-  useEffect(() => {
-    const prev = prevActiveToolRef.current;
-    prevActiveToolRef.current = activeTool;
-    if (!prev && activeTool) {
-      adjustWindowWidth(toolWidthRef.current + 4);
-    } else if (prev && !activeTool) {
-      adjustWindowWidth(-(toolWidthRef.current + 4));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTool]);
-
-  // If the user closes the session tab while a tool is open, give the
-  // window space back rather than leaving it stretched.
-  useEffect(() => {
-    return () => {
-      if (prevActiveToolRef.current) {
-        adjustWindowWidth(-(toolWidthRef.current + 4));
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // ---- Tool pane sizing ----------------------------------------------------
+  // The pane and the terminal share the window. Dragging the divider only
+  // changes the pane width. The window itself is never resized from here.
 
   const startToolResize = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
-    const startWidth = toolWidthRef.current;
-    let lastCommittedWidth = startWidth;
-    let pendingWidth = startWidth;
-    let frameRequested = false;
+    const startWidth = toolPanelWidth;
+    let latest = startWidth;
 
     const onMove = (ev: MouseEvent) => {
       // Dragging LEFT (cursor moves left) widens the tool pane.
-      const next = Math.max(240, Math.min(900, startWidth + (startX - ev.clientX)));
-      pendingWidth = next;
-      setToolPanelWidth(next);
-      // Throttle window resizes to one per animation frame. setSize crosses an
-      // IPC boundary and dispatching it on every mousemove makes the drag feel
-      // laggy. We batch by recomputing the delta against last-committed width
-      // inside the frame, so no mouse movement is dropped.
-      if (!frameRequested) {
-        frameRequested = true;
-        requestAnimationFrame(() => {
-          frameRequested = false;
-          const delta = pendingWidth - lastCommittedWidth;
-          if (delta !== 0) {
-            lastCommittedWidth = pendingWidth;
-            adjustWindowWidth(delta);
-          }
-        });
-      }
+      latest = Math.max(240, Math.min(900, startWidth + (startX - ev.clientX)));
+      setToolPanelWidth(latest);
     };
 
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
-      try { localStorage.setItem("submarine-tool-panel-width", String(toolWidthRef.current)); }
+      try { localStorage.setItem("submarine-tool-panel-width", String(latest)); }
       catch { /* ignore */ }
     };
 
