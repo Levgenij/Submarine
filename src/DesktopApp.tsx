@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getVersion } from "@tauri-apps/api/app";
 import {
   Plus, X, RefreshCw, Terminal, Key, Trash2,
   ArrowLeftRight, Shield, User, Cpu, TerminalSquare, List, Edit2,
@@ -146,6 +147,20 @@ function DesktopApp() {
     setSessionStatuses((prev) => (prev[sessionId] === status ? prev : { ...prev, [sessionId]: status }));
   }, []);
 
+  // Sessions whose connect is waiting on the user (host key or 2FA).
+  // A background tab's prompt is hidden with the tab, so the tab strip
+  // marks it instead.
+  const [promptSessions, setPromptSessions] = useState<Set<string>>(() => new Set());
+  const handlePromptChange = useCallback((sessionId: string, waiting: boolean) => {
+    setPromptSessions((prev) => {
+      if (prev.has(sessionId) === waiting) return prev;
+      const next = new Set(prev);
+      if (waiting) next.add(sessionId);
+      else next.delete(sessionId);
+      return next;
+    });
+  }, []);
+
   // Maximize state mirrored from the OS window so the title-bar button can
   // swap its icon (single square = maximize, overlapping squares = restore)
   // and so the double-click drag-region handler always knows the correct
@@ -162,6 +177,13 @@ function DesktopApp() {
   }, []);
   const toggleMaximize = useCallback(() => {
     appWindow.toggleMaximize().catch(console.error);
+  }, []);
+
+  // App version for the title bar, from Tauri rather than a hardcoded
+  // string, so it cannot drift from the build. Empty if the call fails.
+  const [appVersion, setAppVersion] = useState<string>("");
+  useEffect(() => {
+    getVersion().then(setAppVersion).catch(() => {});
   }, []);
 
   // Persist the user's current folder across NodeGrid unmount/remount cycles.
@@ -835,6 +857,9 @@ function DesktopApp() {
       <div className="hidden sm:flex items-center gap-2 pr-4 pl-[75px] md:pl-2" data-tauri-drag-region>
         <img src={logoUrl} alt="" draggable={false} className="h-6 w-auto max-w-[24px] object-contain select-none" />
         <span className="text-[12px] font-bold text-white tracking-tight">Submarine</span>
+        {appVersion && (
+          <span data-tauri-drag-region className="text-[11px] text-zinc-500/60 tracking-tight tabular-nums">v{appVersion}</span>
+        )}
       </div>
 
       {/* Mobile session picker — replaces the horizontal tab strip on
@@ -863,6 +888,7 @@ function DesktopApp() {
                 const cur = sessions.find(s => s.id === activeView);
                 const st = cur ? (sessionStatuses[cur.id] ?? 'connecting') : null;
                 const dotTone =
+                  cur && promptSessions.has(cur.id) ? 'bg-primary animate-pulse' :
                   st === 'connected'    ? 'bg-emerald-400' :
                   st === 'connecting'   ? 'bg-amber-400 animate-pulse' :
                   st === 'failed'       ? 'bg-rose-500' :
@@ -898,6 +924,7 @@ function DesktopApp() {
                   {sessions.map(s => {
                     const st = sessionStatuses[s.id] ?? 'connecting';
                     const dot =
+                      promptSessions.has(s.id) ? 'bg-primary animate-pulse' :
                       st === 'connected'    ? 'bg-emerald-400' :
                       st === 'connecting'   ? 'bg-amber-400 animate-pulse' :
                       'bg-rose-500';
@@ -1021,13 +1048,18 @@ function DesktopApp() {
           // Dot palette: green = connected, amber = connecting, red = failed
           // or disconnected. The pulse animation only runs while connecting
           // so a steady-state tab doesn't draw the eye every half second.
+          // A prompt waiting on the user (host key, 2FA) outranks the status:
+          // the dot pulses in the accent color until it is answered.
+          const waiting = promptSessions.has(s.id);
           const dotTone =
+            waiting               ? "bg-primary animate-pulse" :
             st === "connected"    ? "bg-emerald-400" :
             st === "connecting"   ? "bg-amber-400 animate-pulse" :
             st === "failed"       ? "bg-rose-500" :
             st === "disconnected" ? "bg-rose-500" :
                                     "bg-zinc-500";
           const dotTitle =
+            waiting               ? "Waiting for you - open this tab to answer" :
             st === "connected"    ? "Connected" :
             st === "connecting"   ? "Connecting…" :
             st === "failed"       ? "Connection failed" :
@@ -1856,11 +1888,15 @@ function DesktopApp() {
                               to ~28 px (slim header). */}
                           {isVisible && isTiled && !isFocused && (
                             <div className="h-7 shrink-0 flex items-center gap-2 px-2 border-b border-white/5 bg-[#111114] text-[10.5px]">
-                              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                                (sessionStatuses[sess.id] ?? 'connecting') === 'connected' ? 'bg-emerald-400' :
-                                (sessionStatuses[sess.id] ?? 'connecting') === 'connecting' ? 'bg-amber-400' :
-                                'bg-rose-500'
-                              }`} />
+                              <span
+                                title={promptSessions.has(sess.id) ? "Waiting for you - focus this pane to answer" : undefined}
+                                className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                  promptSessions.has(sess.id) ? 'bg-primary animate-pulse' :
+                                  (sessionStatuses[sess.id] ?? 'connecting') === 'connected' ? 'bg-emerald-400' :
+                                  (sessionStatuses[sess.id] ?? 'connecting') === 'connecting' ? 'bg-amber-400' :
+                                  'bg-rose-500'
+                                }`}
+                              />
                               <span className="font-bold text-zinc-200 uppercase tracking-wider truncate flex-1">
                                 {tabLabel(sess)}
                               </span>
@@ -1895,7 +1931,8 @@ function DesktopApp() {
                               onStatusChange={handleSessionStatus}
                               onTerminalsChange={handleTerminalsChange}
                               chromeless={isVisible && isTiled && !isFocused}
-                              isActiveView={activeView === sess.id}
+                              isActiveView={isFocused}
+                              onPromptChange={handlePromptChange}
                             />
                           </ErrorBoundary>
                         </div>
