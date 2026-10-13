@@ -9,7 +9,7 @@ import { useIsNarrow } from '../hooks/useViewport';
 import { MobileKeyBar, ModifiersState, ModKey, SpecialKey } from './MobileKeyBar';
 import { useBroadcast } from '../ui/broadcast';
 import HistorySearchOverlay from './HistorySearchOverlay';
-import { fontFamilyCss, readFontFamily, readFontSize } from '../util/terminalFont';
+import { bundledAlias, fontFamilyCss, readFontFamily, readFontSize } from '../util/terminalFont';
 import { IS_ANDROID } from '../util/platform';
 
 // Does the recent remote OUTPUT look like a no-echo password / passphrase
@@ -824,15 +824,27 @@ const TerminalView = ({
     // Handle Settings Change - font size and face apply live to open terminals.
     let fontDisposed = false;
     // A newer change can start another fonts.load before the previous one
-    // settles. Only the latest generation may apply.
+    // settles. Only the latest generation may apply. A no-op event (colors,
+    // sync) does not bump the generation, so it cannot cancel a load.
     let fontApplyGen = 0;
+    // The constructor already named the saved face. A bundled file is still
+    // fetching then, and xterm only remeasures when fontFamily changes.
+    let bundledMeasured = false;
     const handleSettingsChange = () => {
-      const generation = ++fontApplyGen;
       const size = readFontSize();
       const family = fontFamilyCss(readFontFamily());
-      if (term.options.fontSize === size && term.options.fontFamily === family) return;
+      const unchanged = term.options.fontSize === size && term.options.fontFamily === family;
+      const remeasureBundled = !bundledMeasured && unchanged && readFontFamily().split(',').some(
+        (part) => bundledAlias(part.replace(/["']/g, '')) !== null,
+      );
+      if (unchanged && !remeasureBundled) return;
+      if (remeasureBundled) bundledMeasured = true;
+      const generation = ++fontApplyGen;
       const apply = () => {
         if (fontDisposed || generation !== fontApplyGen) return;
+        if (remeasureBundled && term.options.fontFamily === family) {
+          term.options.fontFamily = `${family}, monospace`;
+        }
         term.options.fontSize = size;
         term.options.fontFamily = family;
         try {
@@ -847,6 +859,7 @@ const TerminalView = ({
       else apply();
     };
     window.addEventListener('submarine-settings-changed', handleSettingsChange);
+    handleSettingsChange();
 
     // ── Mobile QoL ───────────────────────────────────────────────────────────
     // Capture the container ref here so the listener add/remove calls and the
