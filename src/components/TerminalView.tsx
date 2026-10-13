@@ -706,7 +706,9 @@ const TerminalView = ({
       return lines.join('\n');
     };
     const copySelectionIfAny = async () => {
-      const text = buildSelectedText();
+      // A selection that runs past the last line ends in empty rows: Ctrl+Shift+A
+      // takes the whole buffer, the blank rows under the prompt included.
+      const text = buildSelectedText().replace(/\n+$/, '');
       if (!text) return;
       const ok = await writeClipboard(text);
       if (ok) notify('Copied');
@@ -781,21 +783,38 @@ const TerminalView = ({
       ev.preventDefault();
       void pasteClipboard(true);
     };
-    // Linux: Ctrl+Shift+V and Shift+Insert are taken from the webview, whose
-    // own paste crashes when the clipboard is empty, and go through the same
-    // path as a right-click. No toast: a keyboard paste is the usual one.
-    if (IS_LINUX) {
-      term.attachCustomKeyEventHandler((ev) => {
+    // Ctrl+Shift+A selects the whole buffer and Ctrl+Shift+C copies the
+    // selection, on every platform. The shifted combo keeps plain Ctrl+A
+    // (start of line) and Ctrl+C (interrupt) going to the shell. xterm.js
+    // allows only one custom key handler, so the Linux paste keys share it.
+    term.attachCustomKeyEventHandler((ev) => {
+      const noOtherMods = !ev.altKey && !ev.metaKey && ev.ctrlKey && ev.shiftKey;
+      if (noOtherMods && ev.code === 'KeyA') {
+        if (ev.type === 'keydown' && !ev.repeat) term.selectAll();
+        ev.preventDefault();
+        return false;
+      }
+      if (noOtherMods && ev.code === 'KeyC') {
+        if (ev.type === 'keydown' && !ev.repeat) void copySelectionIfAny();
+        ev.preventDefault();
+        return false;
+      }
+      // Linux: Ctrl+Shift+V and Shift+Insert are taken from the webview, whose
+      // own paste crashes when the clipboard is empty, and go through the same
+      // path as a right-click. No toast: a keyboard paste is the usual one.
+      if (IS_LINUX) {
         const isPasteKey = !ev.altKey && !ev.metaKey && (
           (ev.ctrlKey && ev.shiftKey && ev.code === 'KeyV') ||
           (ev.shiftKey && !ev.ctrlKey && ev.key === 'Insert')
         );
-        if (!isPasteKey) return true;
-        ev.preventDefault();
-        if (ev.type === 'keydown' && !ev.repeat) void pasteClipboard(false);
-        return false;
-      });
-    }
+        if (isPasteKey) {
+          ev.preventDefault();
+          if (ev.type === 'keydown' && !ev.repeat) void pasteClipboard(false);
+          return false;
+        }
+      }
+      return true;
+    });
     terminalRef.current.addEventListener('mousedown', onMouseDown);
     document.addEventListener('mouseup', onDocMouseUp);
     window.addEventListener('blur', onWindowBlur);
