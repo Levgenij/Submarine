@@ -23,6 +23,7 @@ mod docker;
 mod archive;
 mod hlc;
 mod identity;
+mod fonts;
 #[cfg(test)]
 mod ssh_test_server;
 use ssh_manager::SshState;
@@ -15269,7 +15270,8 @@ pub fn run() {
             monitor_list, monitor_add, monitor_remove, monitor_set_metrics, monitor_set_custom_metrics,
             monitor_resume, monitor_pause, monitor_resume_all, monitor_pause_all,
             monitor_get_settings, monitor_set_settings,
-            about::app_info, about::check_for_updates, about::open_external_url
+            about::app_info, about::check_for_updates, about::open_external_url,
+            fonts::list_system_fonts
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Settings, Palette, RefreshCw, List, Cloud, History, Minus, Plus } from "lucide-react";
 import {
-  FONT_PRESETS, MAX_FONT_SIZE, MIN_FONT_SIZE, clampFontSize, fontFamilyCss,
+  MAX_FONT_SIZE, MIN_FONT_SIZE, clampFontSize, fontFamilyCss,
   isFontAvailable, primaryFontName, sanitizeFontFamily,
 } from "../util/terminalFont";
+import FontPicker from "./FontPicker";
 
 const PrefToggle = ({ checked, onToggle, label }: { checked: boolean; onToggle: () => void; label: string }) => (
   <button
@@ -68,29 +69,19 @@ function TerminalFontSettings({ settings, setSettings }: any) {
             </button>
           )}
         </div>
-        <input
-          id="term-font-family"
-          list="term-font-presets"
+        <FontPicker
           value={familyDraft}
-          onChange={(e) => onFamilyChange(e.target.value)}
-          onBlur={(e) => commitFamily(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") commitFamily((e.target as HTMLInputElement).value); }}
-          placeholder="Default monospace - e.g. Cascadia Code, MesloLGS NF"
-          spellCheck={false}
-          autoCapitalize="off"
-          autoCorrect="off"
-          className="w-full h-9 bg-black border border-white/10 rounded-lg px-3 text-[12.5px] text-white placeholder:text-zinc-600 focus:border-primary/50 outline-none"
+          onChange={onFamilyChange}
+          onCommit={commitFamily}
+          placeholder="Default monospace - pick from the list or type a font name"
         />
-        <datalist id="term-font-presets">
-          {FONT_PRESETS.map((f) => <option key={f} value={f} />)}
-        </datalist>
         {!installed && (
           <p className="text-[11.5px] text-amber-400/90">
             "{primaryFontName(familyDraft)}" doesn't seem to be installed on this device, so the default font is used instead.
           </p>
         )}
         <p className="text-[11.5px] text-zinc-500 leading-relaxed">
-          Any font installed on this device works, including Nerd Fonts for starship / powerline prompts. On Android only the system fonts are available.
+          Built-in fonts ship with the app and work on every device. Any font installed on this device works too, including Nerd Fonts for starship / powerline prompts.
         </p>
       </div>
 
