@@ -187,7 +187,7 @@ const ToolPanelActions = ({ slot, onClose, children }: {
   slot
 ) : null;
 
-const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, chromeless = false, onTerminalsChange }: any) => {
+const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, chromeless = false, onTerminalsChange, isActiveView = false }: any) => {
   const [status, setStatus] = useState<'connecting' | 'connected' | 'failed' | 'disconnected'>('connecting');
 
   // Bubble every status change up to the parent so the session-tab strip
@@ -475,6 +475,31 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
       onTerminalsChange(session.id, terminals, activeTab);
     }
   }, [session?.id, terminals, activeTab, onTerminalsChange]);
+
+  // Focus the terminal when its tab (or this session's server tab) is
+  // selected. We don't reach into xterm from here; we bump a monotonic
+  // signal that TerminalView watches, and the terminal that is currently
+  // active focuses itself (with its own touch / input / dialog guards).
+  // `requestTerminalFocus` is the single entry point so the "don't fight
+  // an open auth prompt" rule lives in one place.
+  const [focusTick, setFocusTick] = useState(0);
+  const requestTerminalFocus = () => {
+    // A fingerprint / 2FA prompt owns the keyboard while it's up - don't
+    // yank focus out from under the user answering it. (TerminalView also
+    // refuses focus while disabled, which it is during these prompts.)
+    if (fingerprintPrompt || kbiPrompt) return;
+    setFocusTick(t => t + 1);
+  };
+  // When this SessionView becomes the frontmost server tab, pull focus into
+  // its active terminal so switching servers lets you type right away.
+  const prevActiveViewRef = useRef(isActiveView);
+  useEffect(() => {
+    const was = prevActiveViewRef.current;
+    prevActiveViewRef.current = isActiveView;
+    if (isActiveView && !was) requestTerminalFocus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isActiveView]);
+
   const [activeTool, setActiveTool] = useState<ToolId | null>(null);
   // Right end of the tool tab row, where the open pane's ToolPanelActions portal in.
   const [toolHeaderSlot, setToolHeaderSlot] = useState<HTMLDivElement | null>(null);
@@ -1160,6 +1185,10 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   setSplitRatios([]);
                 }
                 setActiveTab(t.id);
+                // Land the caret in the terminal even when the active one
+                // didn't change (re-clicking the current tab, or focus was in
+                // a tool pane / another input).
+                requestTerminalFocus();
               }}
               title={t.container ? `Container: ${t.container.name}` : undefined}
               className={`h-8 px-3 sm:px-4 ${terminals.length > 1 ? 'pr-8' : ''} rounded-lg flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider transition-all ${
@@ -1486,6 +1515,8 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                       terminalId={t.id}
                       disabled={status !== 'connected'}
                       isActive={isFocused && !(activeTool && isCompact)}
+                      isActiveView={isActiveView}
+                      focusSignal={focusTick}
                       containerExec={t.container ? { container: t.container.name, useSudo: t.container.useSudo } : undefined}
                       connectionEpoch={connectionEpoch}
                       serverId={session.serverId}
@@ -1607,6 +1638,8 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   terminalId={t.id}
                   disabled={status !== 'connected'}
                   isActive={activeTab === t.id && !(activeTool && isCompact)}
+                  isActiveView={isActiveView}
+                  focusSignal={focusTick}
                   containerExec={t.container ? { container: t.container.name, useSudo: t.container.useSudo } : undefined}
                   connectionEpoch={connectionEpoch}
                   serverId={session.serverId}

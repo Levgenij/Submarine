@@ -1879,6 +1879,7 @@ function DesktopApp() {
                               onStatusChange={handleSessionStatus}
                               onTerminalsChange={handleTerminalsChange}
                               chromeless={isVisible && isTiled && !isFocused}
+                              isActiveView={activeView === sess.id}
                             />
                           </ErrorBoundary>
                         </div>
