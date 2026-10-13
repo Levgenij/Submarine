@@ -30,13 +30,24 @@ export function parentPathOf(path: string, sep: "/" | "\\"): string {
   return trimmed.slice(0, idx);
 }
 
-// The backend lists the canonicalized directory, so on Windows entry paths
-// come back with the verbatim prefix (`\\?\C:\Users`, `\\?\UNC\srv\share`).
-// Drop it so the path bar and every later call use the ordinary form.
+// `local_list_dir` drops a Windows verbatim prefix only when the plain form
+// names the same file, and returns that form on each entry. A prefix that is
+// still present (`\\?\C:\data\trailing `, `\\?\C:\data\nul`) must be kept:
+// stripping it would open a different file. This helper is for an ordinary
+// verbatim path the pane already held.
 export function stripVerbatimPrefix(path: string): string {
   const unc = path.match(/^\\\\\?\\UNC\\(.*)$/i);
   if (unc) return `\\\\${unc[1]}`;
   return path.replace(/^\\\\\?\\(?=[a-zA-Z]:)/, "");
+}
+
+// Directory shown in the path bar after a listing. A bare drive letter is
+// that drive's root (the listing maps it the same way). A verbatim prefix
+// the backend kept is part of the name.
+function shownLocalDir(path: string): string {
+  if (/^[a-zA-Z]:$/.test(path)) return `${path}\\`;
+  if (path.startsWith("\\\\?\\") || path.startsWith("\\\\.\\")) return path;
+  return stripVerbatimPrefix(path);
 }
 
 export function createLocalProvider(): LocalFileProvider {
@@ -86,13 +97,13 @@ export function createLocalProvider(): LocalFileProvider {
       const raw = await invoke<RawLocalEntry[]>("local_list_dir", { path });
       const entries: FileEntry[] = raw.map((r) => ({
         name: r.name,
-        path: stripVerbatimPrefix(r.path),
+        path: r.path,
         isDir: r.is_dir,
         size: r.size,
         modified: r.modified,
       }));
       if (entries.length > 0) inferSep(entries[0].path);
-      return { currentPath: stripVerbatimPrefix(path), entries };
+      return { currentPath: shownLocalDir(path), entries };
     },
 
     joinPath(dir: string, name: string) {

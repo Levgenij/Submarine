@@ -9256,8 +9256,9 @@ async fn sftp_download_dir(
 
     // Destination is the PARENT directory. We'll create remote_path's
     // basename underneath it so the user gets `local/{folder}/...`,
-    // matching scp -r and rsync semantics.
-    let _guarded_local = guard_local_path(&local_path, true)?;
+    // matching scp -r and rsync semantics. The write policy runs on that
+    // new folder, not on the parent: a drive root is a valid place to put
+    // a folder, and a system folder is not.
 
     // Overwrite protection for the destination folder: if the target
     // `local_path/{folder}` already exists, refuse unless explicitly
@@ -9269,6 +9270,10 @@ async fn sftp_download_dir(
             .rsplit('/')
             .next()
             .unwrap_or("folder");
+        // An empty basename (`/`) still creates a folder named `folder`.
+        // That is the path the policy has to see.
+        let created = if folder_name.is_empty() { "folder" } else { folder_name };
+        check_download_dir_target(&local_path, created)?;
         let dst_root = std::path::PathBuf::from(&local_path).join(folder_name);
         if overwrite != Some(true) && dst_root.exists() {
             return Err(format!("EXISTS:{}", dst_root.to_string_lossy()));
@@ -11776,8 +11781,168 @@ pub(crate) fn is_safe_dir_entry_name(name: &str) -> bool {
         && !name.contains('\0')
 }
 
+/// `C:` alone is the process's current directory on that drive. Callers that
+/// mean the drive turn it into `C:\` before the absolute-path check.
+/// `guard_local_path_nofollow` does not: a bare letter is not a directory entry.
+fn expand_bare_drive(path: &str) -> std::borrow::Cow<'_, str> {
+    #[cfg(windows)]
+    {
+        let b = path.as_bytes();
+        if b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+            return std::borrow::Cow::Owned(format!("{path}\\"));
+        }
+    }
+    std::borrow::Cow::Borrowed(path)
+}
+
+/// A relative path (`name`, `sub/name`, `./name`, `../name`, and on Windows
+/// `G:name` or `\name`) would be resolved against whatever folder the app
+/// happens to run in.
+fn require_full_path(p: &std::path::Path) -> Result<(), String> {
+    if p.is_absolute() {
+        Ok(())
+    } else {
+        Err(format!("Not a full path: {}", p.display()))
+    }
+}
+
+/// True when Win32 opens this component as the name written. A trailing dot
+/// or space is stripped, and a reserved device name (`nul`, `aux.txt`) opens
+/// a device, so the plain form would name a different file.
+#[cfg(windows)]
+fn win32_component_is_exact(name: &str) -> bool {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+        || name.contains(':')
+        || matches!(name.chars().last(), Some('.') | Some(' '))
+    {
+        return false;
+    }
+    let stem = name.split('.').next().unwrap_or(name).trim_end_matches(' ');
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+        "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "COM\u{00B9}", "COM\u{00B2}", "COM\u{00B3}",
+        "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "LPT\u{00B9}", "LPT\u{00B2}", "LPT\u{00B3}",
+    ];
+    !RESERVED.iter().any(|reserved| stem.eq_ignore_ascii_case(reserved))
+}
+
+/// A local path the way it is shown and handed back. On Windows, `canonicalize`
+/// answers in the verbatim form (`\\?\C:\Users\me`). The prefix is dropped
+/// only when the plain form names the same file. It is kept for a reserved
+/// device name, a trailing dot or space, a path too long for the plain form,
+/// or anything that is not a drive or a share.
+fn display_path(path: &std::path::Path) -> String {
+    let full = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        let (plain, below_root) = if let Some(rest) = full.strip_prefix(r"\\?\UNC\") {
+            (format!(r"\\{rest}"), rest)
+        } else if let Some(rest) = full.strip_prefix(r"\\?\") {
+            let b = rest.as_bytes();
+            if b.len() < 3 || !b[0].is_ascii_alphabetic() || b[1] != b':' || b[2] != b'\\' {
+                return full.into_owned();
+            }
+            (rest.to_string(), &rest[3..])
+        } else {
+            return full.into_owned();
+        };
+        let ordinary = below_root.split('\\').filter(|part| !part.is_empty()).all(win32_component_is_exact);
+        // Windows counts a path's length in UTF-16 units.
+        if ordinary && plain.encode_utf16().count() < 248 {
+            return plain;
+        }
+    }
+    full.into_owned()
+}
+
+/// The system folders `check_local_path_policy` refuses, as lowercase paths
+/// with `/`. On Windows they are also read from the environment, because
+/// Windows and its program folders are not always on drive C. On macOS,
+/// `/etc` and `/var` are links into `/private`, and a checked path is already
+/// resolved, so those folders are listed there too.
+fn system_dirs(var: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    let fixed: &[&str] = if cfg!(windows) {
+        &["c:/windows", "c:/program files", "c:/program files (x86)", "c:/programdata"]
+    } else {
+        &[
+            "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/boot",
+            "/sys", "/proc", "/dev", "/var/log", "/var/run", "/root",
+            "/private/etc", "/private/var/log", "/private/var/run", "/system",
+        ]
+    };
+    let mut dirs: Vec<String> = fixed.iter().map(|dir| (*dir).to_string()).collect();
+    if cfg!(windows) {
+        for name in ["SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData"] {
+            let Some(value) = var(name) else { continue };
+            let dir = value.trim().to_lowercase().replace('\\', "/");
+            let dir = dir.trim_end_matches('/');
+            // Only a folder below a drive's root: `x:/...`. A blank, a relative
+            // path, or the root itself would refuse too much.
+            let b = dir.as_bytes();
+            if b.len() > 3
+                && b[0].is_ascii_alphabetic()
+                && b[1] == b':'
+                && b[2] == b'/'
+                && !dirs.iter().any(|existing| existing == dir)
+            {
+                dirs.push(dir.to_string());
+            }
+        }
+    }
+    dirs
+}
+
+fn normalized_local_path(canonical: &std::path::Path) -> String {
+    let mut canon_norm = canonical.to_string_lossy().to_lowercase().replace('\\', "/");
+    // `canonicalize` returns `\\?\C:\Windows\System32`. After `\` -> `/` that
+    // is `//?/c:/windows/system32`, which would miss `c:/windows`. Strip the
+    // verbatim prefix, its `\\?\UNC\` form, and an NT-device `\\.\` prefix.
+    if let Some(rest) = canon_norm.strip_prefix("//?/unc/") {
+        canon_norm = format!("//{rest}");
+    } else if let Some(rest) = canon_norm.strip_prefix("//?/") {
+        canon_norm = rest.to_string();
+    } else if let Some(rest) = canon_norm.strip_prefix("//./") {
+        canon_norm = rest.to_string();
+    }
+    canon_norm.trim_end_matches('/').to_string()
+}
+
+fn path_is_under(canon_norm: &str, dir: &str) -> bool {
+    canon_norm == dir || canon_norm.starts_with(&format!("{dir}/"))
+}
+
+fn is_system_dir(canon_norm: &str) -> bool {
+    if system_dirs(|name| std::env::var(name).ok()).iter().any(|dir| path_is_under(canon_norm, dir)) {
+        return true;
+    }
+    // Every drive has these two, not just drive C, and only at its top.
+    if cfg!(windows) && canon_norm.as_bytes().get(1) == Some(&b':') {
+        let below_drive = &canon_norm[2..];
+        return ["/system volume information", "/$recycle.bin"].iter().any(|dir| {
+            below_drive == *dir || below_drive.starts_with(&format!("{dir}/"))
+        });
+    }
+    false
+}
+
+/// Defense-in-depth guard for local writes the frontend can invoke.
+///
+/// The path has to be absolute. A bare drive letter is that drive's root
+/// before that check. The filesystem root, OS system directories, and
+/// login-persistence folders are refused. Listing a root or a system folder
+/// goes through `resolve_listed_dir` instead; this guard still refuses writes
+/// there. Live-edit stages under the session temp dir and does not call this.
 fn guard_local_path(path: &str, allow_nonexistent: bool) -> Result<std::path::PathBuf, String> {
-    let p = std::path::Path::new(path);
+    let typed = expand_bare_drive(path);
+    let p = std::path::Path::new(typed.as_ref());
+    require_full_path(p)?;
     let canonical = match p.canonicalize() {
         Ok(c) => c,
         Err(e) => {
@@ -11805,8 +11970,10 @@ fn guard_local_path(path: &str, allow_nonexistent: bool) -> Result<std::path::Pa
 /// would change the file or folder the link points at, and a dangling link
 /// could not be removed at all. The parent is still canonicalized, existence
 /// is `symlink_metadata` (lstat), and the same system-path policy applies.
+/// A bare drive letter is not mapped here: it is not a directory entry.
 fn guard_local_path_nofollow(path: &str, must_exist: bool) -> Result<std::path::PathBuf, String> {
     let p = std::path::Path::new(path);
+    require_full_path(p)?;
     let file = p.file_name().ok_or_else(|| format!("Invalid path: {}", path))?;
     let parent = p
         .parent()
@@ -11825,44 +11992,12 @@ fn guard_local_path_nofollow(path: &str, must_exist: bool) -> Result<std::path::
 fn check_local_path_policy(canonical: std::path::PathBuf) -> Result<std::path::PathBuf, String> {
     // Refuse the filesystem root itself (`/`, `C:\`, etc.).
     if canonical.parent().is_none() {
-        return Err(format!("Refusing to operate on filesystem root: {}", canonical.display()));
+        return Err(format!("Refusing to operate on filesystem root: {}", display_path(&canonical)));
     }
 
-    let mut canon_norm = canonical.to_string_lossy().to_lowercase().replace('\\', "/");
-    // On Windows, std::fs::canonicalize returns a `\\?\`-prefixed *verbatim*
-    // path, e.g. `\\?\C:\Windows\System32`. After the `\` -> `/` normalization
-    // above that becomes `//?/c:/windows/system32`, which never matches the
-    // blocklist entries `c:/windows`, `c:/program files`, etc. - silently
-    // defeating this guard for every Windows system directory. Strip the
-    // verbatim prefix (and its `\\?\UNC\` variant for UNC paths) so the
-    // subsequent prefix match sees a normal drive-letter path. Also strip the
-    // NT-device `\\.\` prefix on the off chance a caller hands us one.
-    if let Some(rest) = canon_norm.strip_prefix("//?/unc/") {
-        canon_norm = format!("//{}", rest);
-    } else if let Some(rest) = canon_norm.strip_prefix("//?/") {
-        canon_norm = rest.to_string();
-    } else if let Some(rest) = canon_norm.strip_prefix("//./") {
-        canon_norm = rest.to_string();
-    }
-    // Trim trailing slash for clean prefix matches.
-    let canon_norm = canon_norm.trim_end_matches('/').to_string();
-
-    let blocked: &[&str] = if cfg!(windows) {
-        &[
-            "c:/windows", "c:/program files", "c:/program files (x86)",
-            "c:/programdata", "c:/system volume information", "c:/$recycle.bin",
-        ]
-    } else {
-        &[
-            "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/boot",
-            "/sys", "/proc", "/dev", "/var/log", "/var/run", "/root",
-        ]
-    };
-    for prefix in blocked {
-        let pfx = prefix.to_lowercase();
-        if canon_norm == pfx || canon_norm.starts_with(&format!("{}/", pfx)) {
-            return Err(format!("Refusing operation on system path: {}", canonical.display()));
-        }
+    let canon_norm = normalized_local_path(&canonical);
+    if is_system_dir(&canon_norm) {
+        return Err(format!("Refusing operation on system path: {}", display_path(&canonical)));
     }
 
     // Auto-run / login-persistence locations. Unlike the fixed system-dir
@@ -11883,11 +12018,42 @@ fn check_local_path_policy(canonical: std::path::PathBuf) -> Result<std::path::P
     ];
     for marker in PERSIST_MARKERS {
         if canon_norm.contains(marker) {
-            return Err(format!("Refusing operation on auto-run / persistence path: {}", canonical.display()));
+            return Err(format!("Refusing operation on auto-run / persistence path: {}", display_path(&canonical)));
         }
     }
 
     Ok(canonical)
+}
+
+/// Where a folder download goes, `{parent}/{name}`, before anything is
+/// created there. `parent` has to be a full path: joined onto `C:` without a
+/// separator, or onto a relative path, the folder would be created under
+/// wherever the app was started from. The policy is asked about `parent/name`,
+/// so a drive root is a valid parent and a system folder is not.
+fn check_download_dir_target(parent: &str, name: &str) -> Result<(), String> {
+    let parent_dir = std::path::Path::new(parent);
+    if !parent_dir.is_absolute() {
+        return Err(format!("The folder to download into isn't a full path: {}", parent));
+    }
+    guard_local_path(&parent_dir.join(name).to_string_lossy(), true)?;
+    Ok(())
+}
+
+/// The folder a listing opens. A filesystem root and a system folder can be
+/// browsed. Every other path still goes through `check_local_path_policy`,
+/// so a persistence location stays refused. Writes do not use this.
+fn resolve_listed_dir(path: &str) -> Result<std::path::PathBuf, String> {
+    let typed = expand_bare_drive(path);
+    let p = std::path::Path::new(typed.as_ref());
+    require_full_path(p)?;
+    let canonical = p.canonicalize().map_err(|e| format!("Invalid path: {}", e))?;
+    if !canonical.is_dir() {
+        return Err("Path is not a directory".into());
+    }
+    if canonical.parent().is_none() || is_system_dir(&normalized_local_path(&canonical)) {
+        return Ok(canonical);
+    }
+    check_local_path_policy(canonical)
 }
 
 #[tauri::command]
@@ -12135,20 +12301,9 @@ async fn select_local_folder() -> Result<Option<String>, String> {
 
 #[tauri::command]
 async fn local_list_dir(path: String) -> Result<Vec<LocalFileEntry>, String> {
-    // Listing is read-only, so the filesystem root (`/`, `C:\`) is allowed
-    // here even though `guard_local_path` refuses it for every other local
-    // command. Only a path that is literally a root skips the guard: it has
-    // no component that could be a symlink or `..`, so there is nothing to
-    // canonicalize. Anything else still goes through the guard.
-    let as_path = std::path::Path::new(&path);
-    let safe = if as_path.has_root() && as_path.parent().is_none() {
-        as_path.to_path_buf()
-    } else {
-        guard_local_path(&path, false)?
-    };
-    if !safe.is_dir() {
-        return Err("Path is not a directory".into());
-    }
+    // Still an array: describeDroppedPaths maps it by name. A root and a
+    // system folder can be browsed; other paths still hit the write policy.
+    let safe = resolve_listed_dir(&path)?;
 
     let mut entries = Vec::new();
     let read_dir = std::fs::read_dir(&safe).map_err(|e| format!("Failed to read directory: {}", e))?;
@@ -12159,7 +12314,7 @@ async fn local_list_dir(path: String) -> Result<Vec<LocalFileEntry>, String> {
             let is_dir = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
             let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
             let name = entry.file_name().to_string_lossy().to_string();
-            let full_path = entry.path().to_string_lossy().to_string();
+            let full_path = display_path(&entry.path());
             
             let modified = metadata.as_ref()
                 .and_then(|m| m.modified().ok())
@@ -12186,6 +12341,320 @@ async fn local_list_dir(path: String) -> Result<Vec<LocalFileEntry>, String> {
     });
 
     Ok(entries)
+}
+
+#[cfg(test)]
+mod local_path_policy {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn scratch(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "submarine-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A root that exists on this machine, in the form the path bar shows.
+    fn a_root() -> String {
+        let here = std::env::temp_dir().canonicalize().unwrap();
+        display_path(here.ancestors().last().unwrap())
+    }
+
+    /// A real system folder, as the root that holds it and its name.
+    fn a_system_folder() -> Option<(String, String)> {
+        let path = if cfg!(windows) {
+            std::env::var("SystemRoot")
+                .ok()
+                .map(|value| {
+                    let trimmed = value.trim().trim_end_matches(|ch| ch == '\\' || ch == '/');
+                    PathBuf::from(trimmed)
+                })
+                .filter(|path| path.is_dir())
+                .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+        } else {
+            PathBuf::from("/usr")
+        };
+        if !path.is_dir() {
+            return None;
+        }
+        let name = path.file_name()?.to_string_lossy().to_string();
+        let root = display_path(path.parent()?);
+        Some((root, name))
+    }
+
+    #[test]
+    fn only_full_paths_are_written_to() {
+        let mut relative = vec!["name", "sub/name", "./name", "../name"];
+        if cfg!(windows) {
+            relative.extend([r"G:name", r"\name"]);
+        }
+        for path in relative {
+            assert!(
+                guard_local_path(path, true).unwrap_err().starts_with("Not a full path"),
+                "{path}"
+            );
+            assert!(
+                guard_local_path_nofollow(path, false).unwrap_err().starts_with("Not a full path"),
+                "{path}"
+            );
+        }
+        if cfg!(windows) {
+            // A bare drive letter is that drive's root, then the write policy
+            // refuses the root. It is not rejected as a relative path.
+            // Delete and rename do not map it, so it stays "not a full path".
+            let root = a_root();
+            if let Some(drive) = root.strip_suffix('\\').filter(|drive| drive.len() == 2) {
+                let err = guard_local_path(drive, true).unwrap_err();
+                assert!(err.contains("filesystem root"), "{drive}: {err}");
+            }
+            assert!(
+                guard_local_path_nofollow("C:", false).unwrap_err().starts_with("Not a full path")
+            );
+        }
+        let here = std::env::temp_dir().join("submarine-no-such-file");
+        assert!(guard_local_path(&here.to_string_lossy(), true).is_ok());
+    }
+
+    #[test]
+    fn system_folders_are_found_wherever_windows_put_them() {
+        let env = |var: &str| match var {
+            "SystemRoot" => Some(r"D:\Windows".to_string()),
+            "ProgramFiles" => Some(r"E:\Apps\".to_string()),
+            "ProgramData" => Some(String::new()),
+            "windir" => Some(r"relative\path".to_string()),
+            "ProgramW6432" => Some(r"F:\".to_string()),
+            _ => None,
+        };
+        let dirs = system_dirs(env);
+        if cfg!(windows) {
+            assert!(dirs.iter().any(|dir| dir == "d:/windows"), "{dirs:?}");
+            assert!(dirs.iter().any(|dir| dir == "e:/apps"), "{dirs:?}");
+            assert!(dirs.iter().any(|dir| dir == "c:/windows"), "the usual place stays: {dirs:?}");
+            // A blank, a relative path, or a whole drive refuses nothing.
+            assert!(dirs.iter().all(|dir| dir.len() > 3 && dir.as_bytes()[1] == b':'), "{dirs:?}");
+            assert!(check_local_path_policy(PathBuf::from(r"\\?\C:\Windows\System32\x")).is_err());
+        } else {
+            for dir in ["/etc", "/private/etc", "/private/var/log", "/private/var/run", "/system"] {
+                assert!(dirs.iter().any(|got| got == dir), "{dir} in {dirs:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn windows_directories_from_the_environment_are_refused() {
+        if !cfg!(windows) {
+            return;
+        }
+        for var in ["SystemRoot", "ProgramFiles", "ProgramData"] {
+            let Ok(dir) = std::env::var(var) else { continue };
+            let dir = dir.trim().trim_end_matches(|ch| ch == '\\' || ch == '/');
+            if !Path::new(dir).is_dir() {
+                continue;
+            }
+            let target = format!("{dir}\\submarine-no-such-file");
+            let err = guard_local_path(&target, true).unwrap_err();
+            assert!(err.contains("system path"), "{var}={dir}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_drives_own_system_folders_are_refused_on_every_drive() {
+        if !cfg!(windows) {
+            return;
+        }
+        for path in [r"\\?\D:\System Volume Information\x", r"E:\$Recycle.Bin", r"\\?\Z:\$RECYCLE.BIN\S-1-5\f"] {
+            assert!(check_local_path_policy(PathBuf::from(path)).is_err(), "{path}");
+        }
+        // Only at the top of a drive.
+        assert!(check_local_path_policy(PathBuf::from(r"D:\data\System Volume Information")).is_ok());
+        assert!(check_local_path_policy(PathBuf::from(r"D:\data\$Recycle.Bin.txt")).is_ok());
+        assert!(check_local_path_policy(PathBuf::from(
+            r"C:\Users\me\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\a.exe"
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn system_folders_are_refused_where_macos_really_keeps_them() {
+        if cfg!(windows) {
+            return;
+        }
+        for path in ["/private/etc/hosts", "/private/var/log/x", "/private/var/run/x", "/System/Library/x", "/etc/x"] {
+            assert!(check_local_path_policy(PathBuf::from(path)).is_err(), "{path}");
+        }
+        assert!(check_local_path_policy(PathBuf::from("/private/tmp/x")).is_ok());
+        assert!(check_local_path_policy(PathBuf::from("/home/me/systemd.txt")).is_ok());
+    }
+
+    #[test]
+    fn a_folder_is_only_downloaded_into_a_full_path() {
+        let mut not_full = vec!["", ".", "relative", "relative/dir"];
+        if cfg!(windows) {
+            not_full.extend(["C:", r"\no-drive", "/no-drive"]);
+        }
+        for parent in not_full {
+            assert!(check_download_dir_target(parent, "data").is_err(), "{parent:?}");
+        }
+        let dir = std::env::temp_dir().to_string_lossy().to_string();
+        assert!(check_download_dir_target(&dir, "submarine-no-such-folder").is_ok());
+    }
+
+    #[test]
+    fn a_folder_can_be_downloaded_into_a_root_but_not_over_a_system_folder() {
+        assert!(check_download_dir_target(&a_root(), "submarine-no-such-folder").is_ok());
+        if let Some((root, name)) = a_system_folder() {
+            assert!(check_download_dir_target(&root, &name).is_err(), "{root} {name}");
+        }
+    }
+
+    #[test]
+    fn the_root_and_system_folders_can_be_listed_but_not_written() {
+        let root = a_root();
+        let listed = resolve_listed_dir(&root).expect("the root can be looked at");
+        assert!(listed.parent().is_none());
+        assert!(guard_local_path(&root, false).is_err(), "a root is still refused to anything that writes");
+        if let Some((root, name)) = a_system_folder() {
+            let system = Path::new(&root).join(&name);
+            let system = system.to_string_lossy().to_string();
+            assert!(resolve_listed_dir(&system).is_ok(), "{system}");
+            assert!(guard_local_path(&system, false).is_err(), "{system}");
+            assert!(guard_local_path_nofollow(&system, false).is_err(), "{system}");
+        }
+    }
+
+    #[test]
+    fn only_a_full_path_to_a_folder_is_listed() {
+        assert!(resolve_listed_dir("").unwrap_err().starts_with("Not a full path"));
+        assert!(resolve_listed_dir("relative/dir").unwrap_err().starts_with("Not a full path"));
+        assert!(resolve_listed_dir("..").unwrap_err().starts_with("Not a full path"));
+        assert!(resolve_listed_dir("./name").unwrap_err().starts_with("Not a full path"));
+        let a_file = std::env::current_exe().unwrap();
+        assert_eq!(
+            resolve_listed_dir(&a_file.to_string_lossy()).unwrap_err(),
+            "Path is not a directory"
+        );
+    }
+
+    #[test]
+    fn a_bare_drive_letter_means_the_drive() {
+        if !cfg!(windows) {
+            return;
+        }
+        let root = a_root();
+        let Some(drive) = root.strip_suffix('\\').filter(|drive| drive.len() == 2) else {
+            return;
+        };
+        let listed = resolve_listed_dir(drive).unwrap();
+        assert!(listed.parent().is_none(), "{listed:?}");
+        assert_eq!(listed, resolve_listed_dir(&root).unwrap());
+        let err = guard_local_path(drive, false).unwrap_err();
+        assert!(err.contains("filesystem root"), "{err}");
+    }
+
+    #[test]
+    fn the_verbatim_prefix_is_shown_only_when_it_is_needed() {
+        if !cfg!(windows) {
+            return;
+        }
+        let shown = |path: &str| display_path(Path::new(path));
+        assert_eq!(shown(r"\\?\C:\Users\me\Desktop"), r"C:\Users\me\Desktop");
+        assert_eq!(shown(r"\\?\C:\"), r"C:\");
+        assert_eq!(shown(r"\\?\UNC\server\share\dir"), r"\\server\share\dir");
+        assert_eq!(shown(r"C:\already\plain"), r"C:\already\plain");
+        for needed in [
+            r"\\?\C:\data\nul",
+            r"\\?\C:\data\trailing.",
+            r"\\?\C:\data\trailing ",
+            r"\\?\C:\data\aux.txt\x",
+            r"\\?\Volume{b75e2c83-0000-0000-0000-602f00000000}\x",
+        ] {
+            assert_eq!(shown(needed), needed);
+        }
+        let long = format!(r"\\?\C:\{}", "a".repeat(260));
+        assert_eq!(shown(&long), long);
+        // Long in bytes, not in the units Windows counts.
+        let wide = "\u{2605}".repeat(90);
+        assert_eq!(shown(&format!(r"\\?\C:\{wide}")), format!(r"C:\{wide}"));
+    }
+
+    #[test]
+    fn a_path_is_shown_as_it_is() {
+        if cfg!(windows) {
+            return;
+        }
+        assert_eq!(display_path(Path::new("/var/www")), "/var/www");
+    }
+
+    #[test]
+    fn a_persistence_folder_is_not_listed() {
+        let root = scratch("persist");
+        let notes = root.join("notes");
+        let autostart = root.join(".config").join("autostart");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::create_dir_all(&autostart).unwrap();
+        assert!(resolve_listed_dir(&notes.to_string_lossy()).is_ok());
+        let err = resolve_listed_dir(&autostart.to_string_lossy()).unwrap_err();
+        assert!(err.contains("persistence"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_listing_returns_plain_entry_paths() {
+        let dir = scratch("list");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("f.txt"), b"x").unwrap();
+
+        let listed = local_list_dir(dir.to_string_lossy().to_string()).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        for entry in &listed {
+            assert!(!entry.path.starts_with(r"\\?\"), "{}", entry.path);
+        }
+        let sub = listed.iter().find(|entry| entry.is_dir).unwrap().path.clone();
+        assert_eq!(local_list_dir(sub.clone()).await.unwrap().len(), 0);
+        assert!(guard_local_path_nofollow(&sub, true).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_system_folder_listing_stays_an_array() {
+        let Some((root, name)) = a_system_folder() else { return };
+        let system = Path::new(&root).join(name).to_string_lossy().to_string();
+        let listed = local_list_dir(system).await.expect("a system folder can be browsed");
+        assert!(!listed.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_folder_whose_name_ends_in_a_space_is_listed_as_itself() {
+        let dir = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!(
+                "submarine-space-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("ends in a space ").join("inside")).unwrap();
+        std::fs::create_dir_all(dir.join("ends in a space")).unwrap();
+
+        let listed = local_list_dir(display_path(&dir)).await.unwrap();
+        let odd = listed.iter().find(|entry| entry.name.ends_with(' ')).expect("listed with its space");
+        assert!(odd.path.starts_with(r"\\?\"), "{}", odd.path);
+        let inside = local_list_dir(odd.path.clone()).await.unwrap();
+        assert_eq!(inside.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(), ["inside"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 // ---------------------------------------------------------------------------
