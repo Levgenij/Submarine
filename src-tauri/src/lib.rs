@@ -6966,6 +6966,8 @@ async fn connect_jump_host(
         // have no prompt of their own (see ClientHandler::prompt_allowed).
         prompt_allowed: !session_id.contains("::"),
         attempt: attempt.clone(),
+        // The watcher probes the session, not the bastion hop.
+        last_heard: ssh_manager::LastHeard::default(),
     };
 
     // 4. Handshake.
@@ -7465,6 +7467,9 @@ async fn initiate_connection(
     // to cover the human approval window instead of killing the prompt.
     let prompt_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let prompt_pending_for_driver = std::sync::Arc::clone(&prompt_pending);
+    // Stamped by the handler whenever the server sends something; read by the
+    // session watcher below.
+    let last_heard = ssh_manager::LastHeard::default();
 
     let handler = ssh_manager::ClientHandler {
         app: app.clone(),
@@ -7479,6 +7484,7 @@ async fn initiate_connection(
         prompt_pending: std::sync::Arc::clone(&prompt_pending),
         prompt_allowed: !is_secondary,
         attempt: attempt.clone(),
+        last_heard: last_heard.clone(),
     };
 
     let cleanup_nonce = connect_nonce.clone();
@@ -8096,17 +8102,32 @@ async fn initiate_connection(
                         // stays alive (see the retry block in the loop below).
                         let state_specs_w = Arc::clone(&state_session_tunnel_specs);
                         let targets_w = Arc::clone(&session_forwarded_targets);
+                        let last_heard_w = last_heard.clone();
                         let my_gen = connect_generation;
                         tauri::async_runtime::spawn(async move {
                             // Fallback liveness check for servers that do not
                             // answer keepalive@openssh.com: open a session
                             // channel and close it. Any answer counts as alive,
                             // including a refusal (a MaxSessions-limited server
-                            // refuses the open). A timeout or a dead handle
-                            // counts as dead.
+                            // refuses the open). A timeout counts as dead
+                            // unless LastHeard advanced during the wait and
+                            // the handle is still open. A dead handle counts
+                            // as dead.
+                            /// `channel_open_session` liveness probe. `Heard` is a timeout
+                            /// that still counts as alive: the server sent
+                            /// channel data or a window adjustment while we
+                            /// waited, and the handle is still open.
+                            enum ChannelProbe {
+                                Answered,
+                                Heard,
+                                Dead,
+                            }
+
                             async fn probe_with_channel<H: russh::client::Handler>(
                                 h: &russh::client::Handle<H>,
-                            ) -> bool {
+                                last_heard: &ssh_manager::LastHeard,
+                            ) -> ChannelProbe {
+                                let asked_at = ssh_manager::LastHeard::now();
                                 match tokio::time::timeout(
                                     std::time::Duration::from_secs(10),
                                     h.channel_open_session(),
@@ -8116,10 +8137,13 @@ async fn initiate_connection(
                                     Ok(Ok(ch)) => {
                                         // Close cleanly so the server doesn't log a stuck session.
                                         let _ = ch.close().await;
-                                        true
+                                        ChannelProbe::Answered
                                     }
-                                    Ok(Err(russh::Error::ChannelOpenFailure(_))) => true,
-                                    _ => false,
+                                    Ok(Err(russh::Error::ChannelOpenFailure(_))) => ChannelProbe::Answered,
+                                    Err(_) if last_heard.heard_since(asked_at) && !h.is_closed() => {
+                                        ChannelProbe::Heard
+                                    }
+                                    _ => ChannelProbe::Dead,
                                 }
                             }
 
@@ -8147,6 +8171,11 @@ async fn initiate_connection(
                             //     old one-strike/5s-timeout probe tore down
                             //     perfectly recoverable sessions — the exact
                             //     opposite of what a flaky link needs.
+                            //     A timed-out channel open still counts as
+                            //     alive when LastHeard advanced during the
+                            //     wait and the handle is still open: a slow
+                            //     transfer queues the probe behind its own
+                            //     data.
                             let probe_every: u32 = if sid_w.contains("::") { 30 } else { 15 };
                             let mut tick: u32 = 0;
                             let mut probe_strikes: u8 = 0;
@@ -8196,7 +8225,10 @@ async fn initiate_connection(
                                     // out spuriously.
                                     let alive = if ping_unanswered {
                                         let h = handle_arc.lock().await;
-                                        probe_with_channel(&h).await
+                                        !matches!(
+                                            probe_with_channel(&h, &last_heard_w).await,
+                                            ChannelProbe::Dead
+                                        )
                                     } else {
                                         let ping_alive = {
                                             let h = handle_arc.lock().await;
@@ -8228,11 +8260,19 @@ async fn initiate_connection(
                                             Some(up) => up,
                                             None => {
                                                 let h = handle_arc.lock().await;
-                                                let up = probe_with_channel(&h).await;
-                                                if up {
-                                                    ping_unanswered = true;
+                                                match probe_with_channel(&h, &last_heard_w).await {
+                                                    // The channel itself answered, so this
+                                                    // server does not reply to keepalive.
+                                                    ChannelProbe::Answered => {
+                                                        ping_unanswered = true;
+                                                        true
+                                                    }
+                                                    // Traffic during the wait: still alive,
+                                                    // but keep trying send_ping first. The
+                                                    // ping may have been queued, not ignored.
+                                                    ChannelProbe::Heard => true,
+                                                    ChannelProbe::Dead => false,
                                                 }
-                                                up
                                             }
                                         }
                                     };
@@ -8307,7 +8347,17 @@ async fn initiate_connection(
                                             _ => break, // superseded by a fresh connection — leave it be
                                         }
                                     }
-                                    state_sftp_w.lock().await.remove(&sid_w);
+                                    // Close the SFTP session too, not just drop
+                                    // it from the cache: a transfer holds its
+                                    // own Arc, and its pending requests would
+                                    // otherwise wait out the 240s deadline
+                                    // (sftp_client_config) on a link that is
+                                    // gone. close() only signals russh-sftp's
+                                    // own task; nothing is sent.
+                                    let dead_sftp = state_sftp_w.lock().await.remove(&sid_w);
+                                    if let Some(sftp) = dead_sftp {
+                                        let _ = sftp.close().await;
+                                    }
                                     // Tear down all tunnels bound to this
                                     // session so their listeners release the
                                     // local ports + bridge tasks exit. Without
@@ -8331,7 +8381,10 @@ async fn initiate_connection(
                                         tunnel::stop_all_for_session(&state_tunnels_w, base).await;
                                     }
                                     if let Some(base) = sid_w.strip_suffix("::sftp") {
-                                        state_sftp_w.lock().await.remove(base);
+                                        let dead_sftp = state_sftp_w.lock().await.remove(base);
+                                        if let Some(sftp) = dead_sftp {
+                                            let _ = sftp.close().await;
+                                        }
                                     }
                                     // Stop any mirrors bound to this session too — otherwise the
                                     // mirror worker keeps its own Arc<SftpSession> pointing at
@@ -9835,6 +9888,52 @@ async fn probe_sudo_sftp(session_arc: &SessionHandleArc, password: Option<&str>)
     Err(format!("{}: unexpected reply from the server", SUDO_FAILED))
 }
 
+/// Settings for every SFTP session the app opens: file browser, transfers,
+/// sudo sessions and mirrors.
+///
+/// russh-sftp gives each request a deadline that starts when it's sent, and
+/// keeps several requests in flight, so on a slow link the last one queued
+/// waits for the others and can run out of time while the transfer is still
+/// moving. With the default 10 s, a download (16 reads of up to 255 KiB = 4 MiB
+/// in flight) failed with "Timeout" on anything under ~3 Mbit/s, and an upload
+/// (16 writes of 32 KiB) under ~420 kbit/s. The same goes for a directory
+/// listing queued behind a running transfer.
+///
+/// 240 s per request carries downloads down to ~140 kbit/s and uploads down to
+/// ~17 kbit/s, and keeps the 16 reads in flight that fast high-latency links
+/// need. It doesn't make a dead connection hang: the session watcher closes
+/// the SFTP session when it gives up on the connection, and the requests still
+/// pending fail with it. The deadline is only for a server that stops
+/// answering on a connection that is still up.
+pub(crate) fn sftp_client_config() -> russh_sftp::client::Config {
+    russh_sftp::client::Config {
+        request_timeout_secs: 240,
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod sftp_config_tests {
+    use super::sftp_client_config;
+
+    /// What OpenSSH's sftp-server reports in limits@openssh.com as its
+    /// maximum read length (256 KiB message minus 1 KiB of headroom).
+    const OPENSSH_READ_LEN: u64 = 256 * 1024 - 1024;
+
+    #[test]
+    fn the_last_request_in_flight_beats_its_deadline_on_slow_links() {
+        let cfg = sftp_client_config();
+        let reads_in_flight = cfg.max_concurrent_reads as u64 * OPENSSH_READ_LEN;
+        let writes_in_flight = cfg.max_concurrent_writes as u64 * cfg.max_write_packet_len as u64;
+        // Bytes per second the link needs so the request queued behind all
+        // the others still gets its reply in time.
+        let download_floor = reads_in_flight / cfg.request_timeout_secs;
+        let upload_floor = writes_in_flight / cfg.request_timeout_secs;
+        assert!(download_floor <= 150_000 / 8, "downloads need {download_floor} B/s");
+        assert!(upload_floor <= 40_000 / 8, "uploads need {upload_floor} B/s");
+    }
+}
+
 /// Start `sudo <sftp-server>` on a fresh exec channel and hand the stream to
 /// russh-sftp. The shell echoes a ready marker first; anything a noisy shell
 /// rc prints before it is skipped. In password mode sudo always prompts
@@ -9890,7 +9989,7 @@ async fn open_elevated_sftp(
     tokio::time::timeout(std::time::Duration::from_secs(20), wait_ready)
         .await
         .map_err(|_| format!("{}: timed out starting sftp-server via sudo", SUDO_FAILED))??;
-    russh_sftp::client::SftpSession::new(stream)
+    russh_sftp::client::SftpSession::new_with_config(stream, sftp_client_config())
         .await
         .map_err(|e| format!("{}: {}", SUDO_FAILED, e))
 }
@@ -10083,7 +10182,9 @@ pub async fn get_sftp_session(
             let session = session_arc.lock().await;
             let channel = session.channel_open_session().await.map_err(|e| e.to_string())?;
             channel.request_subsystem(true, "sftp").await.map_err(|e| e.to_string())?;
-            russh_sftp::client::SftpSession::new(channel.into_stream()).await.map_err(|e| e.to_string())?
+            russh_sftp::client::SftpSession::new_with_config(channel.into_stream(), sftp_client_config())
+                .await
+                .map_err(|e| e.to_string())?
         }
     };
     let arc = Arc::new(sftp);
