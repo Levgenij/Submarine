@@ -4945,6 +4945,8 @@ dependencies = [
  "filetime",
  "flate2",
  "fontdb",
+ "gdk",
+ "gtk",
  "hex",
  "hkdf",
  "notify",
