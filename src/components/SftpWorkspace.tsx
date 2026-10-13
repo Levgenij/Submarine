@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState, forwardRef, useImperativeHandle }
 import { createPortal } from "react-dom";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { File as FileIcon, Folder, FolderUp } from "lucide-react";
+import { File as FileIcon, Folder, FolderUp, Shield, ShieldAlert } from "lucide-react";
+import { useTextPrompt } from "../ui/confirm";
 import FilePanel, { ActiveDrag, FilePanelHandle } from "./FilePanel";
 import MirrorsPanel from "./MirrorsPanel";
 import TransfersBar, { Transfer } from "./TransfersBar";
@@ -11,6 +12,23 @@ import { createRemoteProvider } from "../fs/remoteProvider";
 import { dropQueued, useQueuedTransfers } from "../fs/transferQueue";
 import { useElementWidth } from "../hooks/useViewport";
 import { onRovingKeyDown } from "../ui/rovingKeys";
+
+// Root (sudo) mode for the remote pane. See `sftp_set_elevated` in lib.rs.
+type ElevationStatus = { elevated: boolean; passwordless: boolean };
+
+const SUDO_MESSAGES: Record<string, string> = {
+  "[SUDO] NEED_PASSWORD": "sudo needs a password.",
+  "[SUDO] WRONG_PASSWORD": "Wrong sudo password.",
+  "[SUDO] NOT_ALLOWED": "This user isn't allowed to run sftp-server with sudo.",
+  "[SUDO] REQUIRETTY": "sudo on this server requires a terminal (requiretty), so it can't be used for file access.",
+  "[SUDO] NO_SUDO": "sudo isn't installed on this server.",
+  "[SUDO] NO_SFTP_SERVER": "Couldn't find the sftp-server program on this server.",
+};
+
+const describeSudoError = (raw: string) => {
+  const code = Object.keys(SUDO_MESSAGES).find((k) => raw.includes(k));
+  return code ? SUDO_MESSAGES[code] : raw.replace(/^\[SUDO\] FAILED:?\s*/, "sudo failed: ");
+};
 
 // Speed is measured over this trailing window of progress samples, so one
 // slow or fast chunk does not make the number jump.
@@ -131,6 +149,112 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
 
   const localRef = useRef<FilePanelHandle | null>(null);
   const remoteRef = useRef<FilePanelHandle | null>(null);
+
+  // Elevated = SFTP runs as root through sudo (passwordless or with a password
+  // kept in backend memory for this tab only). A direct root login is flagged
+  // with the same badge so it's always obvious when file ops have full power.
+  const textPrompt = useTextPrompt();
+  const [elevation, setElevation] = useState<ElevationStatus>({ elevated: false, passwordless: false });
+  const [loginUser, setLoginUser] = useState<string | null>(null);
+  const [elevBusy, setElevBusy] = useState(false);
+  const [elevError, setElevError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke<ElevationStatus>("sftp_elevation_status", { sessionId })
+      .then((s) => { if (!cancelled) setElevation(s); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (disabled) return;
+    let cancelled = false;
+    invoke<string>("sftp_login_user", { sessionId })
+      .then((u) => { if (!cancelled) setLoginUser(u || null); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [sessionId, disabled]);
+
+  const flashElevError = (msg: string) => {
+    setElevError(msg);
+    window.setTimeout(() => setElevError(null), 6000);
+  };
+
+  const toggleElevation = async () => {
+    if (elevBusy || disabled) return;
+    setElevBusy(true);
+    setElevError(null);
+    try {
+      if (elevation.elevated) {
+        setElevation(await invoke<ElevationStatus>("sftp_set_elevated", { sessionId, enabled: false, password: null }));
+      } else {
+        // Passwordless sudo first; only ask for a password when sudo wants one.
+        let password: string | null = null;
+        for (let wrongTries = 0; ; ) {
+          try {
+            setElevation(await invoke<ElevationStatus>("sftp_set_elevated", { sessionId, enabled: true, password }));
+            break;
+          } catch (e: any) {
+            const raw = String(e);
+            const wrong = raw.includes("[SUDO] WRONG_PASSWORD");
+            if (!wrong && !raw.includes("[SUDO] NEED_PASSWORD")) throw e;
+            if (wrong && ++wrongTries >= 3) throw e;
+            password = await textPrompt({
+              title: "Run file operations as root",
+              message: wrong
+                ? "Wrong sudo password, try again."
+                : "Enter your sudo password. It's kept in memory for this tab only and never saved.",
+              password: true,
+              keepWhitespace: true,
+              okLabel: "Use sudo",
+              validate: (v) => (v ? null : "Enter the password"),
+            });
+            if (password === null) return;
+          }
+        }
+      }
+      await remoteRef.current?.refresh();
+    } catch (e: any) {
+      flashElevError(describeSudoError(String(e)));
+    } finally {
+      setElevBusy(false);
+    }
+  };
+
+  const rootByLogin = !elevation.elevated && loginUser === "root";
+  const rootBadgeClass =
+    "h-6 px-2 flex items-center gap-1 rounded-md text-[10px] font-black uppercase tracking-wider bg-rose-500/20 text-rose-200 border border-rose-500/50";
+  const elevationControl = (
+    <div className="flex items-center gap-1.5 shrink-0 min-w-0">
+      {elevation.elevated ? (
+        <button
+          onClick={toggleElevation}
+          disabled={elevBusy}
+          title={`File operations run as root via sudo${elevation.passwordless ? " (passwordless)" : ""}. Click to go back to ${loginUser || "your login user"}.`}
+          className={`${rootBadgeClass} hover:bg-rose-500/30 disabled:opacity-50`}
+        >
+          <ShieldAlert size={11} /> root · sudo
+        </button>
+      ) : rootByLogin ? (
+        <span title="Logged in as root: file operations run with full privileges." className={rootBadgeClass}>
+          <ShieldAlert size={11} /> root
+        </span>
+      ) : (
+        <button
+          onClick={toggleElevation}
+          disabled={elevBusy || disabled}
+          title="Run file operations as root (sudo)"
+          className="h-6 px-2 flex items-center gap-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-white/[0.04] text-zinc-300 border border-white/10 hover:bg-white/10 hover:text-white disabled:opacity-40"
+        >
+          <Shield size={11} /> {elevBusy ? "…" : "sudo"}
+        </button>
+      )}
+      {elevError && (
+        <span className="text-[10px] text-rose-300 max-w-[220px] truncate" title={elevError}>{elevError}</span>
+      )}
+    </div>
+  );
 
   // Persist the last directory each panel was in per (session, side) so the
   // user lands on the same path next time they open this server. If the
@@ -455,7 +579,10 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
             getOppositeDir={() => localRef.current?.currentDir()}
             terminalId={terminalId}
             onRevealTerminal={onRevealTerminal}
-            bookmarksKey={bookmarksKey("remote")}          />
+            bookmarksKey={bookmarksKey("remote")}
+            headerExtra={elevationControl}
+            rootMode={elevation.elevated || rootByLogin}
+          />
         </div>
       </div>
 
