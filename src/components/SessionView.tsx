@@ -1036,6 +1036,11 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                       type={p?.echo ? "text" : "password"}
                       autoFocus={i === 0}
                       className="w-full h-9 bg-[#1a1a1e] rounded-lg px-3 text-sm text-white border border-white/10 outline-none focus:border-primary/50 focus:bg-[#232328] transition-all"
+                      // A login name or code, never prose: a phone keyboard
+                      // must not capitalize "alice" into "Alice".
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
                       value={kbiValues[i] ?? ""}
                       onChange={e => setKbiValues(vals => {
                         const next = [...vals];

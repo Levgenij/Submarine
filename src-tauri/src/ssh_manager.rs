@@ -397,6 +397,8 @@ pub struct SshState {
 /// The tab's entries are dropped when the base tab disconnects or the profile
 /// closes. Reaping a `::sftp` / `::fwd` secondary keeps them, because the tab is
 /// still alive. A single secret is cleared as soon as the server rejects it.
+/// A login name typed because the saved username was blank is stored in the
+/// same entry, and only after that login succeeds.
 #[derive(Clone, Default)]
 pub struct PromptedSecrets {
     /// Accepted password for the node's own login.
@@ -407,6 +409,11 @@ pub struct PromptedSecrets {
     pub jump_password: Option<zeroize::Zeroizing<String>>,
     /// Accepted passphrase that decrypted the ProxyJump bastion's key.
     pub jump_passphrase: Option<zeroize::Zeroizing<String>>,
+    /// Login name typed at connect time for a node saved without one.
+    /// Kept once that login succeeded.
+    pub username: Option<zeroize::Zeroizing<String>>,
+    /// Same, for the ProxyJump bastion.
+    pub jump_username: Option<zeroize::Zeroizing<String>>,
 }
 
 impl SshState {
