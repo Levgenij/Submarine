@@ -2,7 +2,7 @@ import { useState, useEffect, useLayoutEffect, useRef, useCallback, memo, type R
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { TerminalSquare, Folder, Network, AlertTriangle, Check, X, ShieldAlert, KeyRound, Play, Library, Info, Container, Plus, SplitSquareHorizontal, Columns, Rows, RotateCw, CloudUpload, Loader2 } from "lucide-react";
+import { TerminalSquare, Folder, Network, AlertTriangle, Check, X, ShieldAlert, KeyRound, Play, Library, Info, Container, Plus, SplitSquareHorizontal, Columns, Rows, RotateCw, CloudUpload, Loader2, Maximize2, Minimize2 } from "lucide-react";
 import TerminalView from "./TerminalView";
 import SftpWorkspace from "./SftpWorkspace";
 import TunnelsPanel from "./TunnelsPanel";
@@ -133,10 +133,29 @@ type ToolId = typeof TOOLS[number]['id'];
 
 // The open tool pane's header lives in the session toolbar, in the strip
 // above the pane, so it does not take a row of its own. It has two parts:
-// ToolTabs — the tools as tabs, rendered once by SessionView so focus and
-// the row survive a tool switch — and ToolPanelActions, the right-hand
+// ToolTabs, the tools as tabs, rendered once by SessionView so focus and
+// the row survive a tool switch, and ToolPanelActions, the right-hand
 // cluster each pane portals in next to them (`slot`): its own controls
-// (Dedicated session, refresh), then the close button.
+// (Dedicated session, refresh), then full screen and the close button.
+const TOOL_FULL_KEY = "submarine-tool-full";
+
+// Toolbar button: give the panel the terminal's room, or bring the terminal
+// back. The terminal keeps running either way. Omitted while compact, where
+// the tool is already alone.
+const FullToggle = ({ full, onToggle }: { full: boolean; onToggle: () => void }) => (
+  <button
+    onClick={onToggle}
+    aria-pressed={full}
+    aria-label="Full screen"
+    title={full ? "Show the terminal again" : "Full screen: hide the terminal and give this panel all the room"}
+    className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors ${
+      full ? "text-primary hover:text-white hover:bg-white/5" : "text-zinc-400 hover:text-white hover:bg-white/5"
+    }`}
+  >
+    {full ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+  </button>
+);
+
 const ToolTabs = ({ active, onSelect, showLabels }: {
   active: ToolId;
   onSelect: (id: ToolId) => void;
@@ -182,14 +201,17 @@ const ToolTabs = ({ active, onSelect, showLabels }: {
   );
 };
 
-const ToolPanelActions = ({ slot, onClose, children }: {
+const ToolPanelActions = ({ slot, onClose, fullToggle, children }: {
   slot: HTMLElement | null;
   onClose: () => void;
+  /** Full-screen toggle. Null while compact. */
+  fullToggle?: ReactNode;
   children?: ReactNode;
 }) => slot ? createPortal(
   <>
     {children}
     {children && <span className="w-px h-6 bg-white/10" aria-hidden="true" />}
+    {fullToggle}
     <button
       onClick={onClose}
       title="Close panel"
@@ -696,10 +718,28 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
     const quarter = Math.round((window.innerWidth || 1440) / 4);
     return Math.max(240, Math.min(900, quarter));
   });
+  // Full screen: the open tool takes the terminal's place. The terminals stay
+  // mounted and connected, hidden the way a compact window hides them, and
+  // come back when the panel is restored or closed. Closing does not clear
+  // the flag, so the next tool opens full screen again.
+  const [toolFull, setToolFull] = useState<boolean>(() => {
+    try { return localStorage.getItem(TOOL_FULL_KEY) === "1"; } catch { return false; }
+  });
+  const setToolFullPersisted = (full: boolean) => {
+    setToolFull(full);
+    try { localStorage.setItem(TOOL_FULL_KEY, full ? "1" : "0"); } catch { /* ignore */ }
+  };
+  // The tool is shown without the terminal: always on a compact window, and
+  // by choice on a roomy one.
+  const toolAlone = isCompact || toolFull;
+  const fullToggle = isCompact ? null : (
+    <FullToggle full={toolFull} onToggle={() => setToolFullPersisted(!toolFull)} />
+  );
   // Width of the tool tab row in the toolbar: it spans the pane plus the 4px
-  // resize divider, or the whole window on compact. Derived, not measured,
-  // so its labels are right on the first frame and track a drag exactly.
-  const toolBarWidth = isCompact ? viewportWidth : toolPanelWidth + 4;
+  // resize divider, or the whole window when the tool is alone (compact or
+  // full screen). Derived, not measured, so its labels are right on the first
+  // frame and track a drag exactly.
+  const toolBarWidth = toolAlone ? viewportWidth : toolPanelWidth + 4;
   const toolBarWide = toolBarWidth >= 580;
 
   const initiatedRef = useRef(false);
@@ -1377,7 +1417,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
       {!chromeless && (
       <div inert={shellInert} className={`h-12 border-b border-white/5 bg-[#121214]/50 flex items-center shrink-0 justify-between gap-1 ${activeTool ? 'pl-2 sm:pl-4' : 'px-2 sm:px-4'}`}>
         <div
-          className={`flex items-center gap-1 overflow-x-auto no-scrollbar flex-1 mr-1 sm:mr-4 mask-fade-right ${activeTool && isCompact ? 'hidden' : ''}`}
+          className={`flex items-center gap-1 overflow-x-auto no-scrollbar flex-1 mr-1 sm:mr-4 mask-fade-right ${activeTool && toolAlone ? 'hidden' : ''}`}
           onWheel={(e) => { e.currentTarget.scrollLeft += e.deltaY; }}
         >
         {terminals.map(t => {
@@ -1500,13 +1540,14 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
             narrow viewports (below md) so the terminal tab strip keeps its
             horizontal real estate when space is tight; the full description
             stays in the tooltip either way. Only shown while the tool pane
-            is closed — an open pane puts the same tools here as tabs, lined
-            up over the pane: pane width plus the 4px resize divider. On
-            compact the pane is full width, so the tabs take the whole row. */}
+            is closed. An open pane puts the same tools here as tabs, lined
+            up over the pane: pane width plus the 4px resize divider. When the
+            tool is alone (compact or full screen) the pane is full width, so
+            the tabs take the whole row and the terminal tabs are hidden. */}
         {activeTool && (
           <div
-            style={isCompact ? undefined : { width: `${toolBarWidth}px` }}
-            className={`self-stretch min-w-0 flex items-stretch gap-2 px-2 ${isCompact ? 'flex-1' : 'shrink-0 border-l border-white/5'}`}
+            style={toolAlone ? undefined : { width: `${toolBarWidth}px` }}
+            className={`self-stretch min-w-0 flex items-stretch gap-2 px-2 ${toolAlone ? 'flex-1' : 'shrink-0 border-l border-white/5'}`}
           >
             <ToolTabs active={activeTool} onSelect={setActiveTool} showLabels={toolBarWidth >= 420} />
             <div className="flex-1" />
@@ -1704,26 +1745,27 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
         })()
       )}
 
-      {/* Tab Content Split Pane. Side-by-side on roomy desktop; on narrow
-          (`isCompact`) viewports the tool pane takes over the full width
-          and the terminal is hidden — the tool tabs themselves act as the
-          "back to terminal" affordance (clicking the active tool toggles
-          it off). This avoids squeezing a usable terminal + tool into a
-          mobile-sized window. */}
+      {/* Tab Content Split Pane. Side-by-side on a roomy desktop. On a
+          narrow viewport (`isCompact`), or when the open tool is full screen
+          (`toolFull`), the tool is alone: the terminal pane and the resize
+          divider hide, and the panel takes the area. Terminals stay mounted
+          (CSS hidden, not unmounted) and are marked inactive while alone.
+          Closing the tool brings the terminal back and leaves the flag set. */}
       <div inert={shellInert} className="flex-1 flex overflow-hidden relative bg-[#09090b]">
         {/* Left Panel: Active Terminals.
-            On compact + activeTool, hide entirely so the tool fills the
-            screen. Terminals stay mounted (no PTY teardown) — just CSS
-            hidden so swapping back keeps the same shell session.
+            When a tool is alone (compact or full screen), hide this pane so
+            the tool fills the session. Terminals stay mounted (no PTY
+            teardown), just CSS hidden, so swapping back keeps the same
+            shell session.
 
             Split mode: when `splitTerminals` holds 2+ ids and the
             viewport is roomy enough, we tile those terminals side-by-side
             (or stacked, per `splitOrientation`) with draggable dividers
             between adjacent panes. All OTHER terminals stay mounted but
-            hidden — so switching a tab that isn't in the split preserves
+            hidden, so switching a tab that isn't in the split preserves
             its scrollback. The tiles fill the whole left panel; the tool
             side panel continues to work exactly as before. */}
-        <div className={`h-full relative ${activeTool && isCompact ? 'hidden' : 'flex-1 min-w-0'}`}>
+        <div className={`h-full relative ${activeTool && toolAlone ? 'hidden' : 'flex-1 min-w-0'}`}>
           {splitTerminals.length >= 2 && !isCompact ? (
             <div className={`absolute inset-0 flex ${splitOrientation === "h" ? "flex-row" : "flex-col"}`}>
               {splitTerminals.map((termId, slotIdx) => {
@@ -1748,7 +1790,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                       sessionId={session.id}
                       terminalId={t.id}
                       disabled={status !== 'connected'}
-                      isActive={isFocused && !(activeTool && isCompact)}
+                      isActive={isFocused && !(activeTool && toolAlone)}
                       isActiveView={isActiveView}
                       focusSignal={focusTick}
                       containerExec={t.container ? { container: t.container.name, useSudo: t.container.useSudo } : undefined}
@@ -1871,7 +1913,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   sessionId={session.id}
                   terminalId={t.id}
                   disabled={status !== 'connected'}
-                  isActive={activeTab === t.id && !(activeTool && isCompact)}
+                  isActive={activeTab === t.id && !(activeTool && toolAlone)}
                   isActiveView={isActiveView}
                   focusSignal={focusTick}
                   containerExec={t.container ? { container: t.container.name, useSudo: t.container.useSudo } : undefined}
@@ -1885,7 +1927,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
         </div>
 
         {/* Resizable divider — only useful when both panes are visible. */}
-        {activeTool && !isCompact && (
+        {activeTool && !toolAlone && (
           <div
             onMouseDown={startToolResize}
             className="w-1 shrink-0 cursor-col-resize bg-white/5 hover:bg-primary/40 transition-colors"
@@ -1900,12 +1942,12 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
             tree was torn down. Other tools still conditional-render: they
             don't carry live state worth preserving across switches. */}
         <div
-          style={activeTool && !isCompact ? { width: `${toolPanelWidth}px` } : undefined}
-          className={`${activeTool ? (isCompact ? 'flex-1 min-w-0' : 'shrink-0') : 'hidden'} bg-[#121214]/95 flex flex-col h-full overflow-hidden ${activeTool ? 'animate-in' : ''}`}
+          style={activeTool && !toolAlone ? { width: `${toolPanelWidth}px` } : undefined}
+          className={`${activeTool ? (toolAlone ? 'flex-1 min-w-0' : 'shrink-0') : 'hidden'} bg-[#121214]/95 flex flex-col h-full overflow-hidden ${activeTool ? 'animate-in' : ''}`}
         >
           {activeTool === 'sftp' && (
             <div className="flex-1 flex flex-col overflow-hidden">
-              <ToolPanelActions slot={toolHeaderSlot} onClose={() => setActiveTool(null)}>
+              <ToolPanelActions slot={toolHeaderSlot} onClose={() => setActiveTool(null)} fullToggle={fullToggle}>
                 <SepToggle
                   on={separateSftp}
                   onToggle={toggleSeparateSftp}
@@ -1924,7 +1966,13 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                     try { return JSON.parse(session.mirrors || "[]"); } catch { return []; }
                   })()}
                   terminalId={activeTab}
-                  onRevealTerminal={isCompact ? () => setActiveTool(null) : undefined}
+                  onRevealTerminal={toolAlone ? () => {
+                    // Compact has no room for both, so close the tool. A roomy
+                    // full-screen pane only needs the flag off so the terminal
+                    // sits beside it. Leave the flag set on a compact window.
+                    if (isCompact) setActiveTool(null);
+                    else setToolFullPersisted(false);
+                  } : undefined}
                   profile={profile}
                 />
               </div>
@@ -1933,7 +1981,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
 
           {activeTool === 'tunnels' && (
             <div className="flex-1 flex flex-col overflow-hidden">
-              <ToolPanelActions slot={toolHeaderSlot} onClose={() => setActiveTool(null)}>
+              <ToolPanelActions slot={toolHeaderSlot} onClose={() => setActiveTool(null)} fullToggle={fullToggle}>
                 <SepToggle
                   on={separateFwd}
                   onToggle={toggleSeparateFwd}
@@ -1956,7 +2004,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
               serverId={session.serverId}
               serverName={session.serverName}
               renderHeader={({ actions, onClose }) => (
-                <ToolPanelActions slot={toolHeaderSlot} onClose={onClose}>{actions}</ToolPanelActions>
+                <ToolPanelActions slot={toolHeaderSlot} onClose={onClose} fullToggle={fullToggle}>{actions}</ToolPanelActions>
               )}
             />
           )}
@@ -1967,7 +2015,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
               fresh remount would re-fire the probe every tab swap. */}
           <div className={`flex-1 flex flex-col overflow-hidden ${activeTool === 'info' ? '' : 'hidden'}`}>
             {activeTool === 'info' && (
-              <ToolPanelActions slot={toolHeaderSlot} onClose={() => setActiveTool(null)} />
+              <ToolPanelActions slot={toolHeaderSlot} onClose={() => setActiveTool(null)} fullToggle={fullToggle} />
             )}
             <InfoPanel
               sessionId={session.id}
