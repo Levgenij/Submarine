@@ -13,7 +13,7 @@ export interface Transfer {
   bytes: number;
   total: number;
   status: "progress" | "done" | "error" | "cancelled";
-  /** Why it failed; on "cancelled", what the cancel could not clean up. */
+  /** Why it failed. On "cancelled", what the cancel could not clean up. On "done", a note such as skipped file names. */
   error?: string;
   /** "sync": a save from the live-edit editor copy. It cannot be cancelled. */
   source?: "sync";
@@ -165,7 +165,7 @@ const TransferRow = ({ t, onCancel }: { t: Transfer; onCancel: (id: string) => v
         )}
         {t.status === "error" ? (
           <div className="mt-0.5 text-[10px] text-rose-300/90 truncate" title={t.error}>{t.error || "Transfer failed"}</div>
-        ) : t.status === "cancelled" && t.error ? (
+        ) : (t.status === "cancelled" || t.status === "done") && t.error ? (
           <div className="mt-0.5 text-[10px] text-amber-300/90 truncate" title={t.error}>{t.error}</div>
         ) : (
           <div className="flex items-center gap-2 text-[10px] text-zinc-500">
