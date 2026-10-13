@@ -1269,11 +1269,20 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         notify(`Created link ${name}`, "success");
       } else if (type === "properties" && entry && v1 && provider.chmod) {
         const edited = parseInt(v1, 8);
-        await provider.chmod(entry.path, mergePermissions(entry.permissions, edited));
+        const mode = mergePermissions(entry.permissions, edited);
         const uidText = (v2 || "").trim();
+        // Owner first. Linux clears setuid/setgid on chown, so those bits
+        // are written back by the chmod below.
+        let chowned = false;
         if (uidText && provider.chown && entry.gid != null) {
           const uid = parseInt(uidText, 10);
-          if (uid !== entry.uid) await provider.chown(entry.path, uid, entry.gid);
+          if (uid !== entry.uid) {
+            await provider.chown(entry.path, uid, entry.gid);
+            chowned = true;
+          }
+        }
+        if (mode !== entry.permissions || (chowned && (mode & 0o6000) !== 0)) {
+          await provider.chmod(entry.path, mode);
         }
         notify("Properties updated", "success");
       }
