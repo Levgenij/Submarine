@@ -823,7 +823,7 @@ async fn connect_for_monitor(
     let mut accepted = false;
 
     if let Some((pem, passphrase)) = key_pair.as_ref() {
-        match russh::keys::decode_secret_key(pem, passphrase.as_deref()) {
+        match crate::decode_ssh_private_key(pem, passphrase.as_deref()) {
             Ok(kp) => {
                 match crate::ssh_manager::authenticate_with_key(&mut session, &auth.username, kp)
                     .await
