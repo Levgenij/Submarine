@@ -11795,6 +11795,34 @@ fn guard_local_path(path: &str, allow_nonexistent: bool) -> Result<std::path::Pa
         }
     };
 
+    check_local_path_policy(canonical)
+}
+
+/// Like `guard_local_path`, but the last component is not resolved.
+///
+/// Delete and rename operate on the directory entry itself. Canonicalizing a
+/// symlink or Windows junction resolves it to its target, so those commands
+/// would change the file or folder the link points at, and a dangling link
+/// could not be removed at all. The parent is still canonicalized, existence
+/// is `symlink_metadata` (lstat), and the same system-path policy applies.
+fn guard_local_path_nofollow(path: &str, must_exist: bool) -> Result<std::path::PathBuf, String> {
+    let p = std::path::Path::new(path);
+    let file = p.file_name().ok_or_else(|| format!("Invalid path: {}", path))?;
+    let parent = p
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .ok_or_else(|| format!("Invalid path: {}", path))?;
+    let canon_parent = parent
+        .canonicalize()
+        .map_err(|e| format!("Invalid parent directory: {}", e))?;
+    let full = canon_parent.join(file);
+    if must_exist {
+        std::fs::symlink_metadata(&full).map_err(|e| format!("Invalid path: {}", e))?;
+    }
+    check_local_path_policy(full)
+}
+
+fn check_local_path_policy(canonical: std::path::PathBuf) -> Result<std::path::PathBuf, String> {
     // Refuse the filesystem root itself (`/`, `C:\`, etc.).
     if canonical.parent().is_none() {
         return Err(format!("Refusing to operate on filesystem root: {}", canonical.display()));
@@ -11804,7 +11832,7 @@ fn guard_local_path(path: &str, allow_nonexistent: bool) -> Result<std::path::Pa
     // On Windows, std::fs::canonicalize returns a `\\?\`-prefixed *verbatim*
     // path, e.g. `\\?\C:\Windows\System32`. After the `\` -> `/` normalization
     // above that becomes `//?/c:/windows/system32`, which never matches the
-    // blocklist entries `c:/windows`, `c:/program files`, etc. — silently
+    // blocklist entries `c:/windows`, `c:/program files`, etc. - silently
     // defeating this guard for every Windows system directory. Strip the
     // verbatim prefix (and its `\\?\UNC\` variant for UNC paths) so the
     // subsequent prefix match sees a normal drive-letter path. Also strip the
@@ -11840,7 +11868,7 @@ fn guard_local_path(path: &str, allow_nonexistent: bool) -> Result<std::path::Pa
     // Auto-run / login-persistence locations. Unlike the fixed system-dir
     // prefixes above, these sit inside the per-user profile
     // (C:\Users\<name>\AppData\..., ~/Library/..., ~/.config/...) so no static
-    // prefix catches them — match on a path tail instead. Blocking them stops
+    // prefix catches them - match on a path tail instead. Blocking them stops
     // a download destination (or any local op) from dropping an executable
     // into a folder the OS auto-runs at next login. The markers are
     // platform-specific strings that simply never match on the wrong OS, so a
@@ -11868,10 +11896,34 @@ async fn local_create_dir(path: String) -> Result<(), String> {
     std::fs::create_dir_all(&safe).map_err(|e| format!("Failed to create directory: {}", e))
 }
 
+/// Remove a symlink or Windows junction itself, never what it points to.
+/// A directory link uses `remove_dir`; every other link is unlinked.
+fn remove_link_itself(path: &std::path::Path, ft: &std::fs::FileType) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTypeExt;
+        if ft.is_symlink_dir() {
+            return std::fs::remove_dir(path);
+        }
+    }
+    let _ = ft;
+    std::fs::remove_file(path)
+}
+
 #[tauri::command]
 async fn local_remove(path: String, is_dir: bool) -> Result<(), String> {
-    let safe = guard_local_path(&path, false)?;
-    if is_dir {
+    // The entry on disk decides, not the caller's hint: a link is only ever
+    // unlinked, whatever the UI thought the row was.
+    let _ = is_dir;
+    let safe = guard_local_path_nofollow(&path, true)?;
+    let ft = std::fs::symlink_metadata(&safe)
+        .map_err(|e| format!("Failed to remove: {}", e))?
+        .file_type();
+    if ft.is_symlink() {
+        remove_link_itself(&safe, &ft).map_err(|e| format!("Failed to remove link: {}", e))
+    } else if ft.is_dir() {
+        // A real directory. Links found inside the tree are not followed.
+        // A link at this path was unlinked above and never reaches remove_dir_all.
         std::fs::remove_dir_all(&safe).map_err(|e| format!("Failed to remove directory: {}", e))
     } else {
         std::fs::remove_file(&safe).map_err(|e| format!("Failed to remove file: {}", e))
@@ -11880,8 +11932,11 @@ async fn local_remove(path: String, is_dir: bool) -> Result<(), String> {
 
 #[tauri::command]
 async fn local_rename(from: String, to: String) -> Result<(), String> {
-    let safe_from = guard_local_path(&from, false)?;
-    let safe_to = guard_local_path(&to, true)?;
+    // No-follow on both ends: renaming a link must move the link, and an
+    // existing link at the destination must not redirect the rename onto its
+    // target.
+    let safe_from = guard_local_path_nofollow(&from, true)?;
+    let safe_to = guard_local_path_nofollow(&to, false)?;
     // Same auto-mkdir-parent UX as sftp_rename: moving a file into a
     // subfolder that doesn't exist yet would otherwise fail with a
     // confusing "system cannot find the path specified" / ENOENT.
@@ -11893,6 +11948,174 @@ async fn local_rename(from: String, to: String) -> Result<(), String> {
     }
     std::fs::rename(&safe_from, &safe_to)
         .map_err(|e| format!("rename {:?} -> {:?}: {}", safe_from, safe_to, e))
+}
+
+#[cfg(test)]
+mod local_nofollow {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn scratch(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "submarine-{}-{}-{}",
+            tag,
+            std::process::id(),
+            nanos
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Directory symlink, or on Windows a junction when symlink creation is
+    /// refused. A junction needs no extra privilege and is the same nofollow
+    /// case: lstat the link, unlink it, never the target. Callers skip only
+    /// when both fail.
+    fn link_dir(target: &Path, link: &Path) -> bool {
+        #[cfg(windows)]
+        {
+            if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+                return true;
+            }
+            return std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok()
+        }
+    }
+
+    fn link_file(target: &Path, link: &Path) -> bool {
+        #[cfg(windows)]
+        let r = std::os::windows::fs::symlink_file(target, link);
+        #[cfg(unix)]
+        let r = std::os::unix::fs::symlink(target, link);
+        r.is_ok()
+    }
+
+    #[tokio::test]
+    async fn deleting_a_folder_link_keeps_the_folder_and_its_contents() {
+        let root = scratch("rmdirlink");
+        let target = root.join("real");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), b"data").unwrap();
+        let link = root.join("link");
+        if !link_dir(&target, &link) {
+            eprintln!("skipped: no symlink permission");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        // Even with the UI claiming it is a directory, only the link goes.
+        local_remove(link.to_string_lossy().to_string(), true).await.unwrap();
+        assert!(std::fs::symlink_metadata(&link).is_err(), "link must be gone");
+        assert!(target.join("keep.txt").exists(), "target contents must survive");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_file_link_keeps_the_file() {
+        let root = scratch("rmfilelink");
+        let target = root.join("real.txt");
+        std::fs::write(&target, b"data").unwrap();
+        let link = root.join("link.txt");
+        let survivor = if link_file(&target, &link) {
+            target
+        } else {
+            // File symlinks were refused. A directory junction still has to
+            // be unlinked when the caller says the row is a file.
+            let dir = root.join("real");
+            std::fs::create_dir_all(&dir).unwrap();
+            let keep = dir.join("keep.txt");
+            std::fs::write(&keep, b"data").unwrap();
+            if !link_dir(&dir, &link) {
+                eprintln!("skipped: no symlink or junction");
+                let _ = std::fs::remove_dir_all(&root);
+                return;
+            }
+            keep
+        };
+        local_remove(link.to_string_lossy().to_string(), false).await.unwrap();
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert_eq!(std::fs::read(&survivor).unwrap(), b"data");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_dangling_link_can_be_deleted() {
+        let root = scratch("dangling");
+        let link = root.join("gone");
+        if !link_file(&root.join("missing.txt"), &link) && !link_dir(&root.join("missing-dir"), &link) {
+            eprintln!("skipped: no symlink or junction");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        local_remove(link.to_string_lossy().to_string(), false).await.unwrap();
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn renaming_a_link_moves_the_link_not_the_target() {
+        let root = scratch("mvlink");
+        let target = root.join("real.txt");
+        std::fs::write(&target, b"data").unwrap();
+        let link = root.join("link.txt");
+        let survivor = if link_file(&target, &link) {
+            target
+        } else {
+            let dir = root.join("real");
+            std::fs::create_dir_all(&dir).unwrap();
+            let keep = dir.join("keep.txt");
+            std::fs::write(&keep, b"data").unwrap();
+            if !link_dir(&dir, &link) {
+                eprintln!("skipped: no symlink or junction");
+                let _ = std::fs::remove_dir_all(&root);
+                return;
+            }
+            keep
+        };
+        let renamed = root.join("renamed.txt");
+        local_rename(
+            link.to_string_lossy().to_string(),
+            renamed.to_string_lossy().to_string(),
+        )
+        .await
+        .unwrap();
+        assert!(survivor.exists(), "target must stay where it was");
+        assert!(std::fs::symlink_metadata(&renamed).unwrap().file_type().is_symlink());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn nofollow_guard_keeps_the_link_name() {
+        let root = scratch("guard");
+        let target = root.join("real");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = root.join("link");
+        if !link_dir(&target, &link) {
+            eprintln!("skipped: no symlink permission");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        let guarded = guard_local_path_nofollow(&link.to_string_lossy(), true).unwrap();
+        assert_eq!(guarded.file_name().unwrap(), "link");
+        // The following guard still resolves to the target, for listing and opening.
+        let followed = guard_local_path(&link.to_string_lossy(), false).unwrap();
+        assert_eq!(followed.file_name().unwrap(), "real");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 #[tauri::command]
