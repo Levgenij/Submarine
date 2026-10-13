@@ -47,11 +47,11 @@ const QuickConnectModal = ({ isOpen, onClose, onConnect }: Props) => {
   const connect = () => {
     setErr(null);
     if (!host.trim()) { setErr("Host is required"); return; }
-    if (!username.trim()) { setErr("Username is required"); return; }
     if (!port || port < 1 || port > 65535) { setErr("Port must be 1–65535"); return; }
     if (authMode === "key" && !privateKey.trim()) { setErr("Private key body is required"); return; }
 
-    // An empty password is asked for when connecting.
+    // A blank username and an empty password are both asked for when
+    // connecting. An empty "Login as" answer means root.
     const auth: QuickAuth = {
       host: host.trim(),
       port,
@@ -111,7 +111,7 @@ const QuickConnectModal = ({ isOpen, onClose, onConnect }: Props) => {
             <input
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              placeholder="root"
+              placeholder="Ask when connecting"
               className="w-full h-9 px-3 bg-zinc-900/60 border border-white/10 rounded-lg text-[12.5px] text-zinc-50 outline-none focus:border-primary/50"
             />
           </div>
