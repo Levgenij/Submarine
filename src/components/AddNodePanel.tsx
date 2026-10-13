@@ -471,6 +471,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                     className="w-full h-9 bg-[#1a1a1e] rounded-lg px-3 text-[12px] text-white border border-white/10 outline-none focus:border-primary/50 transition-all shadow-inner"
                     placeholder="••••••"
                   />
+                  <p className="text-[10px] text-zinc-500 ml-1">Leave empty to be asked when connecting.</p>
                 </div>
               </div>
             )}

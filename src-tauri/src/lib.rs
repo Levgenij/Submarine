@@ -2980,6 +2980,8 @@ async fn close_profile(
     ssh.sftp_sessions.lock().await.clear();
     ssh.connections.lock().await.clear();
     ssh.jump_connections.lock().await.clear();
+    // Wipe every connect-time secret the user typed in this profile.
+    ssh.prompted_secrets.lock().await.clear();
     ssh.fp_txs.lock().await.clear();
     ssh.kbi_txs.lock().await.clear();
 
@@ -3872,6 +3874,72 @@ pub(crate) fn decode_ssh_private_key(
     );
     let passphrase = if clear_sec1_or_pkcs8 { None } else { passphrase };
     russh::keys::decode_secret_key(&normalized, passphrase).map_err(|e| e.to_string())
+}
+
+/// Why turning a stored private key into a usable keypair failed. The connect
+/// path asks for a passphrase only on `NeedsPassphrase`. A broken key is
+/// `Malformed`, and prompting will not fix it.
+#[derive(Debug)]
+pub(crate) enum KeyDecodeError {
+    /// Encrypted key whose supplied passphrase was missing, empty, or wrong.
+    NeedsPassphrase,
+    /// Unparseable or unsupported key. The string is a human message.
+    Malformed(String),
+}
+
+/// Decode `private_key` with `passphrase` and classify a failure.
+///
+/// An empty passphrase is treated as none. Decoding itself is
+/// [`decode_ssh_private_key`] (SEC1, PKCS#8, leftover-passphrase stripping,
+/// legacy encrypted EC refusal). This wrapper only sorts the error.
+pub(crate) fn decode_private_key(
+    private_key: &str,
+    passphrase: Option<&str>,
+) -> Result<PrivateKey, KeyDecodeError> {
+    let passphrase = passphrase.filter(|p| !p.is_empty());
+    match decode_ssh_private_key(private_key, passphrase) {
+        Ok(key) => Ok(key),
+        Err(err) => Err(classify_key_decode_error(private_key, &err)),
+    }
+}
+
+/// Sort a [`decode_ssh_private_key`] error into "ask for a passphrase" or
+/// "the key itself is unusable".
+pub(crate) fn classify_key_decode_error(private_key: &str, err: &str) -> KeyDecodeError {
+    let normalized = private_key.replace("\r\n", "\n");
+    if is_legacy_encrypted_ec_pem(&normalized) {
+        return KeyDecodeError::Malformed(err.to_string());
+    }
+    // russh decrypts a legacy PKCS#1 PEM only with AES-128-CBC. DES-EDE3
+    // (PuTTYgen's OpenSSH export) or AES-256 cannot be read, so do not ask
+    // for a passphrase that cannot work.
+    if normalized.contains("Proc-Type: 4,ENCRYPTED") && !normalized.contains("DEK-Info: AES-128-CBC,") {
+        return KeyDecodeError::Malformed(
+            "this key uses a legacy PEM encryption Submarine can't read (only AES-128-CBC); \
+             re-save it in OpenSSH format with `ssh-keygen -p -f <keyfile>`"
+                .into(),
+        );
+    }
+    if passphrase_protected_key(&normalized) {
+        KeyDecodeError::NeedsPassphrase
+    } else {
+        KeyDecodeError::Malformed(err.to_string())
+    }
+}
+
+/// True when the key text is an encrypted OpenSSH key, an encrypted PKCS#8
+/// PEM, or a legacy PKCS#1 PEM (`Proc-Type: 4,ENCRYPTED`). A wrong passphrase
+/// on those fails inside the decoder rather than as `KeyIsEncrypted`.
+fn passphrase_protected_key(normalized: &str) -> bool {
+    if normalized.contains("Proc-Type: 4,ENCRYPTED") {
+        return true;
+    }
+    if pem_private_key_header(normalized) == "-----BEGIN ENCRYPTED PRIVATE KEY-----" {
+        return true;
+    }
+    ssh_key::PrivateKey::from_openssh(normalized.trim())
+        .map(|key| key.is_encrypted())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -5366,6 +5434,631 @@ struct QuickAuth {
     passphrase: Option<String>,
 }
 
+/// Largest number of connect-time secret prompts (a missing password or key
+/// passphrase) shown before giving up on an auth method.
+const MAX_SECRET_PROMPTS: u32 = 3;
+
+/// Which field of the per-tab [`ssh_manager::PromptedSecrets`] cache a
+/// prompting auth call reads and writes.
+#[derive(Clone, Copy)]
+enum SecretSlot {
+    Password,
+    Passphrase,
+    JumpPassword,
+    JumpPassphrase,
+}
+
+/// The tab a connection belongs to. A dedicated `::sftp` / `::fwd` secondary
+/// shares its parent tab's prompted-secret cache, so the suffix is stripped.
+/// A plain primary id is returned as-is.
+fn base_session_id(session_id: &str) -> &str {
+    session_id
+        .strip_suffix("::sftp")
+        .or_else(|| session_id.strip_suffix("::fwd"))
+        .unwrap_or(session_id)
+}
+
+/// Cache key: base session id plus the target this secret belongs to.
+/// A password typed for one host is never offered to another.
+fn prompted_cache_key(session_id: &str, target: &str) -> String {
+    format!("{}|{}", base_session_id(session_id), target)
+}
+
+/// `&mut` accessor for one slot of a `PromptedSecrets`, so the cache get/set/
+/// clear helpers don't each repeat the match.
+fn prompted_secret_slot(
+    secrets: &mut ssh_manager::PromptedSecrets,
+    slot: SecretSlot,
+) -> &mut Option<zeroize::Zeroizing<String>> {
+    match slot {
+        SecretSlot::Password => &mut secrets.password,
+        SecretSlot::Passphrase => &mut secrets.passphrase,
+        SecretSlot::JumpPassword => &mut secrets.jump_password,
+        SecretSlot::JumpPassphrase => &mut secrets.jump_passphrase,
+    }
+}
+
+type PromptedSecretsMap =
+    std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, ssh_manager::PromptedSecrets>>>;
+
+/// A copy of one cached secret for `base`, or `None` when absent.
+async fn cache_get_secret(
+    cache: &PromptedSecretsMap,
+    base: &str,
+    slot: SecretSlot,
+) -> Option<zeroize::Zeroizing<String>> {
+    let mut map = cache.lock().await;
+    map.get_mut(base).and_then(|secrets| prompted_secret_slot(secrets, slot).clone())
+}
+
+/// Remember an accepted secret for `base` so reconnects and secondaries reuse it.
+async fn cache_store_secret(
+    cache: &PromptedSecretsMap,
+    base: &str,
+    slot: SecretSlot,
+    value: zeroize::Zeroizing<String>,
+) {
+    let mut map = cache.lock().await;
+    let entry = map.entry(base.to_string()).or_default();
+    *prompted_secret_slot(entry, slot) = Some(value);
+}
+
+/// Forget one cached secret for `base` (the server just rejected it).
+async fn cache_clear_secret(cache: &PromptedSecretsMap, base: &str, slot: SecretSlot) {
+    let mut map = cache.lock().await;
+    if let Some(entry) = map.get_mut(base) {
+        *prompted_secret_slot(entry, slot) = None;
+    }
+}
+
+/// Where a connect-time secret came from. A `Given` one (the saved value) is
+/// never cached. A `Cache` one is stored again on success and dropped on
+/// rejection. A `Prompt` one, or the failed-screen `Override`, is stored once
+/// accepted. Caching an accepted override lets the screen forget it after a
+/// successful connect, so a mistype is not sent first on every later attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SecretSource {
+    Given,
+    Override,
+    Cache,
+    Prompt,
+}
+
+/// Secrets already in hand for one auth method, in the order they are tried:
+/// the per-connect override (failed-screen box), then what the user typed
+/// earlier this tab (cache), then the saved value. A cached value beats the
+/// saved one: it only exists because the saved one was missing or rejected
+/// earlier this tab. Empty values are dropped. An empty saved secret means
+/// "ask when connecting".
+fn secret_candidates(
+    override_secret: Option<zeroize::Zeroizing<String>>,
+    cached: Option<zeroize::Zeroizing<String>>,
+    saved: Option<zeroize::Zeroizing<String>>,
+) -> Vec<(zeroize::Zeroizing<String>, SecretSource)> {
+    [
+        (override_secret, SecretSource::Override),
+        (cached, SecretSource::Cache),
+        (saved, SecretSource::Given),
+    ]
+    .into_iter()
+    .filter_map(|(secret, source)| secret.filter(|value| !value.is_empty()).map(|value| (value, source)))
+    .collect()
+}
+
+/// Everything a connect-time secret prompt needs besides the SSH session:
+/// where to show it (the keyboard-interactive modal of `session_id`, answered
+/// under `nonce`) and where accepted secrets live (`cache`, under `base`).
+/// `allow_prompt` is false for the dedicated `::sftp` / `::fwd` secondaries,
+/// which only ever reuse what the primary cached.
+struct SecretPromptCtx<'a> {
+    app: &'a tauri::AppHandle,
+    session_id: &'a str,
+    nonce: &'a str,
+    kbi_txs: &'a std::sync::Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<String, tokio::sync::oneshot::Sender<Option<Vec<String>>>>,
+        >,
+    >,
+    cache: &'a PromptedSecretsMap,
+    base: &'a str,
+    allow_prompt: bool,
+    /// Set when the user cancels one of our prompts (or lets it time out).
+    /// The caller then skips the keyboard-interactive fallback: on a typical
+    /// OpenSSH + PAM server that fallback would immediately show the server's
+    /// own "Password:" box, asking again for what the user just declined.
+    cancelled: std::sync::atomic::AtomicBool,
+}
+
+impl SecretPromptCtx<'_> {
+    /// Activity-log line for this connection. Never given a secret.
+    fn log(&self, msg: &str, ty: &str) {
+        use tauri::Emitter;
+        println!("[LOG-{}] {}", self.session_id, msg);
+        let _ = self.app.emit(
+            &format!("session-log-{}", self.session_id),
+            serde_json::json!({"msg": msg, "type": ty}),
+        );
+    }
+}
+
+/// Ask the user for one secret (a password or a key passphrase) at connect
+/// time, reusing the keyboard-interactive prompt channel and modal. Emits a
+/// single masked prompt under `kbi-prompt-{session_id}`, waits on `kbi_txs`
+/// keyed by `nonce` (the same 120s budget as a real 2FA prompt), dismisses the
+/// modal, and returns the typed secret or `None` on cancel, timeout, or a
+/// dropped channel. The secret is never logged or persisted.
+async fn prompt_for_secret(
+    ctx: &SecretPromptCtx<'_>,
+    label: &str,
+    instructions: &str,
+) -> Option<zeroize::Zeroizing<String>> {
+    use tauri::Emitter;
+    let (tx, rx) = tokio::sync::oneshot::channel::<Option<Vec<String>>>();
+    ctx.kbi_txs.lock().await.insert(ctx.nonce.to_string(), tx);
+    let _ = ctx.app.emit(
+        &format!("kbi-prompt-{}", ctx.session_id),
+        serde_json::json!({
+            "nonce": ctx.nonce,
+            // Blank name keeps the modal's generic heading; the label carries
+            // the meaning. Instructions only explain a retry.
+            "name": "",
+            "instructions": instructions,
+            "prompts": [{ "prompt": label, "echo": false }],
+        }),
+    );
+    let answer = match tokio::time::timeout(std::time::Duration::from_secs(120), rx).await {
+        Ok(Ok(Some(mut answers))) => {
+            let first = if answers.is_empty() { String::new() } else { answers.swap_remove(0) };
+            Some(zeroize::Zeroizing::new(first))
+        }
+        _ => {
+            ctx.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+            None
+        }
+    };
+    ctx.kbi_txs.lock().await.remove(ctx.nonce);
+    let _ = ctx.app.emit(&format!("kbi-prompt-dismiss-{}", ctx.session_id), serde_json::json!({}));
+    answer
+}
+
+/// Password authentication for a login whose password may not be saved.
+/// Tries the passwords already in hand ([`secret_candidates`]), then, on a
+/// primary connection and while the server still offers password auth, asks
+/// the user, re-asking on rejection for up to [`MAX_SECRET_PROMPTS`] prompts.
+/// A typed or cached password that is accepted is kept in the tab's cache
+/// under `slot`. A cached one that is rejected is dropped.
+///
+/// With nothing in hand, a `none` probe first checks that the server offers
+/// password auth at all, so a keyboard-interactive-only server shows no
+/// password box. `Ok(false)` means password was not offered, the prompt was
+/// cancelled or timed out, or the prompts were used up. The caller's
+/// keyboard-interactive fallback then runs, unless the prompt was cancelled.
+async fn authenticate_password_prompting<H: russh::client::Handler>(
+    session: &mut russh::client::Handle<H>,
+    user: &str,
+    host: &str,
+    override_password: Option<zeroize::Zeroizing<String>>,
+    saved_password: Option<zeroize::Zeroizing<String>>,
+    slot: SecretSlot,
+    ctx: &SecretPromptCtx<'_>,
+) -> Result<bool, russh::Error> {
+    let cached = cache_get_secret(ctx.cache, ctx.base, slot).await;
+    let candidates = secret_candidates(override_password, cached, saved_password);
+    let nothing_in_hand = candidates.is_empty();
+    let mut candidates = candidates.into_iter();
+    let mut password_offered = true;
+    let mut rejected = false;
+    let mut prompts_used: u32 = 0;
+
+    if nothing_in_hand {
+        if !ctx.allow_prompt {
+            return Ok(false);
+        }
+        match session.authenticate_none(user).await? {
+            russh::client::AuthResult::Success => return Ok(true),
+            // russh also reports a dropped connection as a Failure (with no
+            // methods left): that's a transport error, not "no passwords".
+            russh::client::AuthResult::Failure { .. } if session.is_closed() => {
+                return Err(russh::Error::Disconnect);
+            }
+            russh::client::AuthResult::Failure { remaining_methods, .. } => {
+                password_offered = remaining_methods.contains(&russh::MethodKind::Password);
+            }
+        }
+    }
+
+    loop {
+        let (password, source) = match candidates.next() {
+            Some(candidate) => candidate,
+            None => {
+                if !ctx.allow_prompt || !password_offered || prompts_used >= MAX_SECRET_PROMPTS {
+                    return Ok(false);
+                }
+                if prompts_used == 0 {
+                    ctx.log(
+                        if rejected {
+                            "Password rejected - asking for it."
+                        } else {
+                            "No saved password - asking for it."
+                        },
+                        "info",
+                    );
+                }
+                let instructions = if rejected {
+                    "The password was rejected. Please try again."
+                } else {
+                    ""
+                };
+                match prompt_for_secret(ctx, &format!("Password for {}@{}", user, host), instructions).await {
+                    Some(typed) => {
+                        prompts_used += 1;
+                        (typed, SecretSource::Prompt)
+                    }
+                    None => {
+                        ctx.log("Password prompt cancelled or timed out.", "error");
+                        return Ok(false);
+                    }
+                }
+            }
+        };
+        match session.authenticate_password(user, password.as_str()).await? {
+            russh::client::AuthResult::Success => {
+                if source != SecretSource::Given {
+                    cache_store_secret(ctx.cache, ctx.base, slot, password).await;
+                }
+                return Ok(true);
+            }
+            // The connection dropped while the password was in flight. russh
+            // reports that as a Failure too. Not a rejection: keep the cached
+            // password and let the caller treat it as a transport error.
+            russh::client::AuthResult::Failure { .. } if session.is_closed() => {
+                return Err(russh::Error::Disconnect);
+            }
+            russh::client::AuthResult::Failure { remaining_methods, partial_success } => {
+                if partial_success {
+                    // Password accepted, but the server wants another factor
+                    // (keyboard-interactive): keep it for reconnects and let the
+                    // caller's 2FA fallback finish the login.
+                    if source != SecretSource::Given {
+                        cache_store_secret(ctx.cache, ctx.base, slot, password).await;
+                    }
+                    return Ok(false);
+                }
+                if source == SecretSource::Cache {
+                    cache_clear_secret(ctx.cache, ctx.base, slot).await;
+                }
+                password_offered = remaining_methods.contains(&russh::MethodKind::Password);
+                rejected = true;
+            }
+        }
+    }
+}
+
+/// Private-key authentication for a key whose passphrase may not be saved.
+/// Decodes with the passphrases already in hand ([`secret_candidates`]), or
+/// with none when there are none, since a plain key needs none. On a primary
+/// connection, asks the user, re-asking for up to [`MAX_SECRET_PROMPTS`]
+/// prompts while the passphrase does not decrypt the key. Decrypting the key
+/// is the acceptance: a typed or cached passphrase that does is kept in the
+/// tab's cache under `slot`. A cached one that does not is dropped.
+///
+/// Without a usable passphrase (prompt cancelled or timed out, prompts used
+/// up, or prompting not allowed) it returns `keys::Error::KeyIsEncrypted`,
+/// which [`classify_russh_error`] buckets as an auth failure, so an
+/// auto-reconnect stops instead of looping straight back into the prompt. A
+/// malformed or unsupported key keeps the error shape the old inline decode
+/// produced.
+async fn authenticate_key_prompting<H: russh::client::Handler>(
+    session: &mut russh::client::Handle<H>,
+    user: &str,
+    private_key: &str,
+    key_label: &str,
+    saved_passphrase: Option<zeroize::Zeroizing<String>>,
+    slot: SecretSlot,
+    ctx: &SecretPromptCtx<'_>,
+) -> Result<bool, russh::Error> {
+    let cached = cache_get_secret(ctx.cache, ctx.base, slot).await;
+    let mut candidates = secret_candidates(None, cached, saved_passphrase).into_iter();
+    let mut attempt = candidates.next();
+    let mut rejected = false;
+    let mut prompts_used: u32 = 0;
+
+    loop {
+        match decode_private_key(private_key, attempt.as_ref().map(|(passphrase, _)| passphrase.as_str())) {
+            Ok(keypair) => {
+                if let Some((passphrase, source)) = attempt {
+                    if source != SecretSource::Given {
+                        cache_store_secret(ctx.cache, ctx.base, slot, passphrase).await;
+                    }
+                }
+                return ssh_manager::authenticate_with_key(session, user, keypair).await;
+            }
+            Err(KeyDecodeError::NeedsPassphrase) => {
+                if let Some((_, source)) = &attempt {
+                    if *source == SecretSource::Cache {
+                        cache_clear_secret(ctx.cache, ctx.base, slot).await;
+                    }
+                    rejected = true;
+                }
+                if let Some(next) = candidates.next() {
+                    attempt = Some(next);
+                    continue;
+                }
+                if !ctx.allow_prompt || prompts_used >= MAX_SECRET_PROMPTS {
+                    ctx.log("Key is passphrase-protected and no correct passphrase was supplied.", "error");
+                    return Err(russh::Error::from(russh::keys::Error::KeyIsEncrypted));
+                }
+                if prompts_used == 0 {
+                    ctx.log(
+                        if rejected {
+                            "Passphrase didn't unlock the key - asking for it."
+                        } else {
+                            "Key is passphrase-protected - asking for the passphrase."
+                        },
+                        "info",
+                    );
+                }
+                let instructions = if rejected {
+                    "The passphrase didn't unlock the key. Please try again."
+                } else {
+                    ""
+                };
+                match prompt_for_secret(ctx, &format!("Passphrase for key '{}'", key_label), instructions).await {
+                    Some(typed) => {
+                        prompts_used += 1;
+                        attempt = Some((typed, SecretSource::Prompt));
+                    }
+                    None => {
+                        ctx.log("Passphrase prompt cancelled or timed out.", "error");
+                        return Err(russh::Error::from(russh::keys::Error::KeyIsEncrypted));
+                    }
+                }
+            }
+            Err(KeyDecodeError::Malformed(msg)) => {
+                ctx.log(&format!("Failed to parse private key: {}", msg), "error");
+                return Err(russh::Error::from(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    msg,
+                )));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod secret_prompt_tests {
+    use super::*;
+
+    // Ed25519 OpenSSH keys. ENC_KEY is encrypted (aes256-ctr / bcrypt) with
+    // ENC_PASSPHRASE; PLAIN_KEY has none.
+    const ENC_PASSPHRASE: &str = "correct horse";
+    const ENC_KEY: &str = concat!(
+        "-----BEGIN OPENSSH PRIVATE KEY-----", "\n",
+        "b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABDE7RDhqs", "\n",
+        "hjetAzLiugxZpKAAAAGAAAAAEAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIMcnclCWDFavhUYR", "\n",
+        "5zNFTSffQrWc+YsqM4sKKcQpomAWAAAAkAKhRIln427oNRf0UR+Gx0Ph0KbwN8eqNn+GYI", "\n",
+        "dcWUkBqq0x5hOwGasu4h9L4gMjUC/vbAjFFF6fmMidUq2w93yvf+ksagU3bR0RBkJZY2L6", "\n",
+        "mviz2RgokhaQVhtuT2nh7/54QtQLd3Y6zhn1oqW1XXWzzUMA/diArEO6mGB+mQq33rziRS", "\n",
+        "cPG9v4ahpJmDDpkw==", "\n",
+        "-----END OPENSSH PRIVATE KEY-----", "\n",
+    );
+    const PLAIN_KEY: &str = concat!(
+        "-----BEGIN OPENSSH PRIVATE KEY-----", "\n",
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW", "\n",
+        "QyNTUxOQAAACA/EA8yXS689fAo/F6QVpxLRJG8HiBKbnEvWz/YZ2lMZgAAAJCg+R4QoPke", "\n",
+        "EAAAAAtzc2gtZWQyNTUxOQAAACA/EA8yXS689fAo/F6QVpxLRJG8HiBKbnEvWz/YZ2lMZg", "\n",
+        "AAAEDHfBKInOfdnPFdnNPKorc16nvh3XNwnPYBxUAlKR4dkj8QDzJdLrz18Cj8XpBWnEtE", "\n",
+        "kbweIEpucS9bP9hnaUxmAAAADXBsYWluLWZpeHR1cmU=", "\n",
+        "-----END OPENSSH PRIVATE KEY-----", "\n",
+    );
+
+    #[test]
+    fn decode_flags_encrypted_key_without_passphrase_as_needing_one() {
+        assert!(matches!(decode_private_key(ENC_KEY, None), Err(KeyDecodeError::NeedsPassphrase)));
+        // An empty passphrase is treated as "none", not an attempt.
+        assert!(matches!(decode_private_key(ENC_KEY, Some("")), Err(KeyDecodeError::NeedsPassphrase)));
+    }
+
+    #[test]
+    fn decode_flags_wrong_passphrase_as_needing_one_not_malformed() {
+        assert!(matches!(
+            decode_private_key(ENC_KEY, Some("not the passphrase")),
+            Err(KeyDecodeError::NeedsPassphrase)
+        ));
+    }
+
+    // Throwaway 1024-bit RSA key in legacy PKCS#1 PEM, encrypted the PKCS#5
+    // way (`openssl genrsa -traditional -aes128`) with PEM_PASSPHRASE.
+    const PEM_PASSPHRASE: &str = "right-pass";
+    const PEM_ENC_KEY: &str = concat!(
+        "-----BEGIN RSA PRIVATE KEY-----", "\n",
+        "Proc-Type: 4,ENCRYPTED", "\n",
+        "DEK-Info: AES-128-CBC,BB76307096C12231EAB52A979EA86901", "\n",
+        "", "\n",
+        "KoULx8jVcG6IX1pGQ6dLYH3/cpMG27IecsxDmCbGVQkdhbqwF2pBIxa/Tx07bmSs", "\n",
+        "q1OKYTf9NScezY9Lhe10EOEtOmZ186rGQxDfxnv5crWfrMey+eMCeOLlFtRLP8J1", "\n",
+        "flCs6oR1NAlvnlPW6rbv9XxjoZplnylu9GtHOkCb0cAYZQbwVO0v/FVJ73D2b1p+", "\n",
+        "eg8ijRh67Oji0gADWKFf7baYUnMRrW5UaabsMUjYXgPnYbE9wabd53MM5yRMqr+H", "\n",
+        "A3lMNPXnh1erNfRTZswYZgg4fO1rtpuHKw3EJROqHjqAeXxbd5YUOgHEOhot2kn4", "\n",
+        "HhNCEBWe+1JTUo594kiVx0lu+wp2BINq2ak+sFogrqevW/2F28qtJ5fM57YHhL/5", "\n",
+        "blErH52LsivGMCh2UGEUBpDPNIRyDAMOuA/f2UviXGCjv88Qkf38JV+sZY84zZ0+", "\n",
+        "7OFWs2alsVv7J/3kmR/Zmh34YBG31Pw447HZUqvD9Ve75bjO2/lDV6m9xnHyzQir", "\n",
+        "s6K11+R54cr92HzwlIP1W0cjczrJ/UIVDYnl5y3rkNYSkvW0vY0bVk20Ul4iD6va", "\n",
+        "tOsQ7TH09QumYeLsU1mts//BeS+CoiWTiFm5CwX+IEgkm/nXqCAuLzj6Bz7dr6/r", "\n",
+        "vexWuNnpuWIJ3z9ZEX0EtFNeqECakxw1jJrL7fx8LXeD75Lb1rpscOphN1t9NYrO", "\n",
+        "TAxHSbEkODA6JJcG6WNotvmMHKOM+kIGd7u5dzHwKN1ndWGsLpcMowhsTZxhfwdb", "\n",
+        "LboMbHudt2MWS9BFU1yG95YGUoUFg25hwKPd4xxXvV+0OJj9g1u55KtzezWbAmc/", "\n",
+        "-----END RSA PRIVATE KEY-----", "\n",
+    );
+
+    #[test]
+    fn decode_handles_a_legacy_encrypted_pem_key() {
+        assert!(matches!(decode_private_key(PEM_ENC_KEY, None), Err(KeyDecodeError::NeedsPassphrase)));
+        assert!(matches!(
+            decode_private_key(PEM_ENC_KEY, Some("not the passphrase")),
+            Err(KeyDecodeError::NeedsPassphrase)
+        ));
+        assert!(decode_private_key(PEM_ENC_KEY, Some(PEM_PASSPHRASE)).is_ok());
+    }
+
+    #[test]
+    fn decode_refuses_a_legacy_pem_cipher_russh_cannot_read() {
+        let des3 = PEM_ENC_KEY.replace(
+            "DEK-Info: AES-128-CBC,BB76307096C12231EAB52A979EA86901",
+            "DEK-Info: DES-EDE3-CBC,BB76307096C12231",
+        );
+        for passphrase in [None, Some(PEM_PASSPHRASE)] {
+            match decode_private_key(&des3, passphrase) {
+                Err(KeyDecodeError::Malformed(msg)) => assert!(msg.contains("AES-128-CBC"), "{msg}"),
+                other => panic!("expected an unsupported-cipher error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn decode_accepts_the_right_passphrase_and_any_plain_key() {
+        assert!(decode_private_key(ENC_KEY, Some(ENC_PASSPHRASE)).is_ok());
+        assert!(decode_private_key(PLAIN_KEY, None).is_ok());
+        // A passphrase is ignored for an unencrypted OpenSSH key.
+        assert!(decode_private_key(PLAIN_KEY, Some("ignored")).is_ok());
+    }
+
+    #[test]
+    fn decode_reports_unparseable_input_as_malformed() {
+        assert!(matches!(
+            decode_private_key("definitely not a key", None),
+            Err(KeyDecodeError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn decode_normalizes_windows_line_endings() {
+        let crlf = PLAIN_KEY.replace('\n', "\r\n");
+        assert!(decode_private_key(&crlf, None).is_ok());
+    }
+
+    /// A clear PKCS#8 key saved with a leftover passphrase must still decode.
+    /// That stripping lives in `decode_ssh_private_key`; this fails if the
+    /// prompt path grows a second parser that passes the passphrase through.
+    #[test]
+    fn decode_private_key_strips_leftover_passphrase_on_clear_pkcs8() {
+        use ssh_key::{Algorithm, PrivateKey};
+        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).expect("generate");
+        let mut buf = Vec::new();
+        russh::keys::encode_pkcs8_pem(&key, &mut buf).expect("pkcs8 pem");
+        let pem = String::from_utf8(buf).expect("utf8");
+        assert!(russh::keys::decode_secret_key(&pem, Some("leftover")).is_err());
+        let decoded = decode_private_key(&pem, Some("leftover")).expect("wrapper strips leftover");
+        assert_eq!(decoded.public_key(), key.public_key());
+    }
+
+    #[test]
+    fn legacy_encrypted_ec_is_malformed_not_a_prompt() {
+        let legacy = concat!(
+            "-----BEGIN EC PRIVATE KEY-----\n",
+            "Proc-Type: 4,ENCRYPTED\n",
+            "DEK-Info: AES-128-CBC,6AAE92543490CD1C0CC1379C8F41D8BC\n",
+            "\n",
+            "AAAA\n",
+            "-----END EC PRIVATE KEY-----\n",
+        );
+        match decode_private_key(legacy, None) {
+            Err(KeyDecodeError::Malformed(msg)) => assert!(msg.contains("ssh-keygen -p"), "{msg}"),
+            other => panic!("expected the legacy EC refusal, got {other:?}"),
+        }
+    }
+
+    /// The key path's "no usable passphrase" outcome (cancel, timeout, or out
+    /// of attempts) must classify as an auth failure, so an auto-reconnect
+    /// stops instead of looping straight back into the passphrase prompt.
+    #[test]
+    fn missing_passphrase_error_is_auth_shaped() {
+        let err = russh::Error::from(russh::keys::Error::KeyIsEncrypted);
+        assert!(classify_russh_error(&err).is_auth());
+    }
+
+    #[test]
+    fn base_session_id_strips_dedicated_transport_suffixes() {
+        assert_eq!(base_session_id("tab-1"), "tab-1");
+        assert_eq!(base_session_id("tab-1::sftp"), "tab-1");
+        assert_eq!(base_session_id("tab-1::fwd"), "tab-1");
+        assert_eq!(base_session_id("tab-1::other"), "tab-1::other");
+    }
+
+    #[test]
+    fn cache_key_is_base_session_plus_target() {
+        let target = "10.0.0.8:22|root|custom_pass|None|None";
+        assert_eq!(
+            prompted_cache_key("tab-1", target),
+            format!("tab-1|{target}")
+        );
+        assert_eq!(prompted_cache_key("tab-1::sftp", target), format!("tab-1|{target}"));
+        assert_eq!(
+            prompted_cache_key("tab-1::fwd", "jump7|bastion:22|root"),
+            "tab-1|jump7|bastion:22|root"
+        );
+    }
+
+    #[test]
+    fn candidates_try_override_then_cache_then_saved_skipping_empties() {
+        let z = |value: &str| Some(zeroize::Zeroizing::new(value.to_string()));
+        let plain_order = |candidates: Vec<(zeroize::Zeroizing<String>, SecretSource)>| {
+            candidates
+                .into_iter()
+                .map(|(secret, source)| (secret.to_string(), source))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            plain_order(secret_candidates(z("typed"), z("cached"), z("saved"))),
+            vec![
+                ("typed".to_string(), SecretSource::Override),
+                ("cached".to_string(), SecretSource::Cache),
+                ("saved".to_string(), SecretSource::Given),
+            ]
+        );
+        assert_eq!(
+            plain_order(secret_candidates(None, z("cached"), z(""))),
+            vec![("cached".to_string(), SecretSource::Cache)]
+        );
+        assert!(secret_candidates(z(""), None, z("")).is_empty());
+    }
+
+    fn empty_cache() -> PromptedSecretsMap {
+        std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()))
+    }
+    fn plain(value: Option<zeroize::Zeroizing<String>>) -> Option<String> {
+        value.map(|secret| secret.to_string())
+    }
+
+    #[tokio::test]
+    async fn cache_round_trips_per_slot_and_is_shared_by_secondaries() {
+        let cache = empty_cache();
+        assert!(cache_get_secret(&cache, "tab", SecretSlot::Password).await.is_none());
+
+        cache_store_secret(&cache, "tab", SecretSlot::Password, zeroize::Zeroizing::new("pw".into())).await;
+        cache_store_secret(&cache, "tab", SecretSlot::Passphrase, zeroize::Zeroizing::new("pp".into())).await;
+
+        assert_eq!(plain(cache_get_secret(&cache, "tab", SecretSlot::Password).await), Some("pw".into()));
+        assert_eq!(plain(cache_get_secret(&cache, "tab", SecretSlot::Passphrase).await), Some("pp".into()));
+        let base = base_session_id("tab::sftp");
+        assert_eq!(plain(cache_get_secret(&cache, base, SecretSlot::Password).await), Some("pw".into()));
+        assert!(cache_get_secret(&cache, "other", SecretSlot::Password).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cache_clear_on_reject_removes_only_that_slot() {
+        let cache = empty_cache();
+        cache_store_secret(&cache, "tab", SecretSlot::Password, zeroize::Zeroizing::new("pw".into())).await;
+        cache_store_secret(&cache, "tab", SecretSlot::JumpPassword, zeroize::Zeroizing::new("jpw".into())).await;
+
+        cache_clear_secret(&cache, "tab", SecretSlot::Password).await;
+
+        assert!(cache_get_secret(&cache, "tab", SecretSlot::Password).await.is_none());
+        assert_eq!(plain(cache_get_secret(&cache, "tab", SecretSlot::JumpPassword).await), Some("jpw".into()));
+        cache_clear_secret(&cache, "nope", SecretSlot::Password).await;
+    }
+}
+
 /// Drive keyboard-interactive (RFC 4256) authentication — the method behind
 /// most SSH "verification code" / 2FA / OTP setups. The server sends a
 /// sequence of `InfoRequest`s (each a set of prompts like "Verification
@@ -5951,7 +6644,13 @@ fn resolve_jump_auth(
     conn: &rusqlite::Connection,
     server_id: i32,
 ) -> Result<
-    Option<(String, i32, String, Option<String>, Option<(String, Option<String>)>)>,
+    Option<(
+        String,
+        i32,
+        String,
+        Option<String>,
+        Option<(String, Option<String>, Option<String>)>,
+    )>,
     String,
 > {
     let mut stmt = conn
@@ -6001,13 +6700,14 @@ fn resolve_jump_auth(
     };
     let key_data = if let Some(kid) = effective_key_id {
         let mut key_stmt = conn
-            .prepare("SELECT private_key, passphrase FROM ssh_keys WHERE id = ?1")
+            .prepare("SELECT private_key, passphrase, name FROM ssh_keys WHERE id = ?1")
             .map_err(|e| e.to_string())?;
         let mut key_rows = key_stmt.query([kid]).map_err(|e| e.to_string())?;
         if let Some(key_row) = key_rows.next().map_err(|e| e.to_string())? {
             let private_key: String = key_row.get::<_, String>(0).map_err(|e| e.to_string())?;
             let passphrase: Option<String> = key_row.get::<_, Option<String>>(1).map_err(|e| e.to_string())?;
-            Some((private_key, passphrase))
+            let key_name: Option<String> = key_row.get::<_, Option<String>>(2).unwrap_or_default();
+            Some((private_key, passphrase, key_name))
         } else {
             None
         }
@@ -6029,6 +6729,7 @@ fn resolve_jump_auth(
 /// is verified through the SAME frontend prompt as the target (events emitted
 /// under the target's `session_id`, keyed by a distinct nonce), and it supports
 /// the full key → password → keyboard-interactive auth ladder.
+#[allow(clippy::too_many_arguments)]
 async fn connect_jump_host(
     app: &tauri::AppHandle,
     db: &std::sync::Arc<std::sync::Mutex<Option<rusqlite::Connection>>>,
@@ -6040,6 +6741,14 @@ async fn connect_jump_host(
             std::collections::HashMap<String, tokio::sync::oneshot::Sender<Option<Vec<String>>>>,
         >,
     >,
+    // Per-tab prompted-secret cache, and whether this connection may prompt
+    // at all (true only for a primary target; secondaries reuse the cache).
+    cache: &PromptedSecretsMap,
+    allow_prompt: bool,
+    // Set when the bastion login itself failed (rejected or cancelled), so the
+    // caller reports an auth error and auto-reconnect stops instead of asking
+    // again every few seconds.
+    auth_failed: &std::sync::atomic::AtomicBool,
     session_id: &str,
     jump_server_id: i32,
 ) -> Result<russh::client::Handle<ssh_manager::ClientHandler>, String> {
@@ -6146,21 +6855,58 @@ async fn connect_jump_host(
         }
     };
 
-    // 5. Auth ladder: key → password → keyboard-interactive.
-    let mut auth_res = if let Some((private_key, passphrase)) = key_data {
+    // 5. Auth ladder: key, then password, then keyboard-interactive. A bastion
+    // saved with no secret is prompted for here too (primary target only) and
+    // cached under this bastion, so its secrets never reach another host.
+    let jump_target = format!("jump{}|{}:{}|{}", jump_server_id, host, port, user.trim());
+    let base_id = prompted_cache_key(session_id, &jump_target);
+    let prompt_ctx = SecretPromptCtx {
+        app,
+        session_id,
+        nonce: &jump_nonce,
+        kbi_txs,
+        cache,
+        base: &base_id,
+        allow_prompt,
+        cancelled: std::sync::atomic::AtomicBool::new(false),
+    };
+    let mut auth_res = if let Some((private_key, passphrase, key_name)) = key_data {
         log("Jump host: private key authentication...", "info");
-        match decode_ssh_private_key(&private_key, passphrase.as_deref()) {
-            Ok(keypair) => ssh_manager::authenticate_with_key(&mut session, &effective_user, keypair).await,
-            Err(e) => Err(russh::Error::from(std::io::Error::new(std::io::ErrorKind::InvalidData, e))),
-        }
-    } else if let Some(pass) = password {
-        log("Jump host: password authentication...", "info");
-        ssh_manager::authenticate_with_password(&mut session, &effective_user, &pass).await
+        let key_label = key_name
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| format!("{}@{}", effective_user, host));
+        authenticate_key_prompting(
+            &mut session,
+            &effective_user,
+            &private_key,
+            &key_label,
+            passphrase.map(Zeroizing::new),
+            SecretSlot::JumpPassphrase,
+            &prompt_ctx,
+        )
+        .await
     } else {
-        Ok(false)
+        log("Jump host: password authentication...", "info");
+        authenticate_password_prompting(
+            &mut session,
+            &effective_user,
+            &host,
+            None,
+            password.map(Zeroizing::new),
+            SecretSlot::JumpPassword,
+            &prompt_ctx,
+        )
+        .await
     };
 
-    if !matches!(auth_res, Ok(true)) {
+    // A declined prompt ends the hop. Do not fall through into the server's
+    // own keyboard-interactive password box. A secondary (::sftp / ::fwd) never
+    // prompts: with nothing cached it fails here instead of waiting out a modal
+    // the primary tab does not show.
+    if allow_prompt
+        && !matches!(auth_res, Ok(true))
+        && !prompt_ctx.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+    {
         if let Some(kbi_res) =
             run_keyboard_interactive(&mut session, &effective_user, app, session_id, &jump_nonce, kbi_txs).await
         {
@@ -6175,8 +6921,16 @@ async fn connect_jump_host(
             log("Jump host authenticated.", "success");
             Ok(session)
         }
-        Ok(false) => Err("jump host authentication failed".into()),
-        Err(e) => Err(format!("jump host auth error: {}", e)),
+        Ok(false) => {
+            auth_failed.store(true, std::sync::atomic::Ordering::Relaxed);
+            Err("jump host authentication failed".into())
+        }
+        Err(e) => {
+            if classify_russh_error(&e).is_auth() {
+                auth_failed.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(format!("jump host auth error: {}", e))
+        }
     }
 }
 
@@ -6334,6 +7088,9 @@ async fn initiate_connection(
     let state_session_generation = Arc::clone(&state.session_generation);
     let fp_txs_clone = Arc::clone(&state.fp_txs);
     let kbi_txs_clone = Arc::clone(&state.kbi_txs);
+    // Per-tab cache of secrets the user types at connect time, so a reconnect
+    // or a dedicated secondary reuses them without prompting again.
+    let prompted_secrets_clone = Arc::clone(&state.prompted_secrets);
     let state_jump_connections = Arc::clone(&state.jump_connections);
     // Second Arc into the DB for the ProxyJump hop — the handler below moves
     // the primary `db_conn_shared`, and the spawned worker needs its own owned
@@ -6397,7 +7154,9 @@ async fn initiate_connection(
         let key_data = q.private_key
             .clone()
             .filter(|s| !s.trim().is_empty())
-            .map(|pk| (pk, q.passphrase.clone()));
+            // Third element is the key name for the passphrase prompt. Quick
+            // Connect keys are nameless.
+            .map(|pk| (pk, q.passphrase.clone(), None::<String>));
         let auth_type = if key_data.is_some() { "custom_key" } else { "custom_pass" };
         Some((
             q.host.clone(),
@@ -6486,12 +7245,13 @@ async fn initiate_connection(
 
             // Fetch key details if a key is needed
             let key_data = if let Some(kid) = effective_key_id {
-                let mut key_stmt = conn.prepare("SELECT private_key, passphrase FROM ssh_keys WHERE id = ?1").map_err(|e| e.to_string())?;
+                let mut key_stmt = conn.prepare("SELECT private_key, passphrase, name FROM ssh_keys WHERE id = ?1").map_err(|e| e.to_string())?;
                 let mut key_rows = key_stmt.query([kid]).map_err(|e| e.to_string())?;
                 if let Some(key_row) = key_rows.next().map_err(|e| e.to_string())? {
                     let private_key: String = key_row.get::<_, String>(0).map_err(|e| e.to_string())?;
                     let passphrase: Option<String> = key_row.get::<_, Option<String>>(1).map_err(|e| e.to_string())?;
-                    Some((private_key, passphrase))
+                    let key_name: Option<String> = key_row.get::<_, Option<String>>(2).unwrap_or_default();
+                    Some((private_key, passphrase, key_name))
                 } else {
                     None
                 }
@@ -6600,7 +7360,7 @@ async fn initiate_connection(
         }
         emit_log(&format!("[DEBUG] SQLite DB key_id: {:?}", db_key_id), "info");
         emit_log(&format!("[DEBUG] effective_key_id determined: {:?}", effective_key_id), "info");
-        if let Some((ref priv_key, ref passphrase)) = key_data {
+        if let Some((ref priv_key, ref passphrase, _)) = key_data {
             emit_log(&format!("[DEBUG] SSH Key loaded from DB. Private Key length: {} chars, Has Passphrase: {}", priv_key.len(), passphrase.is_some()), "info");
             if priv_key.trim().is_empty() {
                 emit_log("[DEBUG] WARNING: SSH Key content is EMPTY!", "error");
@@ -6642,9 +7402,22 @@ async fn initiate_connection(
         // in `jump_handle_holder` so it lives through the target handshake; on
         // success it moves into `state_jump_connections` for the session's life.
         let mut jump_handle_holder: Option<russh::client::Handle<ssh_manager::ClientHandler>> = None;
+        // Set by connect_jump_host when the bastion login itself failed.
+        let jump_auth_failed = std::sync::atomic::AtomicBool::new(false);
         let stream_res: Result<Box<dyn AsyncStream>, String> = if let Some(jid) = jump_host_id {
             emit_log(&format!("ProxyJump: routing through jump host (server id {})...", jid), "info");
-            match connect_jump_host(&app, &db_for_jump, &fp_txs_clone, &kbi_txs_clone, &session_id_clone, jid).await {
+            match connect_jump_host(
+                &app,
+                &db_for_jump,
+                &fp_txs_clone,
+                &kbi_txs_clone,
+                &prompted_secrets_clone,
+                allow_kbi,
+                &jump_auth_failed,
+                &session_id_clone,
+                jid,
+            )
+            .await {
                 Ok(jump_handle) => {
                     // Originator address is cosmetic (logged by the bastion); the
                     // pair below is what OpenSSH sends for a -J hop.
@@ -6787,7 +7560,16 @@ async fn initiate_connection(
             Err(e) => {
                 emit_log(&e, "error");
                 cleanup().await;
-                let _ = app.emit(&format!("connection-failed-{}", session_id_clone), serde_json::json!({"reason": e}));
+                // A failed or cancelled bastion login is an auth error, so
+                // auto-reconnect stops instead of asking again every few seconds.
+                // Other transport failures leave the flag false and keep retrying.
+                let _ = app.emit(
+                    &format!("connection-failed-{}", session_id_clone),
+                    serde_json::json!({
+                        "reason": e,
+                        "is_auth_error": jump_auth_failed.load(std::sync::atomic::Ordering::Relaxed),
+                    }),
+                );
                 return;
             }
         };
@@ -6811,29 +7593,59 @@ async fn initiate_connection(
         {
             Ok(Ok(mut session)) => {
                 emit_log("SSH Handshake complete. Authenticating user...", "info");
-                
-                let final_pass = custom_password.or(password);
-                
-                let mut auth_res = if let Some((private_key, passphrase)) = key_data {
+
+                // Connect-time prompting for a secret the node, login, or key
+                // does not save. It uses this tab's keyboard-interactive modal.
+                // Accepted secrets are cached under the base tab id plus the
+                // target, so reconnects and `::sftp` / `::fwd` secondaries reuse
+                // them. Only the primary ever prompts.
+                let secrets_target = format!(
+                    "{}:{}|{}|{}|{:?}|{:?}",
+                    host, port, user.trim(), server_auth_type, effective_key_id, jump_host_id
+                );
+                let base_id = prompted_cache_key(&session_id_clone, &secrets_target);
+                let prompt_ctx = SecretPromptCtx {
+                    app: &app,
+                    session_id: &session_id_clone,
+                    nonce: &connect_nonce,
+                    kbi_txs: &kbi_txs_clone,
+                    cache: &prompted_secrets_clone,
+                    base: &base_id,
+                    allow_prompt: allow_kbi,
+                    cancelled: std::sync::atomic::AtomicBool::new(false),
+                };
+
+                let mut auth_res = if let Some((private_key, passphrase, key_name)) = key_data {
                     emit_log("Attempting Private Key Authentication...", "info");
-                    match decode_ssh_private_key(&private_key, passphrase.as_deref()) {
-                        Ok(keypair) => {
-                            ssh_manager::authenticate_with_key(&mut session, &effective_user, keypair).await
-                        }
-                        Err(e) => {
-                            emit_log(&format!("Failed to parse private key: {}", e), "error");
-                            Err(russh::Error::from(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                e,
-                            )))
-                        }
-                    }
-                } else if let Some(pass) = final_pass {
-                    emit_log("Attempting Password Authentication...", "info");
-                    ssh_manager::authenticate_with_password(&mut session, &effective_user, &pass).await
+                    let key_label = key_name
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or_else(|| format!("{}@{}", effective_user, host));
+                    authenticate_key_prompting(
+                        &mut session,
+                        &effective_user,
+                        &private_key,
+                        &key_label,
+                        passphrase.map(Zeroizing::new),
+                        SecretSlot::Passphrase,
+                        &prompt_ctx,
+                    )
+                    .await
                 } else {
-                    emit_log("Neither private key nor password auth credentials provided.", "error");
-                    Ok(false)
+                    emit_log("Attempting Password Authentication...", "info");
+                    // The failed-screen override (if any) is tried first, then
+                    // the cache, then the saved password. With none of them the
+                    // user is asked, unless the server does not take passwords,
+                    // in which case keyboard-interactive below runs as before.
+                    authenticate_password_prompting(
+                        &mut session,
+                        &effective_user,
+                        &host,
+                        custom_password.map(Zeroizing::new),
+                        password.map(Zeroizing::new),
+                        SecretSlot::Password,
+                        &prompt_ctx,
+                    )
+                    .await
                 };
 
                 // Keyboard-interactive (2FA / verification-code) fallback. Many
@@ -6844,7 +7656,13 @@ async fn initiate_connection(
                 // the UI, collect the user's answers, and send them back. If
                 // the server doesn't offer it, `run_keyboard_interactive`
                 // returns None and we keep the original auth result untouched.
-                if allow_kbi && !matches!(auth_res, Ok(true)) {
+                // A cancelled password or passphrase prompt stops here: the
+                // fallback would only ask again (the server's own "Password:"
+                // box on a typical PAM setup).
+                if allow_kbi
+                    && !matches!(auth_res, Ok(true))
+                    && !prompt_ctx.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+                {
                     if let Some(kbi_res) = run_keyboard_interactive(
                         &mut session,
                         &effective_user,
@@ -7876,6 +8694,16 @@ async fn disconnect_session(
     if !session_id.contains("::") {
         teardown_connection_key(state.inner(), mirrors.inner(), &format!("{}::sftp", session_id)).await;
         teardown_connection_key(state.inner(), mirrors.inner(), &format!("{}::fwd", session_id)).await;
+        // Disconnecting a whole tab forgets any connect-time secret the user
+        // typed for it. A fresh connect asks again. Gated to a base id so
+        // toggling a `::sftp` / `::fwd` secondary off keeps the still-live
+        // primary's cache. Entries are keyed `<tab>|<target>`.
+        let tab_prefix = format!("{}|", session_id);
+        state
+            .prompted_secrets
+            .lock()
+            .await
+            .retain(|key, _| key != &session_id && !key.starts_with(&tab_prefix));
     }
     // Tell the UI so the tab status dot flips to red. `user_initiated` keeps
     // SessionView from kicking off an auto-reconnect cycle for an intentional
