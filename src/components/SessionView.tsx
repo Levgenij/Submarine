@@ -218,6 +218,16 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
   // `kbiValues` mirrors one editable answer per prompt.
   const [kbiPrompt, setKbiPrompt] = useState<any>(null);
   const [kbiValues, setKbiValues] = useState<string[]>([]);
+  // Nonce of the prompt on screen, read synchronously by the dismiss
+  // listeners. State would lag a render behind a dismiss that races in.
+  const fpNonceRef = useRef<string | null>(null);
+  const kbiNonceRef = useRef<string | null>(null);
+  // Login as, a password, and keyboard-interactive can share one connect
+  // nonce. Each prompt takes a queue slot; a dismiss retires the oldest
+  // slot, so an earlier dismiss cannot clear a newer prompt already showing.
+  const kbiPromptQueueRef = useRef<number[]>([]);
+  const kbiPromptSeqRef = useRef(0);
+  const kbiShowingRef = useRef(0);
   const [isAuthError, setIsAuthError] = useState(false);
   const [customPassword, setCustomPassword] = useState("");
   // The connect-time log box mirrors the terminal font-size setting, so the
@@ -613,20 +623,47 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
     });
 
     const unlistenPrompt = listen(`fingerprint-prompt-${session.id}`, (event: any) => {
+      fpNonceRef.current = event.payload?.nonce ?? null;
       setFingerprintPrompt(event.payload);
     });
 
-    const unlistenPromptDismiss = listen(`fingerprint-prompt-dismiss-${session.id}`, () => {
+    // A dismiss names the prompt it closes (its nonce). One left over from an
+    // older connect attempt must not close the prompt that is showing now.
+    const unlistenPromptDismiss = listen(`fingerprint-prompt-dismiss-${session.id}`, (event: any) => {
+      const nonce = event.payload?.nonce;
+      if (nonce && fpNonceRef.current && nonce !== fpNonceRef.current) return;
+      fpNonceRef.current = null;
       setFingerprintPrompt(null);
     });
 
     const unlistenKbi = listen(`kbi-prompt-${session.id}`, (event: any) => {
       const p = event.payload;
+      const id = kbiPromptSeqRef.current + 1;
+      kbiPromptSeqRef.current = id;
+      kbiPromptQueueRef.current.push(id);
+      kbiShowingRef.current = id;
+      kbiNonceRef.current = p?.nonce ?? null;
       setKbiPrompt(p);
       setKbiValues(Array.isArray(p?.prompts) ? p.prompts.map(() => "") : []);
     });
 
-    const unlistenKbiDismiss = listen(`kbi-prompt-dismiss-${session.id}`, () => {
+    const unlistenKbiDismiss = listen(`kbi-prompt-dismiss-${session.id}`, (event: any) => {
+      const nonce = event.payload?.nonce;
+      const queue = kbiPromptQueueRef.current;
+      const nonceOk = !nonce || !kbiNonceRef.current || nonce === kbiNonceRef.current;
+      // A different connect nonce is another attempt. Drop an older slot if
+      // one is still queued, and leave the prompt on screen alone.
+      if (!nonceOk) {
+        if (queue.length > 0 && queue[0] !== kbiShowingRef.current) queue.shift();
+        return;
+      }
+      // Same nonce (Login as, then password) or a dismiss with no nonce:
+      // retire the oldest prompt. Only clear the modal when that prompt is
+      // the one on screen.
+      const closed = queue.shift();
+      if (closed == null || closed !== kbiShowingRef.current) return;
+      kbiNonceRef.current = null;
+      kbiShowingRef.current = 0;
       setKbiPrompt(null);
       setKbiValues([]);
     });
@@ -816,6 +853,20 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
     return () => clearInterval(t);
   }, [nextReconnectAt]);
 
+  const clearConnectPrompts = () => {
+    // A prompt still showing belongs to the attempt being replaced. Drop its
+    // queue slot too: a later dismiss must not retire that stale slot and
+    // leave the new attempt's modal on screen.
+    fpNonceRef.current = null;
+    kbiNonceRef.current = null;
+    kbiPromptQueueRef.current = [];
+    kbiPromptSeqRef.current = 0;
+    kbiShowingRef.current = 0;
+    setFingerprintPrompt(null);
+    setKbiPrompt(null);
+    setKbiValues([]);
+  };
+
   const scheduleReconnect = (attempt: number) => {
     if (reconnectTimerRef.current) {
       clearTimeout(reconnectTimerRef.current);
@@ -827,6 +878,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
     reconnectTimerRef.current = setTimeout(() => {
       setNextReconnectAt(null);
       setStatus('connecting');
+      clearConnectPrompts();
       primarySeparateRef.current = separateFwdRef.current;
       invoke("initiate_connection", {
         sessionId: session.id,
@@ -844,6 +896,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
     setStatus('connecting');
     setLogs([]);
     setIsAuthError(false);
+    clearConnectPrompts();
     setDisconnectReason("");
     resetSecondaryStatus();
     primarySeparateRef.current = separateFwdRef.current;
@@ -901,6 +954,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
     // (or a hostile script that knows only the session id) can't accept
     // a fingerprint on the user's behalf.
     const nonce = fingerprintPrompt?.nonce;
+    fpNonceRef.current = null;
     setFingerprintPrompt(null);
     if (!nonce) return;
     try {
@@ -917,6 +971,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
   const handleKbiSubmit = async () => {
     const nonce = kbiPrompt?.nonce;
     const responses = kbiValues;
+    kbiNonceRef.current = null;
     setKbiPrompt(null);
     setKbiValues([]);
     if (!nonce) return;
@@ -929,6 +984,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
 
   const handleKbiCancel = async () => {
     const nonce = kbiPrompt?.nonce;
+    kbiNonceRef.current = null;
     setKbiPrompt(null);
     setKbiValues([]);
     if (!nonce) return;

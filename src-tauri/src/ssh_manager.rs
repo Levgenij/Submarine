@@ -490,6 +490,62 @@ impl SshState {
     }
 }
 
+/// One connect attempt: the session generation it started under (bumped by
+/// every new attempt and by disconnect) and whether its driver has given up.
+/// A prompt from an attempt that is no longer current would land on a newer
+/// attempt, and its failure report would flip a tab that has since connected
+/// back to failed, so both are dropped.
+#[derive(Clone)]
+pub struct ConnectAttempt {
+    generations: Arc<Mutex<HashMap<String, u64>>>,
+    session_id: String,
+    generation: u64,
+    abandoned: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ConnectAttempt {
+    pub fn new(generations: Arc<Mutex<HashMap<String, u64>>>, session_id: String, generation: u64) -> Self {
+        Self {
+            generations,
+            session_id,
+            generation,
+            abandoned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// No newer attempt has started, and the session was not disconnected.
+    pub async fn is_current(&self) -> bool {
+        self.generations
+            .lock()
+            .await
+            .get(&self.session_id)
+            .copied()
+            .unwrap_or(0)
+            == self.generation
+    }
+
+    /// `is_current` for synchronous callers (attempt log lines). If the
+    /// generation map is locked at this instant, say current: an extra log
+    /// line is harmless, and blocking a logger is not.
+    pub fn is_current_now(&self) -> bool {
+        self.generations
+            .try_lock()
+            .map(|g| g.get(&self.session_id).copied().unwrap_or(0) == self.generation)
+            .unwrap_or(true)
+    }
+
+    /// The connect driver stopped waiting (its handshake timed out), so
+    /// nothing would act on an answer any more.
+    pub fn abandon(&self) {
+        self.abandoned.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether it still makes sense to ask the user anything for this attempt.
+    pub async fn may_prompt(&self) -> bool {
+        !self.abandoned.load(std::sync::atomic::Ordering::SeqCst) && self.is_current().await
+    }
+}
+
 pub struct ClientHandler {
     pub app: AppHandle,
     pub session_id: String,
@@ -531,12 +587,23 @@ pub struct ClientHandler {
     /// own, so an unknown or changed key is refused at once instead of
     /// waiting on a prompt nobody can see.
     pub prompt_allowed: bool,
+    /// Connect attempt this handler belongs to. A fingerprint prompt from an
+    /// attempt that is no longer current, or that its driver gave up on, is
+    /// refused instead of appearing over a newer attempt.
+    pub attempt: ConnectAttempt,
 }
 
 impl client::Handler for ClientHandler {
     type Error = russh::Error;
 
     async fn check_server_key(&mut self, offered: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
+        // An attempt that has been superseded (a newer attempt or a disconnect)
+        // or that its driver gave up on ends here, quietly: nothing would use
+        // the connection, and its prompt must not cover a newer attempt.
+        if !self.attempt.may_prompt().await {
+            self.fp_outcome.store(0, std::sync::atomic::Ordering::SeqCst);
+            return Ok(false);
+        }
         let Some(server_public_key) = plain_host_key(offered) else {
             let _ = self.app.emit(&format!("session-log-{}", self.session_id), serde_json::json!({
                 "msg": "Server presented an SSH host CERTIFICATE. Host certificates can't be verified yet (no trusted CA is configured), so the connection was refused.",
@@ -657,6 +724,14 @@ impl client::Handler for ClientHandler {
             return Ok(false);
         }
 
+        // Re-checked right before prompting: the key lookup above can take a
+        // moment, and a prompt from a superseded attempt would only cover the
+        // current one.
+        if !self.attempt.may_prompt().await {
+            self.fp_outcome.store(0, std::sync::atomic::Ordering::SeqCst);
+            return Ok(false);
+        }
+
         if mismatch {
             // Loud, distinct log line for the activity panel — this is the
             // SSH "REMOTE HOST IDENTIFICATION HAS CHANGED" moment.
@@ -724,7 +799,7 @@ impl client::Handler for ClientHandler {
                         "msg": "Host key rejected by user.",
                         "type": "error"
                     }));
-                    let _ = self.app.emit(&format!("fingerprint-prompt-dismiss-{}", self.session_id), serde_json::json!({}));
+                    let _ = self.app.emit(&format!("fingerprint-prompt-dismiss-{}", self.session_id), serde_json::json!({ "nonce": self.connect_nonce }));
                     self.fp_outcome.store(0, std::sync::atomic::Ordering::SeqCst);
                     Ok(false)
                 }
@@ -733,7 +808,7 @@ impl client::Handler for ClientHandler {
                         "msg": "Host key verification timed out (no response from user within 90 seconds).",
                         "type": "error"
                     }));
-                    let _ = self.app.emit(&format!("fingerprint-prompt-dismiss-{}", self.session_id), serde_json::json!({}));
+                    let _ = self.app.emit(&format!("fingerprint-prompt-dismiss-{}", self.session_id), serde_json::json!({ "nonce": self.connect_nonce }));
                     self.fp_outcome.store(2, std::sync::atomic::Ordering::SeqCst);
                     Ok(false)
                 }
@@ -742,7 +817,7 @@ impl client::Handler for ClientHandler {
                         "msg": "Host key verification aborted.",
                         "type": "error"
                     }));
-                    let _ = self.app.emit(&format!("fingerprint-prompt-dismiss-{}", self.session_id), serde_json::json!({}));
+                    let _ = self.app.emit(&format!("fingerprint-prompt-dismiss-{}", self.session_id), serde_json::json!({ "nonce": self.connect_nonce }));
                     self.fp_outcome.store(0, std::sync::atomic::Ordering::SeqCst);
                     Ok(false)
                 }
@@ -844,6 +919,35 @@ mod tests {
             .encode(Sha256::digest(public.to_bytes().unwrap()));
         assert_eq!(fp, expected);
         assert!(!fp.starts_with("SHA256:"));
+    }
+
+    /// A superseded generation or an abandoned handshake must not prompt.
+    /// Generation 0 with no row is current (the map's missing-key default).
+    #[tokio::test]
+    async fn connect_attempt_prompts_only_while_current_and_not_abandoned() {
+        let generations = Arc::new(Mutex::new(HashMap::new()));
+        let fresh = ConnectAttempt::new(Arc::clone(&generations), "other".into(), 0);
+        assert!(fresh.is_current().await);
+        assert!(fresh.may_prompt().await);
+
+        let attempt = ConnectAttempt::new(Arc::clone(&generations), "sess".into(), 1);
+        assert!(!attempt.is_current().await);
+        assert!(!attempt.may_prompt().await);
+
+        generations.lock().await.insert("sess".into(), 1);
+        assert!(attempt.is_current().await);
+        assert!(attempt.is_current_now());
+        assert!(attempt.may_prompt().await);
+
+        attempt.abandon();
+        assert!(attempt.is_current().await);
+        assert!(!attempt.may_prompt().await);
+
+        let replaced = ConnectAttempt::new(Arc::clone(&generations), "sess".into(), 1);
+        generations.lock().await.insert("sess".into(), 2);
+        assert!(!replaced.is_current().await);
+        assert!(!replaced.is_current_now());
+        assert!(!replaced.may_prompt().await);
     }
 
     /// A `resize_terminal` that lands while the channel is still being
