@@ -90,3 +90,20 @@ export function suggestArchiveBase(
     if (free(`${base}-${n}`)) return `${base}-${n}`;
   }
 }
+
+/** An id for one archive or extract call. `cancelArchiveJob` stops it. */
+export function newArchiveJobId(): string {
+  const random = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `archive-${random}`;
+}
+
+/** Stops a running archive or extract job. One that has already ended is left alone. */
+export async function cancelArchiveJob(jobId: string): Promise<void> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("sftp_cancel_transfer", { transferId: jobId });
+}
+
+/** What a cancelled job rejects with. */
+export const JOB_CANCELLED = "CANCELLED";

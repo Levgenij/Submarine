@@ -81,12 +81,12 @@ export function createRemoteProvider(sessionId: string): RemoteFileProvider {
 
     // Both run `tar` / `zip` / `unzip` on the server, so nothing is
     // transferred; see `archive.rs`.
-    async archive(dir, names, dest, format, overwrite) {
-      await invoke("sftp_archive", { sessionId, dir, names, dest, format, overwrite });
+    async archive(dir, names, dest, format, overwrite, jobId: string) {
+      return invoke<string | null>("sftp_archive", { sessionId, dir, names, dest, format, overwrite, jobId });
     },
 
-    async extract(dir: string, name: string, folder: string | null) {
-      await invoke("sftp_extract", { sessionId, dir, name, folder });
+    async extract(dir: string, name: string, folder: string | null, jobId: string) {
+      return invoke<string | null>("sftp_extract", { sessionId, dir, name, folder, jobId });
     },
 
     async chmod(path: string, mode: number) {

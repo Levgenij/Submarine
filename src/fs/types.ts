@@ -86,13 +86,13 @@ export interface FileProvider {
    * Packs `names` (entries of `dir`) into the archive at `dest`. Rejects with
    * `EXISTS:<path>` when `dest` is already there and `overwrite` is false.
    */
-  archive(dir: string, names: string[], dest: string, format: ArchiveFormat, overwrite: boolean): Promise<void>;
+  archive(dir: string, names: string[], dest: string, format: ArchiveFormat, overwrite: boolean, jobId: string): Promise<string | null>;
   /**
    * Unpacks the archive `name` of `dir` into `dir`, or into its subfolder
    * `folder` (created if missing), replacing same-named files. `name` and
    * `folder` are single path components; the backend refuses anything else.
    */
-  extract(dir: string, name: string, folder: string | null): Promise<void>;
+  extract(dir: string, name: string, folder: string | null, jobId: string): Promise<string | null>;
 
   // ---- optional unix-only operations --------------------------------------
   chmod?: (path: string, mode: number) => Promise<void>;

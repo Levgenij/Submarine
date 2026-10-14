@@ -128,12 +128,12 @@ export function createLocalProvider(): LocalFileProvider {
       await invoke("local_rename", { from, to });
     },
 
-    async archive(dir, names, dest, format, overwrite) {
-      await invoke("local_archive", { dir, names, dest, format, overwrite });
+    async archive(dir, names, dest, format, overwrite, jobId: string) {
+      return invoke<string | null>("local_archive", { dir, names, dest, format, overwrite, jobId });
     },
 
-    async extract(dir: string, name: string, folder: string | null) {
-      await invoke("local_extract", { dir, name, folder });
+    async extract(dir: string, name: string, folder: string | null, jobId: string) {
+      return invoke<string | null>("local_extract", { dir, name, folder, jobId });
     },
   };
 }
