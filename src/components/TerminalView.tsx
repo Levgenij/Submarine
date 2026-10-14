@@ -12,6 +12,8 @@ import HistorySearchOverlay from './HistorySearchOverlay';
 import { bundledAlias, fontFamilyCss, readFontFamily, readFontSize } from '../util/terminalFont';
 import { readUseLocalShell } from '../util/terminalShell';
 import { IS_ANDROID, IS_LINUX } from '../util/platform';
+import { httpLinkPrompt, multilinePastePrompt } from '../util/terminalLinkPaste';
+import { useConfirm } from '../ui/confirm';
 
 // Does the recent remote OUTPUT look like a no-echo password / passphrase
 // prompt? Used to skip command-history capture so typed secrets (sudo, su,
@@ -211,6 +213,11 @@ const TerminalView = ({
   // holds pasted text, so its Enter is skipped too.
   const pastingRef = useRef(false);
   const commandBufPastedRef = useRef(false);
+  // The app's confirm dialog, for the terminal's long-lived handlers (links,
+  // multi-line paste), which would otherwise see a stale function.
+  const confirm = useConfirm();
+  const confirmRef = useRef(confirm);
+  confirmRef.current = confirm;
   // The terminal's input handler (what xterm's onData runs), for keys that
   // don't come from xterm itself - the mobile key bar's arrows and symbols.
   const inputRef = useRef<((data: string) => void) | null>(null);
@@ -473,7 +480,33 @@ const TerminalView = ({
         cursor: '#60a5fa',
         selectionBackground: 'rgba(96, 165, 250, 0.3)',
       },
-      allowProposedApi: true
+      allowProposedApi: true,
+      // OSC 8 hyperlinks a program on the server prints. What they show can
+      // differ from where they go, so the real target is shown first, and
+      // only an http(s) link opens, in the system browser (open_external_url
+      // refuses anything else) rather than inside the app. xterm already
+      // ignores other schemes while allowNonHttpProtocols is off.
+      linkHandler: {
+        allowNonHttpProtocols: false,
+        activate: (_event, uri) => {
+          void (async () => {
+            const link = httpLinkPrompt(uri);
+            if (!link) return;
+            const ok = await confirmRef.current({
+              title: 'Open this link?',
+              message: `A program in this terminal links to:\n\n${link.shown}\n\nIt opens in your browser, at ${link.host}.`,
+              okLabel: 'Open',
+              safeDefault: true,
+            });
+            if (!ok) return;
+            try {
+              await invoke('open_external_url', { url: uri });
+            } catch (e) {
+              notify(`Couldn't open the link: ${String(e)}`, 'err');
+            }
+          })();
+        },
+      },
     });
 
     const fitAddon = new FitAddon();
@@ -761,6 +794,21 @@ const TerminalView = ({
       try { text = await readClipboardText(); }
       catch { notify('Clipboard read denied', 'err'); return; }
       if (!text) return;
+      // More than one line into a program that hasn't turned bracketed-paste
+      // mode on (an older bash, a plain sh): each line would run the moment it
+      // lands, so ask first and show what would run. With the mode on, the
+      // program takes the paste as one block and nothing runs by itself; a
+      // single line with a trailing newline runs as one command, as anywhere.
+      const pasteAsk = multilinePastePrompt(text, term.modes.bracketedPasteMode);
+      if (pasteAsk) {
+        const ok = await confirmRef.current({
+          title: `Paste ${pasteAsk.count} lines?`,
+          message: `The program here doesn't take a paste as one block, so each line runs as soon as it lands:\n\n${pasteAsk.preview}`,
+          okLabel: 'Paste',
+          safeDefault: true,
+        });
+        if (!ok) return;
+      }
       // Hand the text to xterm's own paste path instead of writing it raw to
       // the PTY. xterm collapses CRLF / lone LF to a single CR (one Enter per
       // line break - a Windows clipboard's `\r\n` would otherwise be two) and,
