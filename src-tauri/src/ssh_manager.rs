@@ -941,6 +941,110 @@ impl client::Handler for ClientHandler {
         Ok(())
     }
 
+    // This process is an SSH client. The only channel it accepts from the
+    // server is forwarded-tcpip for a port forward this app registered
+    // (above). Every other server-opened channel is refused. russh's defaults
+    // accept them, and an accepted-then-dropped channel is tracked but never
+    // used. Drop the channel and reject so it is not accepted.
+    async fn server_channel_open_session(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        drop(channel);
+        reply
+            .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+            .await;
+        Ok(())
+    }
+
+    async fn server_channel_open_direct_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        _host_to_connect: &str,
+        _port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        drop(channel);
+        reply
+            .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+            .await;
+        Ok(())
+    }
+
+    async fn server_channel_open_direct_streamlocal(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        _socket_path: &str,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        drop(channel);
+        reply
+            .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+            .await;
+        Ok(())
+    }
+
+    async fn server_channel_open_forwarded_streamlocal(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        _socket_path: &str,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        drop(channel);
+        reply
+            .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+            .await;
+        Ok(())
+    }
+
+    async fn server_channel_open_agent_forward(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        drop(channel);
+        reply
+            .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+            .await;
+        Ok(())
+    }
+
+    async fn server_channel_open_x11(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        drop(channel);
+        reply
+            .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+            .await;
+        Ok(())
+    }
+
+    async fn server_channel_open_unknown(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        drop(channel);
+        reply
+            .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+            .await;
+        Ok(())
+    }
+
     // The next three only note that the server is talking (see `LastHeard`).
     // russh hands the data itself to the channel's own stream as well; the
     // default implementations do nothing.
