@@ -164,9 +164,9 @@ const TransferRow = ({ t, onCancel }: { t: Transfer; onCancel: (id: string) => v
           </div>
         )}
         {t.status === "error" ? (
-          <div className="mt-0.5 text-[10px] text-rose-300/90 truncate" title={t.error}>{t.error || "Transfer failed"}</div>
+          <div className="mt-0.5 text-[10px] text-rose-300/90 line-clamp-3 [overflow-wrap:anywhere]" title={t.error}>{t.error || "Transfer failed"}</div>
         ) : (t.status === "cancelled" || t.status === "done") && t.error ? (
-          <div className="mt-0.5 text-[10px] text-amber-300/90 truncate" title={t.error}>{t.error}</div>
+          <div className="mt-0.5 text-[10px] text-amber-300/90 line-clamp-3 [overflow-wrap:anywhere]" title={t.error}>{t.error}</div>
         ) : (
           <div className="flex items-center gap-2 text-[10px] text-zinc-500">
             <span className="truncate flex-1">{sizeText}</span>
