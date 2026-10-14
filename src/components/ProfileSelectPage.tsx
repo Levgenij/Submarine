@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Plus, Trash2, X, AlertTriangle, ArrowRight, Download, Upload,
   CheckCircle2, Cloud, CloudOff, HardDrive, ChevronDown, RefreshCw, ArrowUpCircle,
+  Eye, EyeOff, ArrowBigUp, Check,
 } from "lucide-react";
 import CloudPanel from "./CloudPanel";
 import { bookmarksKeyPrefix } from "./SftpWorkspace";
@@ -48,6 +49,75 @@ const REPO_URL = "https://github.com/SinaXhpm/Submarine";
 // here, get it from the cloud, or delete it from the cloud.
 interface Row { name: string; local: boolean; cloud: CloudProfile | null; }
 
+// The profile opened last on this device is the one picked when the page
+// opens. Only its name is kept. Storage can be unavailable, so every access
+// is guarded; the first profile is picked then.
+const LAST_PROFILE_KEY = "submarine-last-profile";
+const lastProfile = () => {
+  try { return localStorage.getItem(LAST_PROFILE_KEY) ?? ""; } catch { return ""; }
+};
+const rememberProfile = (name: string) => {
+  try { localStorage.setItem(LAST_PROFILE_KEY, name); } catch { /* the first profile is picked instead */ }
+};
+const forgetLastProfile = (name: string) => {
+  try { if (localStorage.getItem(LAST_PROFILE_KEY) === name) localStorage.removeItem(LAST_PROFILE_KEY); } catch { /* nothing kept */ }
+};
+
+// The backend's rules for a profile name (lib.rs validate_profile_name),
+// checked while it's typed, plus the names already taken. Case doesn't count:
+// the list matches names that way, and so do Windows file names.
+const RESERVED_NAME = /^(CON|PRN|AUX|NUL|COM\d|LPT\d)$/i;
+const nameProblem = (name: string, local: string[], cloud: string[]): string | null => {
+  if (!name) return null;
+  if (!/^[A-Za-z0-9_-]+$/.test(name)) return "Use letters, numbers, - and _ only.";
+  if (name.length > 32) return "Use 32 characters at most.";
+  if (RESERVED_NAME.test(name)) return `"${name}" is a reserved name on Windows.`;
+  const key = name.toLowerCase();
+  const here = local.find((p) => p.toLowerCase() === key);
+  if (here) return `There's already a profile named "${here}".`;
+  // A new profile is a different one, even under the same name: it would sit
+  // in the list as if it were the cloud one.
+  const there = cloud.find((p) => p.toLowerCase() === key);
+  if (there) return `"${there}" is in your cloud. Get it from the list, or pick another name.`;
+  return null;
+};
+
+// A short side-to-side nudge for a refused entry, skipped when the system asks
+// for less motion. The Web Animations API leaves no transform behind.
+const shake = (el: HTMLElement | null | undefined) => {
+  if (!el || typeof el.animate !== "function") return;
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+  el.animate(
+    [0, -7, 6, -4, 3, 0].map((x) => ({ transform: `translateX(${x}px)` })),
+    { duration: 380, easing: "ease-out" },
+  );
+};
+
+// Whether Caps Lock is on. A page only learns it from an event, so every key
+// and click reads it.
+const useCapsLock = () => {
+  const [on, setOn] = useState(false);
+  useEffect(() => {
+    const read = (e: KeyboardEvent | MouseEvent) => {
+      if (typeof e.getModifierState === "function") setOn(e.getModifierState("CapsLock"));
+    };
+    window.addEventListener("keydown", read, true);
+    window.addEventListener("keyup", read, true);
+    window.addEventListener("mousedown", read, true);
+    return () => {
+      window.removeEventListener("keydown", read, true);
+      window.removeEventListener("keyup", read, true);
+      window.removeEventListener("mousedown", read, true);
+    };
+  }, []);
+  return on;
+};
+
+const withInvalid = (className: string, invalid: boolean) =>
+  invalid
+    ? className.replaceAll("border-white/5", "border-rose-500/50").replaceAll("focus:border-primary/50", "focus:border-rose-400/70")
+    : className;
+
 interface Props {
   onUnlocked: (profileName: string) => void;
 }
@@ -63,11 +133,17 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
   // Open + actions; a cloud-only row expands to Get + Delete-from-cloud.
   const [selected, setSelected] = useState<string>("");
   const [password, setPassword] = useState("");
+  // Why the last unlock failed, under the password box.
+  const [unlockError, setUnlockError] = useState<string | null>(null);
 
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [newConfirmPassword, setNewConfirmPassword] = useState("");
+  // Set by a Create click with something missing: the rules not met yet turn red.
+  const [triedCreate, setTriedCreate] = useState(false);
+  // Why the backend refused the new profile.
+  const [createError, setCreateError] = useState<string | null>(null);
 
   // Import is a two-step flow: pick file (backend validates header) → prompt
   // for the profile name to save it under. We keep the picked path here so
@@ -100,10 +176,20 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
 
   const textPrompt = useTextPrompt();
   const confirm = useConfirm();
+  const capsLock = useCapsLock();
 
   const passwordInputRef = useRef<HTMLInputElement | null>(null);
   const nameInputRef = useRef<HTMLInputElement | null>(null);
+  const newPasswordRef = useRef<HTMLInputElement | null>(null);
+  const confirmRef = useRef<HTMLInputElement | null>(null);
   const importNameRef = useRef<HTMLInputElement | null>(null);
+
+  // The row to open when none is: the profile opened last here, else the first.
+  const pickFrom = (list: string[], prev: string) => {
+    if (prev && list.includes(prev)) return prev;
+    const last = lastProfile();
+    return list.includes(last) ? last : list[0] || "";
+  };
 
   // Clean the [PREFIX] off backend errors for display.
   const cleanErr = (e: unknown) => String(e).replace(/^\[[A-Z_]+\]\s*/, "");
@@ -113,7 +199,7 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
     try {
       const list = await invoke<string[]>("list_profiles");
       setProfiles(list);
-      setSelected((prev) => (prev && list.includes(prev) ? prev : list[0] || ""));
+      setSelected((prev) => pickFrom(list, prev));
     } catch (e: any) {
       setError(String(e));
     } finally {
@@ -194,9 +280,11 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
   };
 
   // When the expanded row changes, reset + focus the password so opening a
-  // profile is always "click row, type, Enter".
+  // profile is always "click row, type, Enter". Closing the row drops the
+  // unlock error with it.
   useEffect(() => {
     setPassword("");
+    setUnlockError(null);
     setError(null);
     requestAnimationFrame(() => passwordInputRef.current?.focus());
   }, [selected]);
@@ -226,39 +314,77 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
 
   const toggle = (row: Row) => setSelected((prev) => (prev === row.name ? "" : row.name));
 
+  const openCreate = () => {
+    setCreating(true);
+    setPassword("");
+    setUnlockError(null);
+    setError(null);
+    setInfo(null);
+    setNewName("");
+    setNewPassword("");
+    setNewConfirmPassword("");
+    setTriedCreate(false);
+    setCreateError(null);
+  };
+
+  // Leaving the form forgets what was typed in it, passwords included.
+  const closeCreate = () => {
+    setCreating(false);
+    setNewName("");
+    setNewPassword("");
+    setNewConfirmPassword("");
+    setTriedCreate(false);
+    setCreateError(null);
+    setError(null);
+  };
+
   const unlockSelected = async () => {
-    if (!selected) { setError("Pick a profile first."); return; }
-    if (!password) { setError("Type your password."); return; }
-    setBusy(true); setError(null);
+    const name = selected;
+    if (!name || !password || busy) return;
+    setBusy(true); setUnlockError(null); setError(null);
     try {
-      await invoke("select_profile", { name: selected });
+      await invoke("select_profile", { name });
       await invoke("setup_master_db", { password });
-      onUnlocked(selected);
-    } catch (e: any) {
+    } catch (e: unknown) {
       const raw = String(e);
-      setError(raw.toLowerCase().includes("decrypt") ? "Wrong password." : raw);
-    } finally {
+      setUnlockError(raw.toLowerCase().includes("decrypt") ? "Wrong password." : cleanErr(e));
       setBusy(false);
+      shake(passwordInputRef.current?.parentElement);
+      // Selected, so the next try types over it.
+      requestAnimationFrame(() => {
+        const el = passwordInputRef.current;
+        el?.focus();
+        el?.select();
+      });
+      return;
     }
+    rememberProfile(name);
+    onUnlocked(name);
   };
 
   const createNew = async () => {
-    setError(null);
-    if (!newName.trim()) { setError("Pick a name."); return; }
-    if (!newPassword) { setError("Set a password."); return; }
-    // The backend enforces this too — say it here so the rule shows up while
-    // they're still typing, not as a rejection after they've confirmed it twice.
-    if (newPassword.length < 8) { setError("Use at least 8 characters — this password protects every saved credential."); return; }
-    if (newPassword !== newConfirmPassword) { setError("Passwords don't match."); return; }
-    setBusy(true);
-    try {
-      await invoke("create_profile", { name: newName.trim(), password: newPassword });
-      onUnlocked(newName.trim());
-    } catch (e: any) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
+    if (busy) return;
+    const name = newName.trim();
+    const issue = nameProblem(name, profiles, cloudProfiles.map((c) => c.name));
+    const longEnoughNow = [...newPassword].length >= 8;
+    const matchesNow = newConfirmPassword.length > 0 && newPassword === newConfirmPassword;
+    if (!name || issue || !longEnoughNow || !matchesNow) {
+      setTriedCreate(true);
+      const el = !name || issue ? nameInputRef.current : !longEnoughNow ? newPasswordRef.current : confirmRef.current;
+      el?.focus();
+      shake(el === nameInputRef.current ? el : el?.parentElement);
+      return;
     }
+    setBusy(true); setCreateError(null); setError(null);
+    try {
+      await invoke("create_profile", { name, password: newPassword });
+    } catch (e: unknown) {
+      setCreateError(cleanErr(e));
+      setBusy(false);
+      return;
+    }
+    rememberProfile(name);
+    onUnlocked(name);
   };
 
   const exportProfile = async (name: string) => {
@@ -314,10 +440,15 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
     }
   };
 
+  const cancelImport = () => { setImportStaged(null); setError(null); };
+
   const commitImport = async () => {
-    if (!importStaged) return;
+    if (!importStaged || busy) return;
     const trimmed = importStaged.name.trim();
-    if (!trimmed) { setError("Pick a name for the imported profile."); return; }
+    // An imported file is a profile of its own, so only names on this device
+    // are taken; the cloud one of the same name may well be this very profile.
+    const issue = nameProblem(trimmed, profiles, []);
+    if (!trimmed || issue) { importNameRef.current?.focus(); shake(importNameRef.current); return; }
     setBusy(true); setError(null);
     try {
       if (importStaged.bytesB64) {
@@ -357,6 +488,7 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
       const prefix = bookmarksKeyPrefix(name);
       Object.keys(localStorage).filter((k) => k.startsWith(prefix)).forEach((k) => localStorage.removeItem(k));
       localStorage.removeItem(snapshotKey(name));
+      forgetLastProfile(name);
       await reload();
       refreshCloud();
     } catch (e: any) {
@@ -400,6 +532,8 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
       message: "Enter THIS profile's password — the same one you open it with. It unlocks the cloud copy and protects the copy saved on this device.",
       placeholder: "Profile password",
       password: true,
+      // This prompt only. The default still trims every other text prompt.
+      keepWhitespace: true,
       okLabel: "Get it",
       validate: (v: string) => (v.length < 1 ? "Enter the password" : null),
     });
@@ -422,6 +556,27 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
 
   const inputBase =
     "w-full h-11 px-4 bg-zinc-900/40 border border-white/5 rounded-xl text-[14px] text-zinc-50 placeholder:text-zinc-600 outline-none focus:border-primary/50 focus:bg-zinc-900/60 transition-colors";
+  const passwordInputClass =
+    "w-full h-11 pl-4 bg-zinc-900/40 border border-white/5 rounded-xl text-[14px] text-zinc-50 placeholder:text-zinc-600 outline-none focus:border-primary/50 focus:bg-zinc-900/60 transition-colors";
+
+  // The create form's checks, live. Length counts characters the way the
+  // backend does (code points, not UTF-16 units).
+  const nameIssue = nameProblem(newName.trim(), profiles, cloudProfiles.map((c) => c.name));
+  const nameHint = nameIssue ?? (triedCreate && !newName.trim() ? "Give the profile a name." : null);
+  const longEnough = [...newPassword].length >= 8;
+  const passwordsMatch = newConfirmPassword.length > 0 && newPassword === newConfirmPassword;
+  const createReady = !!newName.trim() && !nameIssue && longEnough && passwordsMatch;
+  // Same name rules as create, except a cloud name is not a clash: the file
+  // may be that profile.
+  const importIssue = importStaged ? nameProblem(importStaged.name.trim(), profiles, []) : null;
+
+  const onCreateKey = (e: React.KeyboardEvent<HTMLInputElement>, next: HTMLInputElement | null) => {
+    if (e.key !== "Enter" || e.nativeEvent.isComposing) return;
+    e.preventDefault();
+    if (createReady) createNew();
+    else if (next) next.focus();
+    else createNew();
+  };
 
   // First run (nothing anywhere) drops straight into create; a returning user
   // on a fresh device (cloud profiles, no local) still sees the list so they
@@ -486,29 +641,42 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
         )}
 
         {importStaged && (
-          <div className="mb-3 px-3 py-3 bg-zinc-900/60 border border-primary/30 rounded-lg space-y-2 animate-in fade-in">
+          <div
+            className="mb-3 px-3 py-3 bg-zinc-900/60 border border-primary/30 rounded-lg space-y-2 animate-in fade-in"
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && !busy) { e.preventDefault(); cancelImport(); }
+            }}
+          >
             <div className="text-[11.5px] text-zinc-300 leading-snug">
               Importing a profile. Pick a name (the file's password is unchanged).
             </div>
             <input
               ref={importNameRef}
               value={importStaged.name}
-              onChange={(e) => setImportStaged({ ...importStaged, name: e.target.value })}
+              onChange={(e) => { setImportStaged({ ...importStaged, name: e.target.value }); setError(null); }}
               onKeyDown={(e) => e.key === "Enter" && commitImport()}
-              className={inputBase + " h-9 text-[13px]"}
               placeholder="Profile name"
+              aria-label="Name for the imported profile"
+              aria-invalid={importIssue ? true : undefined}
+              autoComplete="off"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              className={withInvalid(inputBase + " h-9 text-[13px]", !!importIssue)}
             />
+            {importIssue && <FieldHint tone="error">{importIssue}</FieldHint>}
             <div className="flex gap-2">
               <button
                 onClick={commitImport}
-                disabled={busy || !importStaged.name.trim()}
+                disabled={busy || !importStaged.name.trim() || !!importIssue}
                 className="flex-1 h-9 rounded-lg text-[12.5px] font-semibold bg-primary text-black disabled:opacity-50"
               >
                 {busy ? "Importing…" : "Import"}
               </button>
               <button
-                onClick={() => { setImportStaged(null); setError(null); }}
-                className="h-9 px-3 rounded-lg text-[12.5px] font-semibold text-zinc-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10"
+                onClick={cancelImport}
+                disabled={busy}
+                className="h-9 px-3 rounded-lg text-[12.5px] font-semibold text-zinc-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 disabled:opacity-50"
               >
                 Cancel
               </button>
@@ -520,29 +688,59 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
           <div className="text-center text-zinc-500 text-[12.5px] py-6">Loading…</div>
         ) : showCreate ? (
           /* ---- Create a profile ---- */
-          <div className="space-y-3 animate-in fade-in">
-            <input
-              ref={nameInputRef}
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              placeholder="Profile name"
-              className={inputBase}
-            />
-            <input
-              type="password"
+          <div
+            className="space-y-3 animate-in fade-in"
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && rows.length > 0 && !busy) { e.preventDefault(); closeCreate(); }
+            }}
+          >
+            <div>
+              <input
+                ref={nameInputRef}
+                value={newName}
+                onChange={(e) => { setNewName(e.target.value); setCreateError(null); }}
+                onKeyDown={(e) => onCreateKey(e, newPasswordRef.current)}
+                placeholder="Profile name"
+                aria-label="Profile name"
+                aria-invalid={nameHint ? true : undefined}
+                aria-describedby={nameHint ? "new-name-hint" : undefined}
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                className={withInvalid(inputBase, !!nameHint)}
+              />
+              {nameHint && <FieldHint id="new-name-hint" tone="error">{nameHint}</FieldHint>}
+            </div>
+            <SecretInput
+              ref={newPasswordRef}
               value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
+              onChange={(v) => { setNewPassword(v); setCreateError(null); }}
+              onKeyDown={(e) => onCreateKey(e, confirmRef.current)}
               placeholder="Password"
-              className={inputBase}
+              autoComplete="new-password"
+              invalid={triedCreate && !longEnough}
+              className={withInvalid(passwordInputClass, triedCreate && !longEnough)}
             />
-            <input
-              type="password"
+            <SecretInput
+              ref={confirmRef}
               value={newConfirmPassword}
-              onChange={(e) => setNewConfirmPassword(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && createNew()}
+              onChange={(v) => { setNewConfirmPassword(v); setCreateError(null); }}
+              onKeyDown={(e) => onCreateKey(e, null)}
               placeholder="Confirm password"
-              className={inputBase}
+              autoComplete="new-password"
+              invalid={triedCreate && longEnough && !passwordsMatch}
+              className={withInvalid(passwordInputClass, triedCreate && longEnough && !passwordsMatch)}
             />
+            <ul className="flex list-none flex-wrap gap-x-4 gap-y-1.5 pl-0">
+              <Rule ok={longEnough} strict={triedCreate}>At least 8 characters</Rule>
+              <Rule ok={passwordsMatch} strict={triedCreate}>Both passwords match</Rule>
+            </ul>
+            {(createError || capsLock) && (
+              <div aria-live="polite">
+                {createError ? <FieldHint tone="error">{createError}</FieldHint> : <FieldHint tone="warn">Caps Lock is on</FieldHint>}
+              </div>
+            )}
             <button
               onClick={createNew}
               disabled={busy}
@@ -554,8 +752,9 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
             <div className="flex gap-2 pt-1">
               {rows.length > 0 && (
                 <button
-                  onClick={() => { setCreating(false); setNewName(""); setNewPassword(""); setNewConfirmPassword(""); setError(null); }}
-                  className="flex-1 h-9 rounded-lg bg-white/[0.02] border border-white/5 hover:bg-white/5 hover:border-white/10 text-zinc-400 hover:text-zinc-100 text-[12px] font-medium transition-colors flex items-center justify-center gap-1.5"
+                  onClick={closeCreate}
+                  disabled={busy}
+                  className="flex-1 h-9 rounded-lg bg-white/[0.02] border border-white/5 hover:bg-white/5 hover:border-white/10 text-zinc-400 hover:text-zinc-100 text-[12px] font-medium transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
                 >
                   <X size={12} /> Cancel
                 </button>
@@ -613,17 +812,30 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
                         {row.local ? (
                           <>
                             <div className="flex gap-2">
-                              <input
+                              {/* min-w-0: an input won't shrink below its intrinsic
+                                  width, which pushed the Open button out of the card on phones. */}
+                              <SecretInput
                                 ref={passwordInputRef}
-                                type="password"
-                                placeholder="Password"
                                 value={password}
-                                onChange={(e) => setPassword(e.target.value)}
-                                onKeyDown={(e) => e.key === "Enter" && unlockSelected()}
-                                // min-w-0: an <input> won't shrink below its
-                                // intrinsic ~20ch width by default, which pushed
-                                // the Open button out of the card on phones.
-                                className="flex-1 min-w-0 w-full h-10 px-3.5 bg-zinc-900/50 border border-white/5 rounded-lg text-[13.5px] text-zinc-50 placeholder:text-zinc-600 outline-none focus:border-primary/50 transition-colors"
+                                onChange={(v) => { setPassword(v); setUnlockError(null); }}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") unlockSelected();
+                                  // Escape clears a typed password and its error.
+                                  if (e.key === "Escape" && (password || unlockError)) {
+                                    e.preventDefault();
+                                    setPassword("");
+                                    setUnlockError(null);
+                                  }
+                                }}
+                                placeholder="Password"
+                                autoComplete="current-password"
+                                invalid={!!unlockError}
+                                describedBy={unlockError || capsLock ? "unlock-hint" : undefined}
+                                wrapperClassName="relative min-w-0 flex-1"
+                                className={withInvalid(
+                                  "w-full h-10 pl-3.5 bg-zinc-900/50 border border-white/5 rounded-lg text-[13.5px] text-zinc-50 placeholder:text-zinc-600 outline-none focus:border-primary/50 transition-colors",
+                                  !!unlockError,
+                                )}
                               />
                               <button
                                 onClick={unlockSelected}
@@ -634,6 +846,13 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
                                 {busy ? <RefreshCw size={14} className="animate-spin" /> : <>Open <ArrowRight size={14} /></>}
                               </button>
                             </div>
+                            {(unlockError || capsLock) && (
+                              <div id="unlock-hint" aria-live="polite">
+                                {unlockError
+                                  ? <FieldHint tone="error">{unlockError}</FieldHint>
+                                  : <FieldHint tone="warn">Caps Lock is on</FieldHint>}
+                              </div>
+                            )}
                             <div className="flex flex-wrap items-center gap-1.5">
                               <RowAction onClick={() => exportProfile(row.name)} disabled={busy} icon={<Download size={12} />} label="Export" />
                               <RowAction onClick={() => removeLocal(row.name)} disabled={busy} icon={<Trash2 size={12} />} label="Remove local" danger />
@@ -669,7 +888,7 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
 
             <div className="flex gap-2 pt-0.5">
               <button
-                onClick={() => setCreating(true)}
+                onClick={openCreate}
                 className="flex-1 h-9 rounded-lg bg-white/[0.02] border border-white/5 hover:bg-white/5 hover:border-white/10 text-zinc-400 hover:text-zinc-100 text-[12px] font-medium transition-colors flex items-center justify-center gap-1.5"
               >
                 <Plus size={12} /> New profile
@@ -865,5 +1084,89 @@ const CloudBar = ({
     </div>
   );
 };
+
+interface SecretInputProps {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  autoComplete: "current-password" | "new-password";
+  className: string;
+  wrapperClassName?: string;
+  invalid?: boolean;
+  describedBy?: string;
+  onKeyDown?: (e: React.KeyboardEvent<HTMLInputElement>) => void;
+}
+
+// A password box with a show / hide toggle, hidden at first. Shown or not, it
+// stays out of spell check and autocorrect, so a visible password isn't kept
+// as a word. The ref is the input, so a wrong password can be selected.
+const SecretInput = forwardRef<HTMLInputElement, SecretInputProps>(
+  ({ value, onChange, placeholder, autoComplete, className, wrapperClassName, invalid = false, describedBy, onKeyDown }, ref) => {
+    const [shown, setShown] = useState(false);
+    return (
+      <div className={wrapperClassName ?? "relative w-full"}>
+        <input
+          ref={ref}
+          type={shown ? "text" : "password"}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder={placeholder}
+          aria-label={placeholder}
+          aria-invalid={invalid || undefined}
+          aria-describedby={describedBy}
+          autoComplete={autoComplete}
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          className={`pr-10 ${className}`}
+        />
+        <button
+          type="button"
+          onClick={() => setShown((s) => !s)}
+          // Keeps the focus, and the caret, in the box.
+          onMouseDown={(e) => e.preventDefault()}
+          aria-label="Show password"
+          aria-pressed={shown}
+          title={shown ? "Hide password" : "Show password"}
+          className="absolute right-1.5 top-1/2 -translate-y-1/2 w-7 h-7 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-white/5 flex items-center justify-center"
+        >
+          {shown ? <EyeOff size={14} /> : <Eye size={14} />}
+        </button>
+      </div>
+    );
+  },
+);
+SecretInput.displayName = "SecretInput";
+
+// A line under a box: a problem, or a warning such as Caps Lock.
+const FieldHint = ({ id, tone, children }: { id?: string; tone: "error" | "warn"; children: React.ReactNode }) => (
+  <p
+    id={id}
+    className={`mt-1.5 flex items-start gap-1.5 text-[12px] leading-snug ${tone === "error" ? "text-rose-300" : "text-amber-300/90"}`}
+  >
+    {tone === "error"
+      ? <AlertTriangle size={13} className="mt-px shrink-0" />
+      : <ArrowBigUp size={13} className="mt-px shrink-0" />}
+    <span className="min-w-0 break-words">{children}</span>
+  </p>
+);
+
+// A password rule, ticked once it's met. Grey until a Create click, then red
+// if still missing.
+const Rule = ({ ok, strict, children }: { ok: boolean; strict: boolean; children: React.ReactNode }) => (
+  <li className={`flex items-center gap-1.5 text-[12px] transition-colors ${ok ? "text-emerald-400" : strict ? "text-rose-300" : "text-zinc-500"}`}>
+    <span
+      aria-hidden
+      className={`grid h-3.5 w-3.5 shrink-0 place-items-center rounded-full border ${
+        ok ? "border-emerald-400/60 bg-emerald-400/15" : strict ? "border-rose-400/50" : "border-zinc-600"
+      }`}
+    >
+      {ok && <Check size={9} strokeWidth={3} />}
+    </span>
+    <span className="sr-only">{ok ? "Done: " : "Needed: "}</span>
+    {children}
+  </li>
+);
 
 export default ProfileSelectPage;
