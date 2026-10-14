@@ -901,34 +901,61 @@ impl client::Handler for ClientHandler {
         let entry = self.forwarded_targets.lock().await.get(&connected_port).cloned();
         match entry {
             Some(entry) => {
-                tokio::spawn(async move {
-                    let target = entry.target.clone();
-                    let dial = tokio::time::timeout(
-                        crate::tunnel::FORWARDED_CONNECT_TIMEOUT,
-                        tokio::net::TcpStream::connect(&target),
-                    )
-                    .await;
-                    match dial {
-                        Ok(Ok(local)) => {
-                            reply.accept().await;
-                            crate::tunnel::bridge_forwarded_channel(entry, local, channel).await;
-                        }
-                        Ok(Err(e)) => {
-                            eprintln!("[remote-forward] connect to {} failed: {}", target, e);
-                            drop(channel);
-                            reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
-                        }
-                        Err(_) => {
-                            eprintln!(
-                                "[remote-forward] connect to {} timed out after {:?}",
-                                target,
-                                crate::tunnel::FORWARDED_CONNECT_TIMEOUT
-                            );
-                            drop(channel);
-                            reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
-                        }
+                // Cap concurrent inbound bridges per R tunnel so a hostile or
+                // runaway server can't exhaust us (tasks, sockets, memory) by
+                // spamming forwarded-tcpip opens. try_acquire_owned is
+                // non-blocking: at the cap we refuse the open rather than
+                // queue it (an unbounded queue is the same resource-exhaustion
+                // problem). The spawned task owns the permit for the dial and
+                // the bridge; it frees when that task ends.
+                match Arc::clone(&entry.conn_limiter).try_acquire_owned() {
+                    Ok(permit) => {
+                        tokio::spawn(async move {
+                            let target = entry.target.clone();
+                            let dial = tokio::time::timeout(
+                                crate::tunnel::FORWARDED_CONNECT_TIMEOUT,
+                                tokio::net::TcpStream::connect(&target),
+                            )
+                            .await;
+                            match dial {
+                                Ok(Ok(local)) => {
+                                    reply.accept().await;
+                                    crate::tunnel::bridge_forwarded_channel(
+                                        entry, local, channel, permit,
+                                    )
+                                    .await;
+                                }
+                                Ok(Err(e)) => {
+                                    eprintln!(
+                                        "[remote-forward] connect to {} failed: {}",
+                                        target, e
+                                    );
+                                    drop(channel);
+                                    reply
+                                        .reject(russh::ChannelOpenFailure::ConnectFailed)
+                                        .await;
+                                }
+                                Err(_) => {
+                                    eprintln!(
+                                        "[remote-forward] connect to {} timed out after {:?}",
+                                        target,
+                                        crate::tunnel::FORWARDED_CONNECT_TIMEOUT
+                                    );
+                                    drop(channel);
+                                    reply
+                                        .reject(russh::ChannelOpenFailure::ConnectFailed)
+                                        .await;
+                                }
+                            }
+                        });
                     }
-                });
+                    Err(_) => {
+                        drop(channel);
+                        reply
+                            .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                            .await;
+                    }
+                }
             }
             None => {
                 // No tunnel registered for this port. The never-accepted
