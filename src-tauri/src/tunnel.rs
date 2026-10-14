@@ -179,6 +179,13 @@ pub struct ForwardEntry {
     pub status: Arc<Mutex<TunnelStatus>>,
     /// AppHandle for emitting status updates from inside the handler.
     pub app: tauri::AppHandle,
+    /// Caps how many inbound forwarded-tcpip connections can be bridged at once
+    /// for this R tunnel. The server drives these opens, so without a cap a
+    /// hostile or runaway peer could spam them and exhaust the client (tasks,
+    /// sockets, memory). This is the inbound mirror of the local and dynamic
+    /// forwards' `conn_limiter`. Shared (Arc) across every inbound connection
+    /// on the port.
+    pub conn_limiter: Arc<Semaphore>,
 }
 
 /// Per-session map of `server_port → ForwardEntry`. Created once per SSH
@@ -1163,6 +1170,7 @@ async fn run_remote_forward(
         // AppHandle clone per entry rather than threading it through every
         // callback path.
         app: app.clone(),
+        conn_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNS)),
     };
     forwarded_targets.lock().await.insert(server_port, entry);
 
@@ -1231,10 +1239,15 @@ pub(crate) const FORWARDED_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// The handler dials `local` (bounded by `FORWARDED_CONNECT_TIMEOUT`) and
 /// accepts the channel before calling this. The connection counter stays here.
+/// `permit` is held until this function returns.
 pub async fn bridge_forwarded_channel(
     entry: ForwardEntry,
     mut local: tokio::net::TcpStream,
     channel: russh::Channel<russh::client::Msg>,
+    // Acquired by the caller before the bridge task was spawned, and held by
+    // that task across the local dial. Kept here until the bridge returns so
+    // the cap covers the whole inbound connection.
+    _permit: tokio::sync::OwnedSemaphorePermit,
 ) {
     // Bump conns_total and push an update so the UI reflects the activity.
     {
