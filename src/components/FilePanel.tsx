@@ -85,6 +85,16 @@ const listFailures = (failures: string[]) =>
     ? `${failures.slice(0, 3).join(", ")} +${failures.length - 3} more`
     : failures.join(", ");
 
+// Letters typed within this window form one name prefix.
+const TYPE_AHEAD_MS = 800;
+
+// Ctrl/Cmd shortcut letter. On a layout without Latin letters, `key` is
+// the local character and `code` is still KeyA..KeyZ.
+const shortcutLetter = (e: { key: string; code: string }) =>
+  /^[a-z]$/i.test(e.key) ? e.key.toLowerCase()
+  : /^Key[A-Z]$/.test(e.code) ? e.code.slice(3).toLowerCase()
+  : "";
+
 type SortColumn = "name" | "size" | "modified" | "owner" | "permissions";
 interface SortState { column: SortColumn; asc: boolean; }
 interface SftpOwner { uid: number; name: string; }
@@ -188,7 +198,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   const waitersRef = useRef<Array<() => void>>([]);
   const lastOkRef = useRef(false);
   // Row to select when a listing of exactly `dir` lands. Set by "Go to
-  // target" on a file symlink; any other listing drops it unused.
+  // target", going up (the folder just left), a rename, and a new folder.
+  // Any other listing drops it unused.
   const selectAfterListRef = useRef<{ dir: string; name: string } | null>(null);
   const scrollToPathRef = useRef<string | null>(null);
   // Bumped on every listing. Background link resolution captures it and
@@ -199,13 +210,25 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   const linkEntryRef = useRef<{ linkPath: string; from: string } | null>(null);
   // The listing canonicalizes a link path to its real directory, whose
   // parent is not where the user came from. While the pane sits in `dir`,
-  // ".." returns to `back` instead.
-  const [linkBack, setLinkBack] = useState<{ dir: string; back: string } | null>(null);
+  // ".." returns to `back` instead. `name` is the link row to select there.
+  const [linkBack, setLinkBack] = useState<{ dir: string; back: string; name: string } | null>(null);
   // Multi-selection lives as a Set of paths. Single-click replaces, Ctrl/⌘-
   // click toggles a row in/out, Shift-click extends from the last-clicked
   // anchor. lastSelectedPathRef remembers that anchor across renders.
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const lastSelectedPathRef = useRef<string | null>(null);
+  // What was selected before the current run of Shift+arrows. Cleared when
+  // the anchor moves, so the range grows and shrinks from that anchor.
+  const rangeBaseRef = useRef<Set<string> | null>(null);
+  // The row the keyboard is on. The outline shows only after a key.
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [keyNav, setKeyNav] = useState(false);
+  const filterInputRef = useRef<HTMLInputElement | null>(null);
+  const typeAheadRef = useRef({ text: "", at: 0 });
+  const setAnchor = (path: string | null) => {
+    lastSelectedPathRef.current = path;
+    rangeBaseRef.current = null;
+  };
   // The selection as of the latest render, for async work that outlives the
   // render it started in.
   const selectedRef = useRef(selected);
@@ -494,7 +517,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           const via = linkEntryRef.current;
           linkEntryRef.current = null;
           if (via && via.linkPath === requested && via.from !== result.currentPath) {
-            setLinkBack({ dir: result.currentPath, back: via.from });
+            const name = stripTrailingSep(via.linkPath).split(provider.pathSep).pop() ?? "";
+            setLinkBack({ dir: result.currentPath, back: via.from, name });
           } else {
             setLinkBack((prev) => (prev && prev.dir === result.currentPath ? prev : null));
           }
@@ -503,9 +527,32 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           const focus = sel && stripTrailingSep(sel.dir) === stripTrailingSep(result.currentPath)
             ? listed.find((e) => e.name === sel.name)
             : undefined;
+          const sameDir = stripTrailingSep(result.currentPath) === stripTrailingSep(currentPathRef.current);
+          const present = new Set(listed.map((e) => e.path));
           scrollToPathRef.current = focus ? focus.path : null;
-          setSelected(new Set(focus ? [focus.path] : []));
-          lastSelectedPathRef.current = focus ? focus.path : null;
+          // A Shift range ends here: its base may name rows this listing dropped.
+          rangeBaseRef.current = null;
+          if (focus) {
+            setSelected(new Set([focus.path]));
+            lastSelectedPathRef.current = focus.path;
+            setCursor(focus.path);
+          } else if (sameDir) {
+            // A refresh keeps selected paths that are still listed, including
+            // rows the name filter hides. A path that left the directory goes.
+            setSelected((prev) => {
+              const kept = [...prev].filter((p) => present.has(p));
+              return kept.length === prev.size ? prev : new Set(kept);
+            });
+            if (lastSelectedPathRef.current && !present.has(lastSelectedPathRef.current)) {
+              lastSelectedPathRef.current = null;
+            }
+            setCursor((c) => (c && present.has(c) ? c : null));
+          } else {
+            setSelected(new Set());
+            lastSelectedPathRef.current = null;
+            setCursor(null);
+            setKeyNav(false);
+          }
           void resolveListedLinks(gen, listed);
           onPathChange?.(result.currentPath);
           pushRecent(result.currentPath);
@@ -564,7 +611,16 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   }), []);
 
   const cameViaLink = linkBack !== null && linkBack.dir === currentPath;
-  const goUp = () => fetch(cameViaLink ? linkBack!.back : provider.parentPath(currentPath));
+  const goUp = () => {
+    const parent = cameViaLink ? linkBack!.back : provider.parentPath(currentPath);
+    const name = cameViaLink
+      ? linkBack!.name
+      : (stripTrailingSep(currentPath).split(provider.pathSep).pop() ?? "");
+    // The folder just left, once the parent listing lands. ".." is not an
+    // entry, so it stays out of the selection.
+    if (name) selectAfterListRef.current = { dir: parent, name };
+    fetch(parent);
+  };
 
   // Latest known state of each entry, following the links the background
   // pass has not reached, failed on, or only carried over from an earlier
@@ -686,8 +742,24 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   //   - Shift+click  → extend the range from the last anchor to this row
   // Shift-extend uses `sortedEntries` (the rendered order), not `entries`,
   // so the visual range matches what the user just dragged across.
+  const selectOnly = (path: string) => {
+    setSelected(new Set([path]));
+    setAnchor(path);
+  };
+  const toggleRow = (path: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+    setAnchor(path);
+  };
   const onRowClick = (e: React.MouseEvent, entry: FileEntry, ordered: FileEntry[]) => {
     if (dragJustEndedRef.current) return;
+    dropTargetRef.current?.focus({ preventScroll: true });
+    setCursor(entry.path);
+    setKeyNav(false);
     if (e.shiftKey && lastSelectedPathRef.current) {
       const a = ordered.findIndex(x => x.path === lastSelectedPathRef.current);
       const b = ordered.findIndex(x => x.path === entry.path);
@@ -695,19 +767,15 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         const [lo, hi] = a <= b ? [a, b] : [b, a];
         const range = ordered.slice(lo, hi + 1).map(x => x.path);
         setSelected(new Set([...selected, ...range]));
+        rangeBaseRef.current = null;
         return;
       }
     }
     if (e.ctrlKey || e.metaKey) {
-      const next = new Set(selected);
-      if (next.has(entry.path)) next.delete(entry.path);
-      else next.add(entry.path);
-      setSelected(next);
-      lastSelectedPathRef.current = entry.path;
+      toggleRow(entry.path);
       return;
     }
-    setSelected(new Set([entry.path]));
-    lastSelectedPathRef.current = entry.path;
+    selectOnly(entry.path);
   };
 
   // Forward-walking autocomplete. As the user types a path, look at the
@@ -835,10 +903,9 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     // Right-click on a row that isn't already part of the selection should
     // switch focus to it (Explorer/Finder behaviour). Right-click on a row
     // that IS selected keeps the multi-selection so bulk actions apply.
-    if (!selected.has(entry.path)) {
-      setSelected(new Set([entry.path]));
-      lastSelectedPathRef.current = entry.path;
-    }
+    if (!selected.has(entry.path)) selectOnly(entry.path);
+    setCursor(entry.path);
+    setKeyNav(false);
     setDirMenu(null);
     setContextMenu({ x: Math.max(4, x), y: Math.max(4, y), entry });
   };
@@ -947,7 +1014,6 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       if (moved.length > 0) {
         // Only what actually left: rows that failed, and selected rows the
         // name filter hides (never part of the drag), stay selected.
-        // The refresh itself clears the selection, so put the rest back.
         const gone = new Set(moved);
         // Taken from the selection as it is NOW: rows clicked while the
         // move ran must not be rolled back to the drag-start snapshot.
@@ -1125,7 +1191,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // ---- OS-level drag-drop into this pane --------------------------------------
   // Tauri 2 routes OS file drops through `tauri://drag-drop`; HTML5 drop events
   // fire too but their `File.path` is empty inside Tauri. We listen globally and
-  // dispatch only when the cursor landed inside our root.
+  // dispatch only when the cursor landed inside this pane. The selection bar
+  // sits outside the list scroller, so the hit test is the pane, not that scroller.
 
   useEffect(() => {
     // Only the remote pane accepts OS drops: the local pane has a session
@@ -1137,9 +1204,10 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       "tauri://drag-drop",
       async (event) => {
         const { paths, position } = event.payload || ({} as any);
-        if (!paths?.length || !dropTargetRef.current) return;
+        const pane = dropTargetRef.current?.closest("[data-fs-pane]");
+        if (!paths?.length || !pane) return;
         const hit = document.elementFromPoint(position.x, position.y);
-        if (!hit || !dropTargetRef.current.contains(hit)) return;
+        if (!hit || !pane.contains(hit)) return;
         setDragOver(false);
         const dir = currentPathRef.current;
         const trimmed = dir.replace(/\/+$/, "");
@@ -1221,6 +1289,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         const destDir = provider.parentPath(entry.path);
         const dest = provider.joinPath(destDir, v1);
         await provider.rename(entry.path, dest);
+        selectAfterListRef.current = { dir: destDir, name: v1 };
         notify(`Renamed to ${v1}`, "success");
       } else if (type === "move" && entry && v1) {
         // v1 is the destination *directory* the user typed (matches the
@@ -1248,12 +1317,13 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         }
         if (count > 0) {
           setSelected(new Set());
-          lastSelectedPathRef.current = null;
+          setAnchor(null);
           notify(items.length === 1 ? `Moved ${items[0].name} → ${dest}` : `Moved ${count} of ${items.length} items → ${dest}`, "success");
         }
       } else if (type === "mkdir" && v1) {
         const name = safeLeafName(v1)!;
         await provider.mkdir(provider.joinPath(currentPath, name));
+        selectAfterListRef.current = { dir: currentPath, name };
         notify(`Created ${name}`, "success");
       } else if (type === "newfile" && v1 && sessionId) {
         const name = safeLeafName(v1)!;
@@ -1332,7 +1402,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     });
     if (count > 0) {
       setSelected(new Set());
-      lastSelectedPathRef.current = null;
+      setAnchor(null);
       notify(items.length === 1 ? `Deleted ${items[0].name}` : `Deleted ${count} of ${items.length} items`, "success");
       await fetch(currentPath);
     }
@@ -1351,14 +1421,10 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   };
 
   // Shows what a finished job produced, unless the user has moved on to
-  // another folder. The refresh clears the selection, so it is put back.
+  // another folder. A same-directory refresh keeps paths still listed.
   const refreshAfterJob = async (dir: string) => {
     if (currentPathRef.current !== dir) return;
-    const keep = new Set(selectedRef.current);
-    const anchor = lastSelectedPathRef.current;
     await fetch(dir);
-    setSelected(keep);
-    lastSelectedPathRef.current = anchor;
   };
 
   const openArchiveDialog = (items: FileEntry[]) => {
@@ -1655,8 +1721,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     const transferId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const gen = ++openGenRef.current;
     openGenByPathRef.current.set(entry.path, gen);
-    setSelected(new Set([entry.path]));
-    lastSelectedPathRef.current = entry.path;
+    selectOnly(entry.path);
+    setCursor(entry.path);
     setOpenProgress((prev) => ({
       ...prev,
       [entry.path]: { bytes: 0, total: entry.size || 0 },
@@ -1770,23 +1836,23 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // ---- select-all -------------------------------------------------------------
   // Toggles the entire visible (sorted) list. Computed AFTER `sortedEntries`
   // so the const TDZ doesn't fire on first render. Cmd/Ctrl+A is the keyboard
-  // counterpart; we let the browser handle Ctrl+A in text inputs by bailing
-  // out when the focused element is editable.
+  // counterpart; text fields keep the browser's select-all. `code` covers
+  // layouts that do not put a Latin letter on the key.
   const selectAllVisible = () => {
     if (sortedEntries.length === 0) return;
     setSelected(new Set(sortedEntries.map(e => e.path)));
-    lastSelectedPathRef.current = sortedEntries[sortedEntries.length - 1].path;
+    setAnchor(sortedEntries[sortedEntries.length - 1].path);
   };
   const clearSelection = () => {
     setSelected(new Set());
-    lastSelectedPathRef.current = null;
+    setAnchor(null);
   };
   const allSelected = sortedEntries.length > 0 && selected.size === sortedEntries.length;
   const toggleSelectAll = () => { allSelected ? clearSelection() : selectAllVisible(); };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== "a") return;
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || shortcutLetter(e) !== "a") return;
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
       // Only fire when this panel owns the focus, so two side-by-side
@@ -1800,6 +1866,136 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sortedEntries.length, allSelected]);
+
+  // ---- keyboard ---------------------------------------------------------------
+  // The list takes the focus when it is clicked or tabbed to. Then:
+  //   arrows, Home, End, PageUp, PageDown move the row. Shift extends the
+  //   range from the anchor (it grows and shrinks). Ctrl/Cmd moves the
+  //   cursor alone. Space toggles the cursor row. Enter opens it.
+  //   Backspace and Alt+Up go up. Delete deletes the selection. F2 renames.
+  //   Esc clears. Ctrl/Cmd+F focuses the name filter. Typed letters jump
+  //   to the next name with that prefix. Ctrl/Cmd+A stays on the window
+  //   listener above so a non-Latin layout still selects this pane only.
+  const scrollToPath = (path: string) => {
+    dropTargetRef.current?.querySelectorAll<HTMLElement>("[data-fs-row-path]").forEach((row) => {
+      if (row.getAttribute("data-fs-row-path") === path) row.scrollIntoView({ block: "nearest" });
+    });
+  };
+  // The rows from the anchor to `to`, replacing the previous range. False
+  // when the anchor is not on screen. ".." is not in `ordered`.
+  const selectRange = (to: string, ordered: FileEntry[]) => {
+    const a = ordered.findIndex((x) => x.path === lastSelectedPathRef.current);
+    const b = ordered.findIndex((x) => x.path === to);
+    if (a < 0 || b < 0) return false;
+    const [lo, hi] = a <= b ? [a, b] : [b, a];
+    // Rows the name filter hides are not in this range, and they stay selected.
+    if (!rangeBaseRef.current) {
+      const shown = new Set(ordered.map((row) => row.path));
+      rangeBaseRef.current = new Set([...selected].filter((path) => !shown.has(path)));
+    }
+    const next = new Set(rangeBaseRef.current);
+    for (const row of ordered.slice(lo, hi + 1)) next.add(row.path);
+    setSelected(next);
+    return true;
+  };
+  const moveCursor = (index: number, mods: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }) => {
+    if (sortedEntries.length === 0) return;
+    const at = Math.max(0, Math.min(sortedEntries.length - 1, index));
+    const to = sortedEntries[at].path;
+    setCursor(to);
+    setKeyNav(true);
+    if (mods.shiftKey) {
+      if (!lastSelectedPathRef.current) setAnchor(cursor ?? to);
+      if (!selectRange(to, sortedEntries)) selectOnly(to);
+    } else if (!(mods.ctrlKey || mods.metaKey)) {
+      selectOnly(to);
+    }
+    scrollToPath(to);
+  };
+  // The same letter again goes on to the next name that starts with it.
+  const typeAhead = (key: string, from: number) => {
+    const typed = typeAheadRef.current;
+    const now = Date.now();
+    typed.text = now - typed.at > TYPE_AHEAD_MS ? key : typed.text + key;
+    typed.at = now;
+    const text = typed.text.toLowerCase();
+    const repeat = [...text].every((c) => c === text[0]);
+    const prefix = repeat ? text[0] : text;
+    const start = repeat ? from + 1 : Math.max(from, 0);
+    for (let i = 0; i < sortedEntries.length; i++) {
+      const at = (start + i) % sortedEntries.length;
+      if (sortedEntries[at].name.toLowerCase().startsWith(prefix)) {
+        moveCursor(at, { shiftKey: false, ctrlKey: false, metaKey: false });
+        return;
+      }
+    }
+  };
+  const onListKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (disabled || modal) return;
+    const target = e.target as HTMLElement;
+    if (target !== e.currentTarget) {
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) return;
+      if ((e.key === "Enter" || e.key === " ") && target.tagName === "BUTTON") return;
+    }
+    if (contextMenu || dirMenu) {
+      setContextMenu(null);
+      setDirMenu(null);
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+    }
+    const at = sortedEntries.findIndex((x) => x.path === (cursor ?? lastSelectedPathRef.current));
+    const current = at >= 0 ? sortedEntries[at] : undefined;
+    const ctrl = e.ctrlKey || e.metaKey;
+    const page = () => {
+      const row = dropTargetRef.current?.querySelector<HTMLElement>("[data-fs-row-path]");
+      return Math.max(1, Math.floor((dropTargetRef.current?.clientHeight ?? 0) / (row?.offsetHeight || 24)) - 2);
+    };
+    const visibleSelected = () => sortedEntries.filter((row) => selected.has(row.path));
+    const typing = Date.now() - typeAheadRef.current.at <= TYPE_AHEAD_MS;
+    switch (e.key) {
+      case "ArrowDown": moveCursor(at < 0 ? 0 : at + 1, e); break;
+      case "ArrowUp":
+        if (e.altKey) { setKeyNav(true); goUp(); }
+        else moveCursor(at < 0 ? 0 : at - 1, e);
+        break;
+      case "Home": moveCursor(0, e); break;
+      case "End": moveCursor(sortedEntries.length - 1, e); break;
+      case "PageDown": moveCursor(at < 0 ? 0 : at + page(), e); break;
+      case "PageUp": moveCursor(at < 0 ? 0 : at - page(), e); break;
+      case "Enter": if (current) void openEntry(current); break;
+      case "Backspace":
+        if (e.metaKey) removeItems(visibleSelected());
+        else { setKeyNav(true); goUp(); }
+        break;
+      case "Delete": removeItems(visibleSelected()); break;
+      case "F2":
+        if (current) setModal({ type: "rename", entry: current, v1: current.name });
+        break;
+      case "Escape":
+        if (selected.size === 0) return;
+        clearSelection();
+        break;
+      case " ":
+        if (typing && !ctrl) { typeAhead(" ", at); break; }
+        if (!current) break;
+        setCursor(current.path);
+        setKeyNav(true);
+        toggleRow(current.path);
+        break;
+      default:
+        if (ctrl && !e.altKey && shortcutLetter(e) === "f") {
+          filterInputRef.current?.focus();
+          filterInputRef.current?.select();
+        } else if (e.key.length === 1 && !ctrl && !e.altKey && !e.nativeEvent.isComposing) {
+          typeAhead(e.key, at);
+        } else return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+  };
 
   const toggleSort = (col: SortColumn) =>
     setSort((p) => ({ column: col, asc: p.column === col ? !p.asc : true }));
@@ -2179,6 +2375,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       <div className="shrink-0 flex items-center gap-1 px-2 py-1 bg-[#0e0e10] border border-white/5 rounded text-[10.5px] font-mono">
         <Search size={11} className="text-zinc-500 shrink-0" />
         <input
+          ref={filterInputRef}
           type="text"
           value={nameFilter}
           onChange={(e) => setNameFilter(e.target.value)}
@@ -2212,10 +2409,21 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       {/* List */}
       <div
         ref={dropTargetRef}
+        tabIndex={0}
+        aria-label={`${provider.label} files`}
+        onKeyDown={onListKeyDown}
+        onMouseDown={(e) => {
+          const hit = e.target as HTMLElement;
+          if (hit.closest("button, input, textarea, a, select")) return;
+          e.currentTarget.focus({ preventScroll: true });
+        }}
+        onBlur={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setKeyNav(false);
+        }}
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}
         onDrop={onDrop}
-        className={`flex-1 min-h-0 flex flex-col overflow-auto transition-colors duration-200 ${dragOver ? "bg-indigo-950/10" : ""}`}
+        className={`flex-1 min-h-0 flex flex-col overflow-auto transition-colors duration-200 outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-indigo-400/40 ${dragOver ? "bg-indigo-950/10" : ""}`}
       >
         {/* The select column is conditionally injected — only present when
             there's at least one selected row. With nothing selected the row
@@ -2270,7 +2478,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                // escape a multi-selection without a keyboard shortcut.
                if (e.target === e.currentTarget && !dragJustEndedRef.current) {
                  setSelected(new Set());
-                 lastSelectedPathRef.current = null;
+                 setAnchor(null);
+                 setKeyNav(false);
                }
              }}>
           {loading && sortedEntries.length === 0 ? (
@@ -2307,10 +2516,17 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           ) : (
             sortedEntries.map((entry) => {
               const isSel = selected.has(entry.path);
+              const isCursor = keyNav && entry.path === cursor;
               const opening = openProgress[entry.path];
               const openPct = opening && opening.total > 0
                 ? Math.min(100, (opening.bytes / opening.total) * 100)
                 : null;
+              const optionsButton = (
+                <button type="button" tabIndex={-1} onClick={(e) => openMenu(e, entry)} title="Options"
+                  className="opacity-60 hover:opacity-100 p-0.5 rounded hover:bg-white/10 text-zinc-400 hover:text-white shrink-0">
+                  <MoreVertical size={11} />
+                </button>
+              );
               return (
               <div
                 key={entry.path}
@@ -2321,7 +2537,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                 data-fs-row-path={entry.path}
                 data-fs-row-isdir={entry.isDir ? "1" : "0"}
                 data-fs-drop-path={entry.isDir ? entry.path : undefined}
-                className={`group isolate relative overflow-hidden grid ${gridColumns} gap-1.5 px-2.5 py-1 border-l-2 cursor-pointer transition-colors items-center ${
+                className={`group isolate relative overflow-hidden grid ${gridColumns} gap-1.5 px-2.5 py-1 border-l-2 cursor-pointer transition-colors items-center scroll-mt-8 ${
                   dropHover === entry.path
                     ? "bg-indigo-500/20 ring-1 ring-inset ring-indigo-400 border-indigo-400 text-white"
                     : opening
@@ -2329,7 +2545,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                     : isSel
                     ? "bg-indigo-950/40 border-indigo-400 text-indigo-100 font-bold"
                     : "border-transparent text-zinc-200 hover:bg-white/5 hover:text-white"
-                }`}
+                } ${isCursor && dropHover !== entry.path ? "ring-1 ring-inset ring-indigo-400/60" : ""}`}
               >
                 {opening && (
                   <>
@@ -2357,11 +2573,9 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                     // existing selection intact and just flips this entry
                     // in/out.
                     e.stopPropagation();
-                    const next = new Set(selected);
-                    if (next.has(entry.path)) next.delete(entry.path);
-                    else next.add(entry.path);
-                    setSelected(next);
-                    lastSelectedPathRef.current = entry.path;
+                    setCursor(entry.path);
+                    setKeyNav(false);
+                    toggleRow(entry.path);
                   }}
                   title={isSel ? "Deselect" : "Select"}
                 >
@@ -2419,6 +2633,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                       </div>
                     )}
                   </div>
+                  {!showRightsColumn && optionsButton}
                 </div>
                 {showDetails && (
                   <>
@@ -2441,10 +2656,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                 {showRightsColumn && (
                   <div className="flex text-right text-[10.5px] text-zinc-300 font-mono opacity-90 items-center justify-end gap-1">
                     <span className="truncate">{formatRights(entry.isDir, entry.permissions)}</span>
-                    <button onClick={(e) => openMenu(e, entry)} title="Options"
-                      className="opacity-60 hover:opacity-100 p-0.5 rounded hover:bg-white/10 text-zinc-400 hover:text-white shrink-0">
-                      <MoreVertical size={11} />
-                    </button>
+                    {optionsButton}
                   </div>
                 )}
               </div>
@@ -2616,7 +2828,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         const selectedEntries = sortedEntries.filter(e => selected.has(e.path));
         const acting = selectedEntries.length > 0 ? selectedEntries : [contextMenu.entry];
         const multi = acting.length > 1;
-        const selectedFileCount = acting.filter(e => !e.isDir).length;
+        const uploadDir = isRemote ? undefined : getOppositeDir?.();
         // The menu holds the entry as it was when opened; a link may have
         // been resolved since. Every per-item action below uses the live
         // one: the snapshot of a link carries lstat data (mode 777, not a
@@ -2631,9 +2843,9 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           style={{ top: contextMenu.y, left: contextMenu.x }}
           className="fixed z-[9999] min-w-[180px] bg-[#0c0c0e] border border-white/10 rounded-lg shadow-2xl p-1 backdrop-blur-md font-mono text-[11.5px] text-zinc-200">
 
-          {/* Primary action: open folder, or transfer/edit file. The exact
-              set depends on which side this panel is on. */}
-          {(menuEntry.isDir || unresolvedLink) && !multi ? (
+          {/* Primary action: open a folder or a local file, then send the
+              row to the other pane. Remote folders download; local rows upload. */}
+          {(menuEntry.isDir || unresolvedLink) && !multi && (
             <button onClick={() => { setContextMenu(null); openEntry(menuEntry); }}
               className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
               {menuEntry.isDir
@@ -2641,31 +2853,38 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                 : <Link size={11} className="text-cyan-300" />}
               <span>Open</span>
             </button>
-          ) : isRemote ? (
-            <>
-              <button onClick={() => { setContextMenu(null); downloadItems(acting); }}
-                className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
-                <Download size={11} className="text-emerald-400" />
-                <span>Download{multi ? ` (${selectedFileCount})` : "…"}</span>
-              </button>
-              {/* Live-edit needs a local temp file + a native OS editor + a
-                  filesystem watcher. Android has none of those in a form we
-                  can bridge, so the backend command returns an error there
-                  — hide the menu item entirely rather than surface it. */}
-              {!multi && !menuEntry.isDir && !IS_ANDROID && (
-                <button onClick={() => { setContextMenu(null); openEntry(menuEntry); }}
-                  className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
-                  <ExternalLink size={11} className="text-indigo-400" /><span>Edit (auto-upload)</span>
-                </button>
-              )}
-            </>
-          ) : (
-            !multi && !menuEntry.isDir && !IS_ANDROID && (
-              <button onClick={() => { setContextMenu(null); openLocalEntry(menuEntry); }}
-                className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
-                <ExternalLink size={11} className="text-indigo-400" /><span>Open</span>
-              </button>
-            )
+          )}
+          {isRemote && !unresolvedLink && (
+            <button onClick={() => { setContextMenu(null); downloadItems(acting); }}
+              className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
+              <Download size={11} className="text-emerald-400" />
+              <span>Download{multi ? ` (${acting.length})` : "…"}</span>
+            </button>
+          )}
+          {/* Live-edit needs a local temp file + a native OS editor + a
+              filesystem watcher. Android has none of those in a form we
+              can bridge, so the backend command returns an error there.
+              Hide the menu item entirely rather than surface it. */}
+          {isRemote && !multi && !menuEntry.isDir && !unresolvedLink && !IS_ANDROID && (
+            <button onClick={() => { setContextMenu(null); openEntry(menuEntry); }}
+              className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
+              <ExternalLink size={11} className="text-indigo-400" /><span>Edit (auto-upload)</span>
+            </button>
+          )}
+          {!isRemote && !multi && !menuEntry.isDir && !unresolvedLink && !IS_ANDROID && (
+            <button onClick={() => { setContextMenu(null); openLocalEntry(menuEntry); }}
+              className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
+              <ExternalLink size={11} className="text-indigo-400" /><span>Open</span>
+            </button>
+          )}
+          {!isRemote && (
+            <button onClick={() => { setContextMenu(null); uploadItems(acting); }}
+              disabled={!uploadDir}
+              title={uploadDir ? `Upload to ${uploadDir}` : "Open a remote directory first…"}
+              className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed">
+              <Upload size={11} className="text-sky-400" />
+              <span>Upload{multi ? ` (${acting.length})` : ""}</span>
+            </button>
           )}
 
           {!multi && menuEntry.isSymlink && menuEntry.linkState !== "broken" && provider.realPath && (
