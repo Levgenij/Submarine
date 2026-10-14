@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Settings, Palette, RefreshCw, List, Cloud, History, Minus, Plus, ArrowRight, X } from "lucide-react";
+import { Settings, Palette, RefreshCw, List, Cloud, History, Minus, Plus, ArrowRight, X, KeyRound } from "lucide-react";
 import {
   MAX_FONT_SIZE, MIN_FONT_SIZE, clampFontSize, fontFamilyCss,
   isFontAvailable, primaryFontName, sanitizeFontFamily,
@@ -12,6 +12,7 @@ import {
 import FontPicker from "./FontPicker";
 import CopyValue from "./CopyValue";
 import { loadInstalledFonts } from "../util/systemFonts";
+import { IS_ANDROID } from "../util/platform";
 
 // Where this install keeps its data (see src-tauri/src/portable.rs). `portable`
 // means a `submarine-data` folder next to the executable is in use; `warning`
@@ -328,6 +329,32 @@ function DefaultShellSetting({ settings, setSettings }: any) {
   );
 }
 
+// "Use keys from an ssh-agent" (util/sshAgent, src-tauri/src/agent_auth.rs).
+function SshAgentSetting({ settings, setSettings }: any) {
+  const on = settings.useSshAgent !== false;
+  return (
+    <div className="bg-[#121215] border border-white/5 rounded-2xl p-6 shadow-xl">
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-zinc-100">Use keys from an ssh-agent</div>
+          <p className="text-[12px] text-zinc-400 leading-relaxed mt-1">
+            Log in with keys held by an ssh-agent on this computer: Pageant, the Windows OpenSSH
+            agent and agents that use its pipe (such as 1Password), or the agent in SSH_AUTH_SOCK.
+            Smartcards and hardware keys work through it. It's used only when a server has no saved
+            password or key, its key's passphrase isn't saved, or the server turns its key down.
+            Turn off to use only what's saved for each server.
+          </p>
+        </div>
+        <PrefToggle
+          label="Use keys from an ssh-agent"
+          checked={on}
+          onToggle={() => setSettings((s: any) => ({ ...s, useSshAgent: !(s.useSshAgent !== false) }))}
+        />
+      </div>
+    </div>
+  );
+}
+
 const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any) => {
   const accentColors = [
     { name: 'Light Blue', value: '#60a5fa' },
@@ -457,6 +484,17 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any)
         <section className="break-inside-avoid mb-4 sm:mb-8">
           <ShellConfigSyncSettings servers={servers} />
         </section>
+
+        {/* Not on Android, which has no ssh-agent to use. */}
+        {!IS_ANDROID && (
+          <section className="break-inside-avoid space-y-3 mb-4 sm:mb-8">
+            <div className="flex items-center gap-2 text-zinc-400 font-bold uppercase tracking-widest text-xs">
+              <KeyRound size={14} /> Authentication
+            </div>
+
+            <SshAgentSetting settings={settings} setSettings={setSettings} />
+          </section>
+        )}
 
         {/* Activity Section — moved out of the sidebar so the top-level
             navigation stays focused on primary workflows. Logs are diagnostic
