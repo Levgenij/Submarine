@@ -333,7 +333,7 @@ export const ConfirmProvider = ({ children }: { children: React.ReactNode }) => 
                   {owState.opts.direction === "download" ? "Local file exists" : "Remote file exists"}
                 </span>
               </div>
-              <button onClick={() => closeOverwrite("cancel")} className="text-zinc-500 hover:text-white shrink-0">
+              <button aria-label="Close" onClick={() => closeOverwrite("cancel")} className="text-zinc-500 hover:text-white shrink-0">
                 <X size={12} />
               </button>
             </div>
@@ -394,7 +394,7 @@ export const ConfirmProvider = ({ children }: { children: React.ReactNode }) => 
                   {state.opts.title || (state.opts.destructive ? "Confirm action" : "Are you sure?")}
                 </span>
               </div>
-              <button onClick={() => close(false)} className="text-zinc-500 hover:text-white shrink-0">
+              <button aria-label="Close" onClick={() => close(false)} className="text-zinc-500 hover:text-white shrink-0">
                 <X size={12} />
               </button>
             </div>
@@ -433,7 +433,7 @@ export const ConfirmProvider = ({ children }: { children: React.ReactNode }) => 
               <span id="text-prompt-modal-title" className="text-[11px] font-black uppercase tracking-widest text-zinc-200">
                 {tpState.opts.title || "Enter value"}
               </span>
-              <button onClick={() => closeTextPrompt(null)} className="text-zinc-500 hover:text-white shrink-0">
+              <button aria-label="Close" onClick={() => closeTextPrompt(null)} className="text-zinc-500 hover:text-white shrink-0">
                 <X size={12} />
               </button>
             </div>

@@ -562,6 +562,7 @@ const MirrorsPanel = ({ sessionId, serverId = 0, configuredMirrors, disabled = f
                 <ArrowRight size={11} className="text-zinc-500 shrink-0" />
                 <span className="text-zinc-400 truncate flex-1">{live.remote}</span>
                 <button
+                  aria-label="Stop mirror"
                   onClick={() => stopMirror(live.id)}
                   className="p-0.5 rounded hover:bg-white/10 text-zinc-400 hover:text-rose-400 shrink-0"
                 >
