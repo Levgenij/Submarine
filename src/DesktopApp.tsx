@@ -43,7 +43,7 @@ const appWindow = getCurrentWindow();
 // `serverUuid` is the saved server's sync id. It keys this device's Shell
 // button (see util/shellSync.ts). Quick connect leaves it unset.
 type Session = {
-  id: string; serverId: number; serverName: string; serverUuid?: string | null; customName?: string; mirrors?: string; runOnConnect?: string;
+  id: string; serverId: number; serverName: string; serverUuid?: string | null; customName?: string; mirrors?: string; runOnConnect?: string; runOnConnectHeld?: boolean;
   quickAuth?: QuickAuth | null; initialTerminals?: SnapTerm[]; initialActiveIndex?: number;
 };
 const tabLabel = (s: Session) => s.customName || s.serverName;
@@ -372,6 +372,24 @@ function DesktopApp() {
     try { setServers((await invoke("get_servers")) as any[]); }
     catch (e) { addLog(`SYNC_SERVERS: ${e}`, "error"); }
   }, [addLog]);
+  // A session allowed something held for this device's OK (on-connect
+  // commands): the servers' held lists have changed.
+  useEffect(() => {
+    const onHeldChanged = () => { refreshServers(); };
+    window.addEventListener("submarine-held-changed", onHeldChanged);
+    return () => window.removeEventListener("submarine-held-changed", onHeldChanged);
+  }, [refreshServers]);
+  // Allow what this device holds back for a server (see the review dialog in
+  // the server list), then show the list as it now is.
+  const allowHeld = useCallback(async (serverId: number, items: string[]) => {
+    try {
+      await invoke("allow_held", { serverId, items });
+      addLog(items.length ? `Allowed ${items.length} held change${items.length === 1 ? "" : "s"}.` : "Allowed the held changes.", "success");
+    } catch (e) {
+      addLog(`ALLOW_FAILED: ${e}`, "error");
+    }
+    await refreshServers();
+  }, [addLog, refreshServers]);
   const refreshCredentials = useCallback(async () => {
     try { setCredentials((await invoke("get_credentials")) as any[]); }
     catch (e) { addLog(`SYNC_CREDENTIALS: ${e}`, "error"); }
@@ -636,7 +654,14 @@ function DesktopApp() {
         ? parseSnapshot(localStorage.getItem(snapshotKey(name)), (id) => byId.has(id))
         : { sessions: [], activeServerId: null };
       const restoredIds = new Set(snap.sessions.map((r) => r.serverId));
-      const toStart = list.filter((s) => s.autostart && !restoredIds.has(s.id));
+      // Autostart someone else switched on in a shared profile waits for
+      // this device's OK (Servers → Review) instead of connecting by itself.
+      const isHeld = (s: any) => (s.held || []).includes("autostart");
+      const waiting = list.filter((s) => s.autostart && isHeld(s) && !restoredIds.has(s.id));
+      if (waiting.length > 0) {
+        addLog(`Autostart: ${waiting.map((s) => s.name).join(", ")} waiting for your OK (Servers → Review).`, "info");
+      }
+      const toStart = list.filter((s) => s.autostart && !isHeld(s) && !restoredIds.has(s.id));
       const base = (s: any): Session => ({ id: `session-${s.id}`, serverId: s.id, serverName: s.name, serverUuid: s.uuid ?? null, mirrors: s.mirrors });
       const newSessions: Session[] = [
         ...snap.sessions.map((r) => ({
@@ -785,6 +810,9 @@ function DesktopApp() {
         serverUuid: server.uuid ?? null,
         // Commands to auto-run once on the first terminal (see SessionView).
         runOnConnect: server.run_on_connect || "",
+        // Set or changed by someone this profile is shared with, not allowed
+        // here yet: SessionView asks before typing them.
+        runOnConnectHeld: (server.held || []).includes("run_on_connect"),
       }]);
     }
 
@@ -1686,6 +1714,7 @@ function DesktopApp() {
                 }}
                 keyChange={shareKeyChange}
                 onAcceptKey={acceptShareKey}
+                onAllowHeld={allowHeld}
                 isMobile={isMobile}
               />
             )}
