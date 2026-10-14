@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { Cpu, X, Link2, ArrowLeftRight, Shield, Key, User, FolderPlus, Download, CheckSquare, Square, History, Plus, Copy, Play } from "lucide-react";
 import PasswordField from "./PasswordField";
-import { useTextPrompt } from "../ui/confirm";
+import { useConfirm, useTextPrompt } from "../ui/confirm";
 import { useSlideOverFocus } from "../ui/slideOverFocus";
 
 // Compact "2h ago" style relative time for the attribution line.
@@ -58,6 +58,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
   const [publicKeyCopied, setPublicKeyCopied] = useState(false);
   const [generatingKey, setGeneratingKey] = useState(false);
   const textPrompt = useTextPrompt();
+  const confirm = useConfirm();
   const panelRef = useSlideOverFocus(isOpen);
 
   // The panel stays mounted and slides off-screen rather than unmounting, so
@@ -205,10 +206,33 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
     const keysByPath = new Map<string, ImportedSshKey | null>();
     let keysAttached = 0;
     let keysNeedingPassphrase = 0;
+    // Key files from this computer, going into a shared profile, would sync
+    // to everyone it's shared with: ask first. The safe answer (Escape, or
+    // the focused button) imports the hosts without them.
+    const keyFiles = [
+      ...new Set(importHosts.filter((h) => importSelected.has(h.host_alias) && h.identity_file).map((h) => h.identity_file as string)),
+    ];
+    let withKeys = true;
+    if (keyFiles.length > 0) {
+      const shared = await invoke<{ share_id: string | null }>("profile_share_status")
+        .then((s) => typeof s.share_id === "string" && s.share_id.length > 0)
+        .catch(() => false);
+      if (shared) {
+        withKeys = await confirm({
+          title: "Add your key files to a shared profile?",
+          message:
+            `This profile is shared. ${keyFiles.length === 1 ? "This private key" : "These private keys"} from this computer would go to everyone you share it with: ` +
+            `${keyFiles.join(", ")}. Import the hosts with ${keyFiles.length === 1 ? "it" : "them"}, or without (you can pick keys for them later)?`,
+          okLabel: "Import with keys",
+          cancelLabel: "Without keys",
+          safeDefault: true,
+        });
+      }
+    }
     for (const host of importHosts) {
       if (!importSelected.has(host.host_alias)) continue;
       let key: ImportedSshKey | null = null;
-      if (host.identity_file) {
+      if (host.identity_file && withKeys) {
         if (keysByPath.has(host.identity_file)) {
           key = keysByPath.get(host.identity_file) ?? null;
         } else {
