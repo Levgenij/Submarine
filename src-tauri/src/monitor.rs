@@ -625,24 +625,42 @@ impl client::Handler for MonitorHandler {
             );
             return Ok(false);
         };
-        // Must be byte-identical to what the interactive path stored in
-        // known_hosts - this handler only trusts fingerprints already on file.
+        // Same verdict as a session: trusted only when this fingerprint is
+        // already on file. Another kind is not trusted. A failed read refuses
+        // the connection instead of looking like an unknown host. No prompt.
         let fp = crate::ssh_manager::host_key_fingerprint(server_public_key);
-        let mut ok = false;
-        if let Ok(guard) = self.db.lock() {
-            if let Some(conn) = guard.as_ref() {
-                if let Ok(mut stmt) = conn.prepare(
-                    "SELECT 1 FROM known_hosts WHERE host=?1 AND port=?2 AND fingerprint=?3",
-                ) {
-                    if let Ok(mut rows) = stmt.query(rusqlite::params![self.host, self.port, fp]) {
-                        if let Ok(Some(_)) = rows.next() {
-                            ok = true;
-                        }
-                    }
+        let verdict = match self.db.lock() {
+            Ok(guard) => match guard.as_ref() {
+                Some(conn) => {
+                    crate::ssh_manager::judge_host_key(conn, &self.host, self.port, &fp)
                 }
+                None => {
+                    eprintln!(
+                        "[monitor] {}:{} couldn't read the trusted host keys; refusing",
+                        self.host, self.port
+                    );
+                    return Ok(false);
+                }
+            },
+            Err(_) => {
+                eprintln!(
+                    "[monitor] {}:{} couldn't read the trusted host keys; refusing",
+                    self.host, self.port
+                );
+                return Ok(false);
+            }
+        };
+        match verdict {
+            Ok(crate::ssh_manager::HostKeyVerdict::Known) => Ok(true),
+            Ok(_) => Ok(false),
+            Err(e) => {
+                eprintln!(
+                    "[monitor] {}:{} couldn't read the trusted host keys ({e}); refusing",
+                    self.host, self.port
+                );
+                Ok(false)
             }
         }
-        Ok(ok)
     }
 }
 
@@ -799,7 +817,11 @@ async fn connect_for_monitor(
     }
     let (key_pair, password) = classify_auth(auth)?;
 
-    let config = Arc::new(monitor_client_config());
+    // Same preferred-key ordering as a session: kinds already on file for
+    // this host:port first. A failed read refuses before the socket opens.
+    let mut config = monitor_client_config();
+    crate::order_preferred_by_known_host_keys(&mut config.preferred, db, &auth.host, auth.port)?;
+    let config = Arc::new(config);
 
     let handler = MonitorHandler {
         db: Arc::clone(db),
