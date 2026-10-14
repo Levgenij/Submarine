@@ -2181,53 +2181,57 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         </div>
       )}
 
-      {/* Header */}
-      <div className={`w-full flex items-center justify-between gap-1.5 p-1.5 border rounded-lg shrink-0 shadow-lg ${
+      {/* Header. The crumb path stays one scrolling row. Button clusters
+          around it wrap onto the next line at the 240px pane floor so the
+          trailing actions are not clipped. */}
+      <div className={`relative w-full flex flex-wrap items-center gap-x-1.5 gap-y-1 p-1.5 border rounded-lg shrink-0 shadow-lg ${
         rootMode ? "bg-rose-950/30 border-rose-500/40" : "bg-[#121214] border-white/5"
       }`}>
         <span className="text-[10px] font-black uppercase tracking-widest text-zinc-300 px-1.5 shrink-0">
           {provider.label}
         </span>
         {headerExtra}
-        <div className="h-5 w-px bg-white/10 shrink-0" />
-        <div className="flex-1 flex items-center gap-1.5 min-w-0 relative">
-          <button onClick={goUp} title="Up" className="p-1 rounded bg-white/[0.04] border border-white/10 text-zinc-200 hover:bg-white/10 shrink-0">
-            <ArrowUp size={11} />
-          </button>
-          <div className="relative shrink-0">
-            <button
-              onClick={() => setRecentOpen((p) => !p)}
-              onBlur={() => setTimeout(() => setRecentOpen(false), 200)}
-              disabled={!hasDirMenu}
-              title="Recent and bookmarked directories"
-              className="p-1 rounded bg-white/[0.04] border border-white/10 text-zinc-200 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed flex items-center"
-            >
-              <ChevronDown size={11} />
+        <div className="relative flex flex-1 flex-wrap items-center gap-1.5 min-w-[min(100%,9rem)] max-w-full">
+          <div className="h-5 w-px bg-white/10 shrink-0" />
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button onClick={goUp} title="Up" className="p-1 rounded bg-white/[0.04] border border-white/10 text-zinc-200 hover:bg-white/10 shrink-0">
+              <ArrowUp size={11} />
             </button>
-            {recentOpen && hasDirMenu && (
-              <div className="absolute top-[28px] left-0 z-50 min-w-[260px] max-h-[320px] overflow-y-auto bg-[#0c0c0e]/95 border border-white/10 rounded-lg shadow-2xl p-1 backdrop-blur-md font-mono text-[11px] text-zinc-200 no-scrollbar">
-                {recentShown.length > 0 && (
-                  <>
-                    <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-zinc-500 font-bold">Recent</div>
-                    {recentShown.map(dirRow)}
-                  </>
-                )}
-                {recentShown.length > 0 && bookmarks.length > 0 && <div className="my-1 h-px bg-white/10" />}
-                {bookmarks.length > 0 && (
-                  <>
-                    <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-zinc-500 font-bold">Bookmarks</div>
-                    {bookmarks.map(dirRow)}
-                  </>
-                )}
-              </div>
-            )}
+            <div className="shrink-0">
+              <button
+                onClick={() => setRecentOpen((p) => !p)}
+                onBlur={() => setTimeout(() => setRecentOpen(false), 200)}
+                disabled={!hasDirMenu}
+                title="Recent and bookmarked directories"
+                className="p-1 rounded bg-white/[0.04] border border-white/10 text-zinc-200 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed flex items-center"
+              >
+                <ChevronDown size={11} />
+              </button>
+              {recentOpen && hasDirMenu && (
+                <div className="absolute top-full left-0 z-50 mt-1 w-[min(260px,100%)] max-h-[320px] overflow-y-auto bg-[#0c0c0e]/95 border border-white/10 rounded-lg shadow-2xl p-1 backdrop-blur-md font-mono text-[11px] text-zinc-200 no-scrollbar">
+                  {recentShown.length > 0 && (
+                    <>
+                      <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-zinc-500 font-bold">Recent</div>
+                      {recentShown.map(dirRow)}
+                    </>
+                  )}
+                  {recentShown.length > 0 && bookmarks.length > 0 && <div className="my-1 h-px bg-white/10" />}
+                  {bookmarks.length > 0 && (
+                    <>
+                      <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-zinc-500 font-bold">Bookmarks</div>
+                      {bookmarks.map(dirRow)}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
           {/* Path bar. Stretches to the row height, which the icon buttons
               set, so both are the same height. Shows clickable segments;
               a click on the free space switches to the text input. Both
               views fill this box absolutely, so the switch cannot resize
               the header. */}
-          <div className="flex-1 min-w-0 relative self-stretch">
+          <div className="flex-1 min-w-0 relative self-stretch min-h-[22px]">
             {!inputFocused ? (
               <div
                 ref={crumbsRef}
@@ -2323,22 +2327,25 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
               </div>
             )}
           </div>
-          <button
-            onClick={() => toggleBookmark(currentPath)}
-            disabled={!currentPath}
-            title={currentBookmarked ? "Remove bookmark" : "Bookmark this directory"}
-            aria-pressed={currentBookmarked}
-            className={`p-1 rounded bg-white/[0.04] border border-white/10 hover:bg-white/10 shrink-0 disabled:opacity-30 disabled:cursor-not-allowed ${currentBookmarked ? "text-amber-400" : "text-zinc-200"}`}
-          >
-            <Bookmark size={11} fill={currentBookmarked ? "currentColor" : "none"} />
-          </button>
-          <button onClick={() => fetch(currentPath)} title="Refresh"
-            className={`p-1 rounded bg-white/[0.04] border border-white/10 text-zinc-200 hover:bg-white/10 shrink-0 ${loading ? "animate-spin" : ""}`}>
-            <RefreshCw size={11} />
-          </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={() => toggleBookmark(currentPath)}
+              disabled={!currentPath}
+              title={currentBookmarked ? "Remove bookmark" : "Bookmark this directory"}
+              aria-pressed={currentBookmarked}
+              className={`p-1 rounded bg-white/[0.04] border border-white/10 hover:bg-white/10 shrink-0 disabled:opacity-30 disabled:cursor-not-allowed ${currentBookmarked ? "text-amber-400" : "text-zinc-200"}`}
+            >
+              <Bookmark size={11} fill={currentBookmarked ? "currentColor" : "none"} />
+            </button>
+            <button onClick={() => fetch(currentPath)} title="Refresh"
+              className={`p-1 rounded bg-white/[0.04] border border-white/10 text-zinc-200 hover:bg-white/10 shrink-0 ${loading ? "animate-spin" : ""}`}>
+              <RefreshCw size={11} />
+            </button>
+          </div>
         </div>
-        <div className="h-5 w-px bg-white/10 shrink-0" />
-        <div className="flex items-center gap-1 shrink-0 relative">
+        <div className="flex items-center gap-1.5 shrink-0">
+          <div className="h-5 w-px bg-white/10 shrink-0" />
+          <div className="flex items-center gap-1 relative">
           {provider.id === "local" && (
             <button
               onClick={async () => {
@@ -2410,6 +2417,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           >
             {allSelected ? <CheckSquare size={11} /> : <Square size={11} />}
           </button>
+          </div>
         </div>
       </div>
 
@@ -2718,7 +2726,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         // over the docked selection bar below the list. The
         // move row is its own element so a later notify() cannot take
         // the cancel button with it.
-        <div className="absolute bottom-2 right-2 left-2 z-30 flex flex-col items-end gap-1.5 pointer-events-none">
+        <div className="absolute bottom-2 right-2 left-2 z-30 flex flex-col items-end gap-1.5 pointer-events-none [overflow-wrap:anywhere]">
           {notification && (
             <div className={`pointer-events-auto max-w-full px-3 py-1.5 rounded-lg border text-[11px] font-mono shadow-2xl backdrop-blur-md animate-in fade-in slide-in-from-bottom-4 duration-300 ${
               notification.type === "success" ? "bg-emerald-950/90 border-emerald-500/30 text-emerald-400" :
