@@ -29,6 +29,7 @@ mod fonts;
 mod webkit_sandbox;
 mod approvals;
 mod agent_auth;
+mod ssh_config;
 #[cfg(test)]
 mod ssh_test_server;
 use ssh_manager::SshState;
@@ -5556,7 +5557,7 @@ fn passphrase_protected_key(normalized: &str) -> bool {
 mod key_format_tests {
     use super::{
         decode_private_key, decode_ssh_private_key, guard_key_kdf_cost, pem_private_key_header,
-        validate_ssh_private_key, AgentSlot, KeyDecodeError, MAX_KEY_KDF_ROUNDS,
+        validate_ssh_private_key, server_display_name, AgentSlot, KeyDecodeError, MAX_KEY_KDF_ROUNDS,
     };
     use ssh_key::{Algorithm, EcdsaCurve, PrivateKey};
 
@@ -5715,10 +5716,24 @@ mod key_format_tests {
     // looked-and-none, so agent_available never contacts an agent.
     #[test]
     fn with_the_agent_setting_off_no_agent_is_looked_for() {
-        let off = AgentSlot::new(false);
+        let off = AgentSlot::new(false, vec!["h".into()]);
         let off = off.try_lock().unwrap();
         assert!(off.looked && off.agent.is_none());
-        assert!(!AgentSlot::new(true).try_lock().unwrap().looked);
+        assert!(!AgentSlot::new(true, vec!["h".into()]).try_lock().unwrap().looked);
+    }
+
+    // A node's name is matched against ~/.ssh/config Host patterns too.
+    #[test]
+    fn a_nodes_name_is_read_for_ssh_config_matching() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE servers(id INTEGER PRIMARY KEY, name TEXT, host TEXT);
+             INSERT INTO servers VALUES (7, 'prod', '10.0.0.5'), (8, NULL, '10.0.0.6');",
+        )
+        .unwrap();
+        assert_eq!(server_display_name(&conn, 7).as_deref(), Some("prod"));
+        assert_eq!(server_display_name(&conn, 8), None);
+        assert_eq!(server_display_name(&conn, 9), None);
     }
 
     // A key whose bcrypt KDF asks for billions of rounds is refused before any
@@ -7374,14 +7389,26 @@ struct SecretPromptCtx<'a> {
 struct AgentSlot {
     looked: bool,
     agent: Option<agent_auth::AgentSession>,
+    /// What `~/.ssh/config` `Host` patterns are matched against when looking:
+    /// the host's address and the node's name.
+    names: Vec<String>,
 }
 
 impl AgentSlot {
     /// `use_agent` is the device's "Use keys from an ssh-agent" setting. Off,
-    /// the slot starts as looked-and-none, so no agent is ever contacted.
-    fn new(use_agent: bool) -> tokio::sync::Mutex<Self> {
-        tokio::sync::Mutex::new(Self { looked: !use_agent, agent: None })
+    /// the slot starts as looked-and-none, so no agent is ever contacted (and
+    /// `~/.ssh/config` isn't read).
+    fn new(use_agent: bool, names: Vec<String>) -> tokio::sync::Mutex<Self> {
+        tokio::sync::Mutex::new(Self { looked: !use_agent, agent: None, names })
     }
+}
+
+/// A node's display name. An imported node keeps its `~/.ssh/config` alias as
+/// its name, so `Host` patterns are matched against it as well as the address.
+fn server_display_name(conn: &rusqlite::Connection, server_id: i32) -> Option<String> {
+    conn.query_row("SELECT name FROM servers WHERE id = ?1", [server_id], |row| row.get::<_, Option<String>>(0))
+        .ok()
+        .flatten()
 }
 
 /// Whether an ssh-agent holding at least one key is running on this device.
@@ -7390,7 +7417,8 @@ async fn agent_available(ctx: &SecretPromptCtx<'_>) -> bool {
     let mut slot = ctx.agent.lock().await;
     if !slot.looked {
         slot.looked = true;
-        slot.agent = agent_auth::find_agent().await;
+        let names = std::mem::take(&mut slot.names);
+        slot.agent = agent_auth::find_agent_for(names, |m| ctx.log(&m, "info")).await;
         if let Some(agent) = &slot.agent {
             let n = agent.key_count();
             ctx.log(
@@ -8959,13 +8987,13 @@ async fn connect_jump_host(
 
     // 1. Resolve the bastion's config synchronously and drop the DB guard
     //    before any await (rusqlite Connection is not Send).
-    let (host, port, user, password, key_data) = {
+    let ((host, port, user, password, key_data), jump_name) = {
         let guard = db.lock().map_err(|_| "[STATE] LOCK_FAILED".to_string())?;
         let conn = guard
             .as_ref()
             .ok_or_else(|| "[STATE] DATABASE_NOT_INITIALIZED".to_string())?;
         match resolve_jump_auth(conn, jump_server_id)? {
-            Some(v) => v,
+            Some(v) => (v, server_display_name(conn, jump_server_id)),
             None => return Err("jump host not found".into()),
         }
     };
@@ -9072,7 +9100,7 @@ async fn connect_jump_host(
         allow_prompt,
         attempt,
         cancelled: std::sync::atomic::AtomicBool::new(false),
-        agent: AgentSlot::new(use_agent),
+        agent: AgentSlot::new(use_agent, [Some(host.clone()), jump_name].into_iter().flatten().collect()),
         session_unusable: std::sync::atomic::AtomicBool::new(false),
     };
     let (effective_user, user_prompted, login_cancelled) =
@@ -9533,6 +9561,18 @@ async fn initiate_connection(
         }
     };
 
+    // What `~/.ssh/config` `Host` patterns are matched against if this login
+    // looks for an ssh-agent: the address and the node's name. A quick
+    // connect has no saved alias, so only the address is matched.
+    let agent_names: Vec<String> = {
+        let name = if quick_auth.is_some() {
+            None
+        } else {
+            db_state.conn.lock().ok().and_then(|g| g.as_ref().and_then(|c| server_display_name(c, server_id)))
+        };
+        [Some(host.clone()), name].into_iter().flatten().collect()
+    };
+
     // DB resolution succeeded — now register the fingerprint sender. From here
     // on the worker is always spawned, so its FpCleanupGuard guarantees this
     // entry is removed even on the failure paths.
@@ -9920,7 +9960,7 @@ async fn initiate_connection(
                     allow_prompt: allow_kbi,
                     attempt: &attempt,
                     cancelled: std::sync::atomic::AtomicBool::new(false),
-                    agent: AgentSlot::new(use_agent),
+                    agent: AgentSlot::new(use_agent, agent_names),
                     session_unusable: std::sync::atomic::AtomicBool::new(false),
                 };
 
