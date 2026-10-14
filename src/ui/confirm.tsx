@@ -10,12 +10,12 @@ import { AlertTriangle, X } from "lucide-react";
 // instead of tabbing into the underlying app (which is inert to sighted
 // users but reachable via keyboard/AT without this). On close, restore
 // focus to the previously-focused element so keyboard users don't lose
-// their place. Scoped to this file - no callers touch it.
+// their place. The held-changes review dialog uses it too.
 //
 // Keyed on the prompt's id, not on "is one open": when one prompt follows
 // another of the same kind the panel is a new element, and a trap still
 // holding the old one would swallow every Tab.
-const useFocusTrap = (openId: number | null, panelRef: React.RefObject<HTMLDivElement | null>) => {
+export const useFocusTrap = (openId: number | null, panelRef: React.RefObject<HTMLDivElement | null>) => {
   useEffect(() => {
     if (openId === null) return;
     const previouslyFocused = document.activeElement as HTMLElement | null;
