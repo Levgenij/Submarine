@@ -5556,7 +5556,7 @@ fn passphrase_protected_key(normalized: &str) -> bool {
 mod key_format_tests {
     use super::{
         decode_private_key, decode_ssh_private_key, guard_key_kdf_cost, pem_private_key_header,
-        validate_ssh_private_key, KeyDecodeError, MAX_KEY_KDF_ROUNDS,
+        validate_ssh_private_key, AgentSlot, KeyDecodeError, MAX_KEY_KDF_ROUNDS,
     };
     use ssh_key::{Algorithm, EcdsaCurve, PrivateKey};
 
@@ -5709,6 +5709,16 @@ mod key_format_tests {
         }
         out.push_str("-----END OPENSSH PRIVATE KEY-----\n");
         out
+    }
+
+    // With "Use keys from an ssh-agent" off, a login's agent slot starts as
+    // looked-and-none, so agent_available never contacts an agent.
+    #[test]
+    fn with_the_agent_setting_off_no_agent_is_looked_for() {
+        let off = AgentSlot::new(false);
+        let off = off.try_lock().unwrap();
+        assert!(off.looked && off.agent.is_none());
+        assert!(!AgentSlot::new(true).try_lock().unwrap().looked);
     }
 
     // A key whose bcrypt KDF asks for billions of rounds is refused before any
@@ -7361,10 +7371,17 @@ struct SecretPromptCtx<'a> {
 /// The ssh-agent for one login. Looked up the first time a step wants it, so a
 /// login that works without one never touches an agent, and let go once the
 /// login is over.
-#[derive(Default)]
 struct AgentSlot {
     looked: bool,
     agent: Option<agent_auth::AgentSession>,
+}
+
+impl AgentSlot {
+    /// `use_agent` is the device's "Use keys from an ssh-agent" setting. Off,
+    /// the slot starts as looked-and-none, so no agent is ever contacted.
+    fn new(use_agent: bool) -> tokio::sync::Mutex<Self> {
+        tokio::sync::Mutex::new(Self { looked: !use_agent, agent: None })
+    }
 }
 
 /// Whether an ssh-agent holding at least one key is running on this device.
@@ -8922,6 +8939,8 @@ async fn connect_jump_host(
     attempt: &ssh_manager::ConnectAttempt,
     session_id: &str,
     jump_server_id: i32,
+    // The device's "Use keys from an ssh-agent" setting (see AgentSlot).
+    use_agent: bool,
 ) -> Result<russh::client::Handle<ssh_manager::ClientHandler>, String> {
     use tokio::time::Duration;
     use tauri::Emitter;
@@ -9053,7 +9072,7 @@ async fn connect_jump_host(
         allow_prompt,
         attempt,
         cancelled: std::sync::atomic::AtomicBool::new(false),
-        agent: Default::default(),
+        agent: AgentSlot::new(use_agent),
         session_unusable: std::sync::atomic::AtomicBool::new(false),
     };
     let (effective_user, user_prompted, login_cancelled) =
@@ -9222,12 +9241,18 @@ async fn initiate_connection(
     // See the connection topology notes near the auth block below.
     session_role: Option<String>,
     separate_sessions: Option<bool>,
+    // The device's "Use keys from an ssh-agent" setting (on unless the
+    // frontend says otherwise). Off, no agent is contacted for this
+    // connection or its jump host.
+    use_ssh_agent: Option<bool>,
 ) -> Result<(), String> {
     use tauri::Emitter;
     use tokio::time::Duration;
     use russh::client;
     use std::sync::Arc;
     use tokio::sync::Mutex;
+
+    let use_agent = use_ssh_agent.unwrap_or(true);
 
     // Connection role + topology flags. Kept as plain locals so the whole
     // function (worker included) can branch on them without re-parsing.
@@ -9692,6 +9717,7 @@ async fn initiate_connection(
                 &attempt,
                 &session_id_clone,
                 jid,
+                use_agent,
             )
             .await {
                 Ok(jump_handle) => {
@@ -9894,7 +9920,7 @@ async fn initiate_connection(
                     allow_prompt: allow_kbi,
                     attempt: &attempt,
                     cancelled: std::sync::atomic::AtomicBool::new(false),
-                    agent: Default::default(),
+                    agent: AgentSlot::new(use_agent),
                     session_unusable: std::sync::atomic::AtomicBool::new(false),
                 };
 
