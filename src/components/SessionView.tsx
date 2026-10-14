@@ -159,9 +159,12 @@ const DOCK_FLEX: Record<ToolDock, string> = {
   top: "flex-col-reverse",
 };
 // Above or below the terminal the panel has a height of its own. The
-// terminal always keeps at least MIN_TERMINAL_HEIGHT.
+// terminal always keeps at least MIN_TERMINAL_HEIGHT. Beside it, the same
+// with a width: in a half-width split a wide panel would otherwise take the
+// whole tile and leave the terminal 0 px wide.
 const MIN_TOOL_HEIGHT = 160;
 const MIN_TERMINAL_HEIGHT = 120;
+const MIN_TERMINAL_WIDTH = 200;
 
 // One OS window, and every session stays mounted. Open, drag, shrink, and
 // unmount all enqueue here so each setSize lands before the next outerSize read.
@@ -1173,19 +1176,32 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
   };
 
   // Grow only while this session is in front and a left or right pane is
-  // sharing the window with the terminal. Leaving the tab, closing the tool,
-  // full screen, a compact window, or a top or bottom dock gives the width back.
+  // sharing the window with the terminal. The pixels added are the pane's
+  // width on screen plus the divider. A cap can make that narrower than the
+  // saved width, and closing gives those same pixels back. Leaving the tab,
+  // full screen, a compact window, or a top or bottom dock does too.
   const windowGrownRef = useRef(false);
+  const windowGrownPxRef = useRef(0);
   useEffect(() => {
     const want = isActiveView && !!activeTool && !dockTopBottom && !toolAlone;
     if (want && !windowGrownRef.current) {
       windowGrownRef.current = true;
-      adjustWindowWidth(toolWidthRef.current + 4);
+      const area = mainAreaRef.current?.clientWidth ?? 0;
+      const measured = Math.round(toolPanelRef.current?.getBoundingClientRect().width ?? 0);
+      const cap = area > MIN_TERMINAL_WIDTH + 4
+        ? Math.min(toolWidthRef.current, area - MIN_TERMINAL_WIDTH - 4)
+        : toolWidthRef.current;
+      const pane = measured > 0 ? measured : cap;
+      const added = pane + 4;
+      windowGrownPxRef.current = added;
+      adjustWindowWidth(added);
     } else if (!want && windowGrownRef.current) {
       windowGrownRef.current = false;
-      adjustWindowWidth(-(toolWidthRef.current + 4));
+      const added = windowGrownPxRef.current;
+      windowGrownPxRef.current = 0;
+      adjustWindowWidth(-added);
     }
-    // adjustWindowWidth reads the width ref; it must not re-run on every drag.
+    // The drag handler updates windowGrownPxRef. This must not re-run on drag.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isActiveView, activeTool, dockTopBottom, toolAlone]);
 
@@ -1194,7 +1210,8 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
     return () => {
       if (!windowGrownRef.current) return;
       windowGrownRef.current = false;
-      adjustWindowWidth(-(toolWidthRef.current + 4));
+      adjustWindowWidth(-windowGrownPxRef.current);
+      windowGrownPxRef.current = 0;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1224,23 +1241,35 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
       return;
     }
     const startX = e.clientX;
-    const startWidth = toolWidthRef.current;
+    const area = mainAreaRef.current?.clientWidth ?? window.innerWidth;
+    const maxWidth = Math.max(240, Math.min(900, area - MIN_TERMINAL_WIDTH - 4));
+    // Drag from the width on screen. The saved width stays put until the
+    // pointer moves; maxWidth already keeps the terminal's floor.
+    const startWidth = Math.min(
+      maxWidth,
+      Math.round(toolPanelRef.current?.getBoundingClientRect().width ?? toolWidthRef.current),
+    );
     let lastSentWidth = startWidth;
     let pendingWidth = startWidth;
+    let moved = false;
     let raf = 0;
 
     const sendDragDelta = () => {
       const delta = pendingWidth - lastSentWidth;
       if (delta === 0) return;
       lastSentWidth = pendingWidth;
+      if (windowGrownRef.current) windowGrownPxRef.current += delta;
       adjustWindowWidth(delta);
     };
 
     const onMove = (ev: MouseEvent) => {
       // Dragging toward the terminal widens the pane: left for a pane on the
-      // right, right for a pane on the left.
+      // right, right for a pane on the left. The tile keeps about 200 px of
+      // terminal. The window still grows with the pane.
       const pulled = toolDock === "left" ? ev.clientX - startX : startX - ev.clientX;
-      const next = Math.max(240, Math.min(900, startWidth + pulled));
+      const next = Math.round(Math.max(240, Math.min(maxWidth, startWidth + pulled)));
+      if (!moved && next === startWidth) return;
+      moved = true;
       pendingWidth = next;
       toolWidthRef.current = next;
       setToolPanelWidth(next);
@@ -1258,6 +1287,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
       raf = 0;
       // The frame may not have run, so the last drag step is still unsent.
       sendDragDelta();
+      if (!moved) return;
       try { localStorage.setItem("submarine-tool-panel-width", String(toolWidthRef.current)); }
       catch { /* ignore */ }
     };
@@ -2181,7 +2211,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
           style={activeTool && !toolAlone
             ? (dockTopBottom
                 ? { height: `${toolPanelHeight}px`, maxHeight: `calc(100% - ${MIN_TERMINAL_HEIGHT + 4}px)` }
-                : { width: `${toolPanelWidth}px` })
+                : { width: `${toolPanelWidth}px`, maxWidth: `calc(100% - ${MIN_TERMINAL_WIDTH + 4}px)` })
             : undefined}
           className={`${activeTool ? (toolAlone ? "flex-1 min-w-0" : "shrink-0") : "hidden"} bg-[#121214]/95 flex flex-col ${dockTopBottom && !toolAlone ? "w-full min-h-0" : "h-full"} overflow-hidden ${activeTool ? "animate-in" : ""}`}
         >
