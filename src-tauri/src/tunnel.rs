@@ -1134,6 +1134,15 @@ async fn run_dynamic_forward(
 // on that port it pushes us a `forwarded-tcpip` channel via
 // `ClientHandler::server_channel_open_forwarded_tcpip`, which looks up the
 // port in `ForwardedTargets` and bridges to the local target.
+
+/// How long the server-side listener requests (`tcpip-forward` and its cancel)
+/// may take before we give up. Without a bound, a server that stalls on the
+/// global request hangs setup and teardown forever. The request holds the
+/// per-session handle lock, so that stall also blocks the health watcher's
+/// next probe and any other channel on the session. The timeout caps both:
+/// the lock is held for at most this long.
+const FORWARD_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 async fn run_remote_forward(
     app: AppHandle,
     handle: Arc<Mutex<russh::client::Handle<ClientHandler>>>,
@@ -1157,10 +1166,25 @@ async fn run_remote_forward(
     };
     forwarded_targets.lock().await.insert(server_port, entry);
 
-    // Ask the server to start listening.
+    // Ask the server to start listening, bounded so a server that never
+    // answers the global request can't hang the setup forever (nor hold the
+    // per-session lock indefinitely and freeze the health watcher with it).
     let request = {
         let h = handle.lock().await;
-        h.tcpip_forward(&bind_addr, server_port).await
+        match tokio::time::timeout(
+            FORWARD_REQUEST_TIMEOUT,
+            h.tcpip_forward(&bind_addr, server_port),
+        ).await {
+            Ok(r) => r,
+            Err(_) => {
+                drop(h);
+                forwarded_targets.lock().await.remove(&server_port);
+                return Err(format!(
+                    "tcpip-forward request timed out after {:?}",
+                    FORWARD_REQUEST_TIMEOUT
+                ));
+            }
+        }
     };
     match request {
         Ok(_) => {
@@ -1184,9 +1208,13 @@ async fn run_remote_forward(
     let _ = stop_rx.await;
 
     // Best-effort: tell the server to release the port and drop our map entry.
+    // Same timeout as the setup request so teardown can't hang on the lock.
     {
         let h = handle.lock().await;
-        let _ = h.cancel_tcpip_forward(&bind_addr, server_port).await;
+        let _ = tokio::time::timeout(
+            FORWARD_REQUEST_TIMEOUT,
+            h.cancel_tcpip_forward(&bind_addr, server_port),
+        ).await;
     }
     forwarded_targets.lock().await.remove(&server_port);
     Ok(())
@@ -1916,6 +1944,11 @@ mod tunnel_tests {
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn forward_request_timeout_is_ten_seconds() {
+        assert_eq!(super::FORWARD_REQUEST_TIMEOUT, Duration::from_secs(10));
+    }
 
     fn spec(kind: &str, local: &str, remote: &str) -> TunnelSpec {
         serde_json::from_value(serde_json::json!({ "type": kind, "local": local, "remote": remote })).unwrap()
