@@ -4470,17 +4470,21 @@ async fn close_profile(
     // disconnect path for each one. This frees tunnel listener sockets,
     // SFTP channels, and the SSH handle in the right order.
     let session_ids: Vec<String> = ssh.connections.lock().await.keys().cloned().collect();
+    // Build every temp path first. A refused id fails the close before any
+    // folder is deleted.
+    let mut session_dirs = Vec::with_capacity(session_ids.len());
     for sid in &session_ids {
+        session_dirs.push((session_sftp_dir(sid)?, session_drag_dir(sid)?));
+    }
+    for (sid, (temp, drag)) in session_ids.iter().zip(session_dirs) {
         tunnel::stop_all_for_session(&ssh.tunnels, sid).await;
         ssh.forwarded_targets.lock().await.remove(sid);
         ssh.sftp_sessions.lock().await.remove(sid);
         ssh.sftp_elevation.lock().await.remove(sid);
         ssh.connections.lock().await.remove(sid);
-        let temp = session_sftp_dir(sid);
         if temp.exists() {
             let _ = std::fs::remove_dir_all(&temp);
         }
-        let drag = session_drag_dir(sid);
         if drag.exists() {
             let _ = std::fs::remove_dir_all(&drag);
         }
@@ -5745,9 +5749,38 @@ struct LoadedSshKey {
     encrypted: bool,
 }
 
+/// Only a file on this computer: a network share (`\\host\share\...`, also
+/// spelled with `/`), a device or a `\\?\` path is refused before anything
+/// touches it. Just looking up a share makes Windows sign in to that host,
+/// which a key path in a pasted host list should not be able to cause.
+fn local_file_path(path: &std::path::Path) -> Result<(), String> {
+    use std::path::{Component, Prefix};
+    match path.components().next() {
+        Some(Component::Prefix(p)) if !matches!(p.kind(), Prefix::Disk(_)) => {
+            Err(format!(
+                "[SSH] KEY_FILE_NOT_LOCAL: {} isn't a file on this computer.",
+                path.display()
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A short text file's contents, or nothing: only a regular file of at most
+/// `max` bytes is read. A `.pub` next to a key is one line; a FIFO there
+/// would hang the read, and a huge file would fill memory.
+fn small_text_file(path: &std::path::Path, max: u64) -> Option<String> {
+    let meta = fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > max {
+        return None;
+    }
+    fs::read_to_string(path).ok()
+}
+
 /// Read and validate a private key file. Shared by the browse flow and the
 /// SSH-config import.
 fn load_key_from_disk(path: &std::path::Path) -> Result<LoadedSshKey, String> {
+    local_file_path(path)?;
     let meta = fs::metadata(path)
         .map_err(|e| format!("[SSH] KEY_FILE_UNREADABLE at {}: {}", path.display(), e))?;
     if !meta.is_file() {
@@ -5780,7 +5813,7 @@ fn load_key_from_disk(path: &std::path::Path) -> Result<LoadedSshKey, String> {
     let public_key = parsed
         .as_ref()
         .and_then(|p| p.public_key().to_openssh().ok())
-        .or_else(|| fs::read_to_string(&sibling_pub).ok())
+        .or_else(|| small_text_file(&sibling_pub, 16 * 1024))
         .unwrap_or_default()
         .trim()
         .to_string();
@@ -5835,8 +5868,12 @@ async fn pick_ssh_key_file() -> Result<Option<String>, String> {
 /// flow. Nothing is written to the vault — the user still reviews the name and
 /// supplies a passphrase before saving.
 #[tauri::command]
-fn read_ssh_key_file(path: String) -> Result<LoadedSshKey, String> {
-    load_key_from_disk(&expand_home(&path))
+async fn read_ssh_key_file(path: String) -> Result<LoadedSshKey, String> {
+    // Off the main thread (where a sync command runs) and off the async
+    // workers: a slow or stuck file read must not freeze the window.
+    tokio::task::spawn_blocking(move || load_key_from_disk(&expand_home(&path)))
+        .await
+        .map_err(|e| format!("[SSH] KEY_FILE_READ: {e}"))?
 }
 
 /// A key that `import_ssh_key_file` put in the vault (or found already there).
@@ -5866,7 +5903,10 @@ async fn import_ssh_key_file(
     path: String,
     name: Option<String>,
 ) -> Result<ImportedSshKey, String> {
-    let loaded = load_key_from_disk(&expand_home(&path))?;
+    // A blocking read, so not on an async worker (see read_ssh_key_file).
+    let loaded = tokio::task::spawn_blocking(move || load_key_from_disk(&expand_home(&path)))
+        .await
+        .map_err(|e| format!("[SSH] KEY_FILE_READ: {e}"))??;
     let encrypted = loaded.encrypted;
     // The key content only ever lives in this function, so keep it wiped on
     // the way out rather than leaving it in a heap block for the allocator to
@@ -8872,7 +8912,11 @@ async fn connect_jump_host(
 /// to call on a key that doesn't exist — every step is then a no-op. Bumps the
 /// key's generation so the secondary's own health watcher observes the change on
 /// its next tick and bows out WITHOUT emitting a `session-disconnected-{key}`.
-async fn teardown_connection_key(state: &SshState, mirrors: &MirrorMap, key: &str) {
+async fn teardown_connection_key(state: &SshState, mirrors: &MirrorMap, key: &str) -> Result<(), String> {
+    // Refuse a bad id before any cleanup. The temp folders are removed only
+    // after this returns paths we just built.
+    let td = session_sftp_dir(key)?;
+    let dd = session_drag_dir(key)?;
     // Bump the generation FIRST — before removing the connection — so a connect
     // worker for this key that's still handshaking observes the newer value at
     // its "still wanted?" registration guard and bails instead of registering a
@@ -8899,14 +8943,13 @@ async fn teardown_connection_key(state: &SshState, mirrors: &MirrorMap, key: &st
     state.connections.lock().await.remove(key);
     state.jump_connections.lock().await.remove(key);
     // Wipe temp files the secondary's SFTP downloads / drags left behind.
-    let td = session_sftp_dir(key);
     if td.exists() {
         let _ = std::fs::remove_dir_all(&td);
     }
-    let dd = session_drag_dir(key);
     if dd.exists() {
         let _ = std::fs::remove_dir_all(&dd);
     }
+    Ok(())
 }
 
 #[tauri::command]
@@ -9057,8 +9100,8 @@ async fn initiate_connection(
     // entirely for keys that already carry a `::` suffix (i.e. this IS a
     // secondary), and a plain no-op on first connect / shared mode.
     if !is_secondary {
-        teardown_connection_key(state.inner(), mirrors.inner(), &format!("{}::sftp", session_id)).await;
-        teardown_connection_key(state.inner(), mirrors.inner(), &format!("{}::fwd", session_id)).await;
+        teardown_connection_key(state.inner(), mirrors.inner(), &format!("{}::sftp", session_id)).await?;
+        teardown_connection_key(state.inner(), mirrors.inner(), &format!("{}::fwd", session_id)).await?;
     } else {
         // Dedicated-transport reconnect (manual button / auto-retry) OVER a
         // still-live old handle: the base-tagged tunnels ride this transport and
@@ -11048,6 +11091,9 @@ async fn disconnect_session(
     mirrors: tauri::State<'_, MirrorMap>,
     session_id: String,
 ) -> Result<(), String> {
+    // A refused id fails the disconnect before any teardown, so nothing is deleted.
+    let session_temp_dir = session_sftp_dir(&session_id)?;
+    let session_drag = session_drag_dir(&session_id)?;
     // Invalidate any connect worker still handshaking for THIS key: bump the
     // generation before removing anything, so a late auth-success hits its
     // "still wanted?" guard and drops instead of re-registering a transport the
@@ -11113,11 +11159,10 @@ async fn disconnect_session(
     // Wipe any temp files this session left behind (live-edit downloads + drag
     // staging). Best-effort: failures are usually because an editor still holds
     // a lock on a file, in which case the file persists until the OS cleans temp.
-    let session_temp_dir = session_sftp_dir(&session_id);
+    // The paths were built from a valid id above; a refused id never reaches here.
     if session_temp_dir.exists() {
         let _ = std::fs::remove_dir_all(&session_temp_dir);
     }
-    let session_drag = session_drag_dir(&session_id);
     if session_drag.exists() {
         let _ = std::fs::remove_dir_all(&session_drag);
     }
@@ -11126,8 +11171,8 @@ async fn disconnect_session(
     // this IS a primary id (no `::` suffix) — a direct disconnect of a secondary
     // must not recurse into non-existent grandchildren.
     if !session_id.contains("::") {
-        teardown_connection_key(state.inner(), mirrors.inner(), &format!("{}::sftp", session_id)).await;
-        teardown_connection_key(state.inner(), mirrors.inner(), &format!("{}::fwd", session_id)).await;
+        teardown_connection_key(state.inner(), mirrors.inner(), &format!("{}::sftp", session_id)).await?;
+        teardown_connection_key(state.inner(), mirrors.inner(), &format!("{}::fwd", session_id)).await?;
         // Disconnecting a whole tab forgets any connect-time secret the user
         // typed for it. A fresh connect asks again. Gated to a base id so
         // toggling a `::sftp` / `::fwd` secondary off keeps the still-live
@@ -14407,13 +14452,95 @@ fn app_temp_root() -> &'static std::path::PathBuf {
 }
 
 /// Per-session live-edit staging dir, under the unpredictable root.
-fn session_sftp_dir(session_id: &str) -> std::path::PathBuf {
-    app_temp_root().join(format!("sftp_{}", session_id))
+fn session_sftp_dir(session_id: &str) -> Result<std::path::PathBuf, String> {
+    Ok(app_temp_root().join(format!("sftp_{}", session_temp_name(session_id)?)))
 }
 
 /// Per-session drag staging dir, under the unpredictable root.
-fn session_drag_dir(session_id: &str) -> std::path::PathBuf {
-    app_temp_root().join(format!("drag_{}", session_id))
+fn session_drag_dir(session_id: &str) -> Result<std::path::PathBuf, String> {
+    Ok(app_temp_root().join(format!("drag_{}", session_temp_name(session_id)?)))
+}
+
+/// A session's part of its temp dirs' names. The frontend makes
+/// `session-<digits>` and `session-quick-<digits>` (at most 128 characters),
+/// plus `::sftp` / `::fwd` for the dedicated connections. `::` is spelled `__`
+/// because `:` cannot be in a Windows file name. Any other id is refused: it
+/// comes over IPC, and a separator or `..` in it would put the directory, and
+/// the cleanup that deletes it whole, outside the app's temp root.
+fn session_temp_name(session_id: &str) -> Result<String, String> {
+    let (base, suffix) = match session_id.split_once("::") {
+        Some((base, suffix @ ("sftp" | "fwd"))) => (base, Some(suffix)),
+        Some(_) => return Err("[SESSION] BAD_ID".into()),
+        None => (session_id, None),
+    };
+    // `session-quick-` is checked first. `session-` would also match that
+    // prefix and then reject the leftover `quick-<digits>`.
+    let ok = match base.strip_prefix("session-quick-").or_else(|| base.strip_prefix("session-")) {
+        Some(rest) if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) && base.len() <= 128 => true,
+        _ => false,
+    };
+    if !ok {
+        return Err("[SESSION] BAD_ID".into());
+    }
+    Ok(match suffix {
+        Some(s) => format!("{base}__{s}"),
+        None => base.to_string(),
+    })
+}
+
+#[cfg(test)]
+mod ipc_path_tests {
+    use super::*;
+    use std::path::Path;
+
+    // A session's temp dirs are named after its id only when the id is one
+    // the frontend makes; anything else (a separator, `..`, another suffix)
+    // is refused, so a dir and the cleanup that deletes it stay in the root.
+    #[test]
+    fn session_ids_name_temp_dirs_only_in_the_frontends_shape() {
+        assert_eq!(session_temp_name("session-5").unwrap(), "session-5");
+        assert_eq!(session_temp_name("session-quick-1700000000000").unwrap(), "session-quick-1700000000000");
+        assert_eq!(session_temp_name("session-5::sftp").unwrap(), "session-5__sftp");
+        assert_eq!(session_temp_name("session-5::fwd").unwrap(), "session-5__fwd");
+        for bad in ["", "..", "../x", "a/b", "a\\b", "C:", "a b", "x::other", "x::sftp::sftp", "x\0"] {
+            assert!(session_temp_name(bad).is_err(), "{bad:?}");
+        }
+        assert!(session_drag_dir("../../outside").is_err());
+        assert!(session_sftp_dir("session-5").unwrap().starts_with(app_temp_root()));
+    }
+
+    // A key file has to be on this computer's drives: network-share, device
+    // and `\\?\` paths are refused before anything is looked up.
+    #[test]
+    fn key_files_have_to_be_on_this_computer() {
+        assert!(local_file_path(Path::new("id_ed25519")).is_ok());
+        #[cfg(windows)]
+        {
+            assert!(local_file_path(Path::new(r"C:\Users\me\.ssh\id_ed25519")).is_ok());
+            for bad in [
+                r"\\attacker\share\id",
+                "//attacker/share/id",
+                r"\\?\UNC\attacker\share\id",
+                r"\\?\C:\Users\me\.ssh\id",
+                r"\\.\pipe\id",
+            ] {
+                assert!(local_file_path(Path::new(bad)).is_err(), "{bad}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_pub_file_is_read_only_when_small() {
+        let dir = std::env::temp_dir().join(format!("submarine-pubcap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("small.pub"), "ssh-ed25519 AAAA test").unwrap();
+        std::fs::write(dir.join("big.pub"), vec![b'a'; 20 * 1024]).unwrap();
+        assert_eq!(small_text_file(&dir.join("small.pub"), 16 * 1024).as_deref(), Some("ssh-ed25519 AAAA test"));
+        assert_eq!(small_text_file(&dir.join("big.pub"), 16 * 1024), None);
+        assert_eq!(small_text_file(&dir, 16 * 1024), None, "a directory isn't read");
+        assert_eq!(small_text_file(&dir.join("missing.pub"), 16 * 1024), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// Reduce a server-controlled remote path to a safe LOCAL leaf filename for
@@ -14914,7 +15041,7 @@ async fn download_and_open(
     // Per-session subdirectory so we can sweep everything cleanly on
     // disconnect. One directory per remote path, so opening the same file
     // again replaces the same editor copy.
-    let session_temp_dir = session_sftp_dir(session_id);
+    let session_temp_dir = session_sftp_dir(session_id)?;
     let mut path_key = hex::encode(Sha256::digest(remote_path.as_bytes()));
     path_key.truncate(32);
     let temp_file_path = open_staging_file(&session_temp_dir, &path_key, filename);
@@ -15133,7 +15260,7 @@ async fn sftp_prepare_drag(
     // no `..`, no drive markers) and we scope to a per-session subdir so
     // parallel drags don't clobber each other.
     let raw_name = safe_temp_leaf_name(&remote_path)?;
-    let session_dir = session_drag_dir(&session_id);
+    let session_dir = session_drag_dir(&session_id)?;
     std::fs::create_dir_all(&session_dir)
         .map_err(|e| format!("Failed to create drag staging dir: {}", e))?;
     let temp_file_path = session_dir.join(&raw_name);
