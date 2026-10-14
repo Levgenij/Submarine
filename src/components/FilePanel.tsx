@@ -21,7 +21,8 @@ import { pathCrumbs } from "../fs/pathCrumbs";
 import { canMoveInto, rulesFor, takenNames } from "../fs/moveRules";
 import { useElementWidth } from "../hooks/useViewport";
 import {
-  ARCHIVE_FORMATS, ArchiveFormat, archiveFileName, archiveKind, extractFolderName, suggestArchiveBase,
+  ARCHIVE_FORMATS, ArchiveFormat, JOB_CANCELLED, archiveFileName, archiveKind, cancelArchiveJob,
+  extractFolderName, newArchiveJobId, suggestArchiveBase,
 } from "../fs/archive";
 
 // Last format picked in the archive dialog. The remote side is remembered
@@ -282,8 +283,9 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   const cancelPendingMoveRef = useRef<() => void>(() => {});
   // Archive / extract runs in progress, each its own row in the notice stack
   // so a later notify() does not hide that one is still working.
-  const [busyJobs, setBusyJobs] = useState<{ id: number; label: string }[]>([]);
+  const [busyJobs, setBusyJobs] = useState<{ id: number; label: string; cancellable?: boolean; cancelling?: boolean }[]>([]);
   const busyJobSeqRef = useRef(0);
+  const jobCallsRef = useRef<Map<number, { current: string | null; cancelled: boolean }>>(new Map());
   // The handle is built once; this always points at the current render's
   // upload / download so a cross-pane drop doesn't run a stale closure.
   const sendItemsRef = useRef<(items: FileEntry[], destDir: string) => Promise<void>>(async () => {});
@@ -1420,6 +1422,38 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     }
   };
 
+  // Archive and extract can be stopped. `nextId` is a fresh cancel id for
+  // each attempt, so a Cancel during the replace prompt is not reused, and
+  // it fails the next attempt before it starts.
+  const runArchiveJob = async (label: string, work: (nextId: () => string) => Promise<void>) => {
+    const id = ++busyJobSeqRef.current;
+    const call = { current: null as string | null, cancelled: false };
+    jobCallsRef.current.set(id, call);
+    setBusyJobs((cur) => [...cur, { id, label, cancellable: true }]);
+    const nextId = () => {
+      if (call.cancelled) throw JOB_CANCELLED;
+      const jobId = newArchiveJobId();
+      call.current = jobId;
+      return jobId;
+    };
+    try {
+      await work(nextId);
+    } finally {
+      jobCallsRef.current.delete(id);
+      setBusyJobs((cur) => cur.filter((job) => job.id !== id));
+    }
+  };
+
+  const cancelBusyJob = (id: number) => {
+    const call = jobCallsRef.current.get(id);
+    if (!call || call.cancelled) return;
+    call.cancelled = true;
+    const jobId = call.current;
+    call.current = null;
+    setBusyJobs((cur) => cur.map((job) => (job.id === id ? { ...job, cancelling: true } : job)));
+    if (jobId) void cancelArchiveJob(jobId).catch(() => {});
+  };
+
   // Shows what a finished job produced, unless the user has moved on to
   // another folder. A same-directory refresh keeps paths still listed.
   const refreshAfterJob = async (dir: string) => {
@@ -1481,19 +1515,25 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     try { localStorage.setItem(archiveFormatKey(provider.id, sessionId), format); } catch { /* not remembered */ }
     const names = items.map((it) => it.name);
     const label = items.length === 1 ? items[0].name : `${items.length} items`;
-    void runBusyJob(`Archiving ${label} → ${name}…`, async () => {
+    void runArchiveJob(`Archiving ${label} → ${name}…`, async (nextId) => {
       try {
+        let warning: string | null = null;
         try {
-          await provider.archive(dir, names, dest, format, overwrite);
+          warning = await provider.archive(dir, names, dest, format, overwrite, nextId());
         } catch (err: any) {
           // The listing was stale: the name is taken after all.
           if (overwrite || !String(err).startsWith("EXISTS:")) throw err;
           if (!(await confirmReplace())) return;
-          await provider.archive(dir, names, dest, format, true);
+          warning = await provider.archive(dir, names, dest, format, true, nextId());
         }
-        notify(`Created ${name}`, "success");
+        if (warning) notify(warning, "info");
+        else notify(`Created ${name}`, "success");
         await refreshAfterJob(dir);
       } catch (err: any) {
+        if (String(err) === JOB_CANCELLED) {
+          notify("Archive cancelled", "info");
+          return;
+        }
         notify(`Archive failed: ${err}`, "error");
       }
     });
@@ -1520,12 +1560,17 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       });
       if (!ok) return;
     }
-    await runBusyJob(`Extracting ${entry.name}…`, async () => {
+    await runArchiveJob(`Extracting ${entry.name}…`, async (nextId) => {
       try {
-        await provider.extract(dir, entry.name, intoFolder ? folder : null);
-        notify(`Extracted ${entry.name} → ${destDir}`, "success");
+        const warning = await provider.extract(dir, entry.name, intoFolder ? folder : null, nextId());
+        if (warning) notify(warning, "info");
+        else notify(`Extracted ${entry.name} → ${destDir}`, "success");
         await refreshAfterJob(dir);
       } catch (err: any) {
+        if (String(err) === JOB_CANCELLED) {
+          notify("Extract cancelled", "info");
+          return;
+        }
         notify(`Extract failed: ${err}`, "error");
       }
     });
@@ -2702,6 +2747,17 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             <div key={job.id} className="pointer-events-auto max-w-full px-3 py-1.5 rounded-lg border text-[11px] font-mono shadow-2xl backdrop-blur-md bg-indigo-950/90 border-indigo-500/30 text-indigo-400 flex items-center gap-2">
               <RefreshCw size={11} className="shrink-0 animate-spin" />
               <span className="min-w-0">{job.label}</span>
+              {job.cancellable && (
+                <button
+                  type="button"
+                  title={job.cancelling ? "Cancelling" : "Cancel"}
+                  disabled={job.cancelling}
+                  onClick={() => cancelBusyJob(job.id)}
+                  className="shrink-0 p-0.5 rounded hover:bg-white/15 text-zinc-300 hover:text-rose-300 disabled:opacity-40"
+                >
+                  <X size={12} />
+                </button>
+              )}
             </div>
           ))}
         </div>
