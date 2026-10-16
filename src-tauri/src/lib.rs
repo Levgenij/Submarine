@@ -5811,7 +5811,7 @@ fn passphrase_protected_key(normalized: &str) -> bool {
 mod key_format_tests {
     use super::{
         decode_private_key, decode_ssh_private_key, guard_key_kdf_cost, pem_private_key_header,
-        validate_ssh_private_key, server_display_name, AgentSlot, KeyDecodeError, MAX_KEY_KDF_ROUNDS,
+        validate_ssh_private_key, server_display_name, AgentSlot, ConfigTarget, KeyDecodeError, MAX_KEY_KDF_ROUNDS,
     };
     use ssh_key::{Algorithm, EcdsaCurve, PrivateKey};
 
@@ -5970,10 +5970,42 @@ mod key_format_tests {
     // looked-and-none, so agent_available never contacts an agent.
     #[test]
     fn with_the_agent_setting_off_no_agent_is_looked_for() {
-        let off = AgentSlot::new(false, vec!["h".into()]);
+        let off = AgentSlot::new(false, None);
         let off = off.try_lock().unwrap();
         assert!(off.looked && off.agent.is_none());
-        assert!(!AgentSlot::new(true, vec!["h".into()]).try_lock().unwrap().looked);
+        assert!(!AgentSlot::new(true, None).try_lock().unwrap().looked);
+    }
+
+    fn host_config(f: impl FnOnce(&mut crate::ssh_config::HostConfig)) -> Option<crate::ssh_config::HostConfig> {
+        let mut c = crate::ssh_config::HostConfig::default();
+        f(&mut c);
+        Some(c)
+    }
+
+    // ~/.ssh/config: an alias address takes HostName and Port; User only
+    // fills a blank username; every change is logged.
+    #[test]
+    fn ssh_config_alias_changes_where_to_connect() {
+        let c = host_config(|c| {
+            c.hostname = Some("10.0.0.5".into());
+            c.port = Some(2222);
+            c.user = Some("deploy".into());
+        });
+        let t = ConfigTarget::apply("prod", 22, "", c.clone());
+        assert_eq!((t.host.as_str(), t.port, t.user.as_str()), ("10.0.0.5", 2222, "deploy"));
+        assert_eq!(t.log.len(), 3, "{:?}", t.log);
+        let t = ConfigTarget::apply("prod", 22, "root", c);
+        assert_eq!(t.user, "root", "a saved username wins");
+        // Nothing to change: nothing logged.
+        let same = host_config(|c| {
+            c.hostname = Some("PROD".into());
+            c.port = Some(22);
+        });
+        assert!(ConfigTarget::apply("prod", 22, "u", same).log.is_empty());
+        let none = ConfigTarget::apply("h", 2200, "u", None);
+        assert_eq!((none.host.as_str(), none.port, none.config.is_none()), ("h", 2200, true));
+        let noted = host_config(|c| c.notes.push("Match exec isn't run, so that block is skipped.".into()));
+        assert_eq!(ConfigTarget::apply("h", 22, "u", noted).log.len(), 1);
     }
 
     // A node's name is matched against ~/.ssh/config Host patterns too.
@@ -7843,17 +7875,17 @@ struct SecretPromptCtx<'a> {
 struct AgentSlot {
     looked: bool,
     agent: Option<agent_auth::AgentSession>,
-    /// What `~/.ssh/config` `Host` patterns are matched against when looking:
-    /// the host's address and the node's name.
-    names: Vec<String>,
+    /// What `IdentityAgent` in `~/.ssh/config` says for this host, if it
+    /// applies (see `ConfigTarget`).
+    identity_agent: Option<ssh_config::IdentityAgent>,
 }
 
 impl AgentSlot {
     /// `use_agent` is the device's "Use keys from an ssh-agent" setting. Off,
-    /// the slot starts as looked-and-none, so no agent is ever contacted (and
-    /// `~/.ssh/config` isn't read).
-    fn new(use_agent: bool, names: Vec<String>) -> tokio::sync::Mutex<Self> {
-        tokio::sync::Mutex::new(Self { looked: !use_agent, agent: None, names })
+    /// the slot starts as looked-and-none, so no agent is ever contacted, even
+    /// when ~/.ssh/config names one.
+    fn new(use_agent: bool, identity_agent: Option<ssh_config::IdentityAgent>) -> tokio::sync::Mutex<Self> {
+        tokio::sync::Mutex::new(Self { looked: !use_agent, agent: None, identity_agent })
     }
 }
 
@@ -7865,14 +7897,72 @@ fn server_display_name(conn: &rusqlite::Connection, server_id: i32) -> Option<St
         .flatten()
 }
 
+/// Where one connection goes once `~/.ssh/config` has had its say: the
+/// address and port an alias stands for (`HostName`, `Port`), and its `User`
+/// for a node saved without a username. `config` keeps the agent for the step
+/// that uses it; `log` says what the config changed or why something in it
+/// was skipped. Nothing here is stored.
+struct ConfigTarget {
+    host: String,
+    port: u16,
+    user: String,
+    config: Option<ssh_config::HostConfig>,
+    log: Vec<String>,
+}
+
+impl ConfigTarget {
+    /// `~/.ssh/config` for a connection to `host:port` as `user` (blank =
+    /// asked when connecting) for a node called `name`. Nothing changes when
+    /// the device's switch is off, there's no config, or this is Android.
+    async fn resolve(host: &str, port: u16, user: &str, name: Option<String>) -> Self {
+        let config = ssh_config::for_host(host.to_string(), name, Some(user.to_string())).await;
+        Self::apply(host, port, user, config)
+    }
+
+    fn apply(host: &str, port: u16, user: &str, config: Option<ssh_config::HostConfig>) -> Self {
+        let mut t = Self { host: host.to_string(), port, user: user.to_string(), config: None, log: Vec::new() };
+        let Some(c) = config else { return t };
+        if let Some(h) = c.hostname.as_deref().filter(|h| !h.is_empty() && !h.eq_ignore_ascii_case(host)) {
+            t.log.push(format!("~/.ssh/config: {host} is HostName {h}."));
+            t.host = h.to_string();
+        }
+        if let Some(p) = c.port.filter(|&p| p != port) {
+            t.log.push(format!("~/.ssh/config: Port {p} (in place of {port})."));
+            t.port = p;
+        }
+        if user.trim().is_empty() {
+            if let Some(u) = c.user.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+                t.log.push(format!("~/.ssh/config: User {u}."));
+                t.user = u.to_string();
+            }
+        }
+        t.log.extend(c.notes.iter().cloned());
+        t.config = Some(c);
+        t
+    }
+
+    /// `IdentityAgent` for this host, resolved on this device.
+    fn identity_agent(&self) -> Option<ssh_config::IdentityAgent> {
+        self.config.as_ref()?.identity_agent.as_deref().map(ssh_config::resolve_identity_agent)
+    }
+}
+
+/// Turn the device's "Use settings from ~/.ssh/config" switch on or off. The
+/// page calls this at start and whenever the switch changes; it's on until
+/// then. Off, nothing is read from the config, IdentityAgent included.
+#[tauri::command]
+fn set_use_ssh_config(enabled: bool) {
+    ssh_config::set_enabled(enabled);
+}
+
 /// Whether an ssh-agent holding at least one key is running on this device.
 /// Looks only once per login.
 async fn agent_available(ctx: &SecretPromptCtx<'_>) -> bool {
     let mut slot = ctx.agent.lock().await;
     if !slot.looked {
         slot.looked = true;
-        let names = std::mem::take(&mut slot.names);
-        slot.agent = agent_auth::find_agent_for(names, |m| ctx.log(&m, "info")).await;
+        let setting = slot.identity_agent.take();
+        slot.agent = agent_auth::find_agent_for(setting, |m| ctx.log(&m, "info")).await;
         if let Some(agent) = &slot.agent {
             let n = agent.key_count();
             ctx.log(
@@ -9596,6 +9686,15 @@ async fn connect_jump_host(
             None => return Err("jump host not found".into()),
         }
     };
+    // What ~/.ssh/config says about the bastion (its alias, agent). The
+    // in-app jump (jump_host_id) stays; this only resolves that bastion.
+    let port_u16 = u16::try_from(port).map_err(|_| format!("Port {port} isn't a valid port"))?;
+    let target = ConfigTarget::resolve(&host, port_u16, &user, jump_name).await;
+    for line in &target.log {
+        log(line, "info");
+    }
+    let identity_agent = target.identity_agent();
+    let (host, port, user) = (target.host, i32::from(target.port), target.user);
     // A blank bastion username is resolved after the handshake.
     let saved_user = user.trim().to_string();
 
@@ -9699,7 +9798,7 @@ async fn connect_jump_host(
         allow_prompt,
         attempt,
         cancelled: std::sync::atomic::AtomicBool::new(false),
-        agent: AgentSlot::new(use_agent, [Some(host.clone()), jump_name].into_iter().flatten().collect()),
+        agent: AgentSlot::new(use_agent, identity_agent),
         session_unusable: std::sync::atomic::AtomicBool::new(false),
     };
     let (effective_user, user_prompted, login_cancelled) =
@@ -10164,17 +10263,21 @@ async fn initiate_connection(
         }
     };
 
-    // What `~/.ssh/config` `Host` patterns are matched against if this login
-    // looks for an ssh-agent: the address and the node's name. A quick
-    // connect has no saved alias, so only the address is matched.
-    let agent_names: Vec<String> = {
+    // What ~/.ssh/config says about this host: an alias's address and port, a
+    // User for a node saved without one, and the agent. Host patterns see the
+    // address and the node's name. A quick connect has no saved name.
+    let config_target = {
         let name = if quick_auth.is_some() {
             None
         } else {
             db_state.conn.lock().ok().and_then(|g| g.as_ref().and_then(|c| server_display_name(c, server_id)))
         };
-        [Some(host.clone()), name].into_iter().flatten().collect()
+        let port = u16::try_from(port).map_err(|_| format!("Port {port} isn't a valid port"))?;
+        ConfigTarget::resolve(&host, port, &user, name).await
     };
+    let identity_agent = config_target.identity_agent();
+    let ConfigTarget { host, port, user, log: config_log, .. } = config_target;
+    let port = i32::from(port);
 
     // DB resolution succeeded — now register the fingerprint sender. From here
     // on the worker is always spawned, so its FpCleanupGuard guarantees this
@@ -10263,6 +10366,9 @@ async fn initiate_connection(
         };
 
         emit_log("Initializing SSH connection process...", "info");
+        for line in &config_log {
+            emit_log(line, "info");
+        }
         // Ask this host for the kinds of host key on file first. A failed
         // read refuses the connection before any socket is opened. The
         // primary session and the dedicated ::sftp / ::fwd connections all
@@ -10563,7 +10669,7 @@ async fn initiate_connection(
                     allow_prompt: allow_kbi,
                     attempt: &attempt,
                     cancelled: std::sync::atomic::AtomicBool::new(false),
-                    agent: AgentSlot::new(use_agent, agent_names),
+                    agent: AgentSlot::new(use_agent, identity_agent),
                     session_unusable: std::sync::atomic::AtomicBool::new(false),
                 };
 
@@ -18986,7 +19092,7 @@ pub fn run() {
             add_credential, edit_credential, delete_credential,
             add_ssh_key, edit_ssh_key, delete_ssh_key,
             pick_ssh_key_file, read_ssh_key_file, import_ssh_key_file,
-            initiate_connection, verify_fingerprint_response, submit_kbi_response, disconnect_session,
+            initiate_connection, verify_fingerprint_response, submit_kbi_response, disconnect_session, set_use_ssh_config,
             start_tunnel, stop_tunnel, list_tunnels, restart_session_tunnels, persist_session_tunnels,
             list_tunnel_rules, remove_tunnel_rule, rename_tunnel_rule,
             open_terminal, local_shell, write_terminal_data, resize_terminal, close_terminal,

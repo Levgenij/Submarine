@@ -462,6 +462,32 @@ function SshAgentSetting({ settings, setSettings }: any) {
   );
 }
 
+// "Use settings from ~/.ssh/config" (util/sshConfig, src-tauri/src/ssh_config.rs).
+function SshConfigSetting({ settings, setSettings }: any) {
+  const on = settings.useSshConfig !== false;
+  return (
+    <div className="bg-[#121215] border border-white/5 rounded-2xl p-6 shadow-xl">
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-zinc-100">Use settings from ~/.ssh/config</div>
+          <p className="text-[12px] text-zinc-400 leading-relaxed mt-1">
+            Connect the way the OpenSSH client would: a server whose address is an alias in
+            ~/.ssh/config connects to its HostName and Port, takes its User when no username is
+            saved, and uses the ssh-agent IdentityAgent names. Host blocks are matched against a
+            server's address and its name; Include and Match are followed. The file is only read,
+            and nothing from it is synced. Turn off to use only what's saved for each server.
+          </p>
+        </div>
+        <PrefToggle
+          label="Use settings from ~/.ssh/config"
+          checked={on}
+          onToggle={() => setSettings((s: any) => ({ ...s, useSshConfig: !(s.useSshConfig !== false) }))}
+        />
+      </div>
+    </div>
+  );
+}
+
 const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any) => {
   const accentColors = [
     { name: 'Light Blue', value: '#60a5fa' },
@@ -593,7 +619,7 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any)
           <ShellConfigSyncSettings servers={servers} />
         </section>
 
-        {/* Not on Android, which has no ssh-agent to use. */}
+        {/* Not on Android, which has no ssh-agent or ~/.ssh/config to use. */}
         {!IS_ANDROID && (
           <section className="break-inside-avoid space-y-3 mb-4 sm:mb-8">
             <div className="flex items-center gap-2 text-zinc-400 font-bold uppercase tracking-widest text-xs">
@@ -601,6 +627,7 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any)
             </div>
 
             <SshAgentSetting settings={settings} setSettings={setSettings} />
+            <SshConfigSetting settings={settings} setSettings={setSettings} />
           </section>
         )}
 
