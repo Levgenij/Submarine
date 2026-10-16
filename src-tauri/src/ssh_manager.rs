@@ -38,14 +38,11 @@ pub(crate) fn key_type_family(key_type: &str) -> String {
 }
 
 /// The plain host key offered by the server, or `None` for a host
-/// CERTIFICATE. Certificates are refused, fail-closed: there is no CA trust
-/// store yet (no `@cert-authority` equivalent), so a certificate's CA
-/// signature, principals and validity window can't be verified - and trusting
-/// the key embedded in it would answer a question russh never asked. In
-/// practice this never fires: `ssh_preferred_algorithms` leaves
-/// `host_key_certificates` empty, so no `*-cert-v01@openssh.com` host-key
-/// algorithm is advertised and a compliant server presents its plain host key
-/// (the TOFU path).
+/// CERTIFICATE. A certificate is judged by `known_hosts` (`@cert-authority`)
+/// before this runs. The key embedded in a certificate is not itself a host
+/// key, so with no CA covering the host it is refused. `ssh_preferred_algorithms`
+/// leaves `host_key_certificates` empty; a connection asks for certificates
+/// only when a CA covers that host.
 pub fn plain_host_key(offered: &PublicKeyOrCertificate) -> Option<&PublicKey> {
     match offered {
         PublicKeyOrCertificate::PublicKey { key, .. } => Some(key),
@@ -188,6 +185,61 @@ pub async fn authenticate_with_key_result<H: client::Handler>(
     };
     let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg);
     session.authenticate_publickey(user, key).await
+}
+
+/// Certificate login with a private key held here (a key file). An RSA
+/// certificate is signed with the hash the server asks for, as a plain RSA
+/// key is: russh's `authenticate_openssh_cert` always names it
+/// `ssh-rsa-cert-v01@openssh.com` (SHA-1), which OpenSSH 8.8 and later refuse.
+pub async fn authenticate_with_certificate<H: client::Handler>(
+    session: &mut client::Handle<H>,
+    user: &str,
+    key: Arc<PrivateKey>,
+    cert: russh::keys::Certificate,
+) -> Result<client::AuthResult, russh::Error> {
+    let hash_alg = if key.algorithm().is_rsa() {
+        session.best_supported_rsa_hash().await?.flatten()
+    } else {
+        None
+    };
+    session
+        .authenticate_certificate_with(user, cert, hash_alg, &mut KeyFileSigner(key))
+        .await
+        .map_err(|e| match e {
+            russh::AgentAuthError::Send(_) => russh::Error::SendError,
+            russh::AgentAuthError::Key(e) => russh::Error::Keys(e),
+        })
+}
+
+/// Signs a login the way an ssh-agent answers one, with a key held here: the
+/// signature is appended to the data as an SSH string.
+struct KeyFileSigner(Arc<PrivateKey>);
+
+impl russh::Signer for KeyFileSigner {
+    type Error = russh::AgentAuthError;
+
+    fn auth_sign(
+        &mut self,
+        _identity: &russh::keys::agent::AgentIdentity,
+        hash_alg: Option<HashAlg>,
+        mut to_sign: Vec<u8>,
+    ) -> impl std::future::Future<Output = Result<Vec<u8>, Self::Error>> + Send {
+        let signed = sign_appended(&self.0, hash_alg, &mut to_sign).map(|()| to_sign);
+        std::future::ready(signed.map_err(russh::AgentAuthError::Key))
+    }
+}
+
+fn sign_appended(key: &PrivateKey, hash_alg: Option<HashAlg>, data: &mut Vec<u8>) -> Result<(), russh::keys::Error> {
+    use russh::keys::signature::Signer;
+    use russh::keys::ssh_encoding::Encode;
+    use russh::keys::ssh_key::private::KeypairData;
+    let signature = match key.key_data() {
+        KeypairData::Rsa(rsa) => Signer::try_sign(&(rsa, hash_alg), data.as_slice()),
+        other => Signer::try_sign(other, data.as_slice()),
+    }
+    .map_err(|_| russh::keys::ssh_key::Error::Crypto)?;
+    signature.encode_vec()?.encode(data)?;
+    Ok(())
 }
 
 /// Password auth with the `bool` contract callers relied on under russh 0.40.
@@ -709,6 +761,13 @@ pub struct ClientHandler {
     /// Stamped on every packet of channel data or window adjustment the
     /// server sends; the session watcher holds a clone (see `LastHeard`).
     pub last_heard: LastHeard,
+    /// What the user's known_hosts files say about this host (CAs, listed
+    /// and revoked keys), when "Use settings from ~/.ssh/config" is on.
+    pub(crate) host_trust: Option<Arc<crate::known_hosts::HostTrust>>,
+    /// Why the host key was refused without a prompt (known_hosts said no,
+    /// or a certificate nothing can check): the connect driver puts it in
+    /// the failure reason instead of "not approved".
+    pub(crate) host_key_refusal: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl client::Handler for ClientHandler {
@@ -722,11 +781,57 @@ impl client::Handler for ClientHandler {
             self.fp_outcome.store(0, std::sync::atomic::Ordering::SeqCst);
             return Ok(false);
         }
+        // What known_hosts says decides first: a certificate from a trusted
+        // CA, a listed key, a revoked one. A different listed key is only a
+        // note: judge_host_key still runs, so another kind on file for this
+        // host and port is still a changed key.
+        let app = self.app.clone();
+        let session_id = self.session_id.clone();
+        let log = move |msg: String, ty: &str| {
+            let _ = app.emit(
+                &format!("session-log-{session_id}"),
+                serde_json::json!({"msg": msg, "type": ty}),
+            );
+        };
+        let trust_verdict = match (offered, &self.host_trust) {
+            (PublicKeyOrCertificate::Certificate(cert), Some(trust)) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                Some(trust.check_certificate(cert, now))
+            }
+            (PublicKeyOrCertificate::PublicKey { key, .. }, Some(trust)) => Some(trust.check_key(key)),
+            _ => None,
+        };
+        match trust_verdict {
+            Some(crate::known_hosts::Verdict::Trusted(why)) => {
+                log(why, "success");
+                self.fp_outcome.store(1, std::sync::atomic::Ordering::SeqCst);
+                return Ok(true);
+            }
+            Some(crate::known_hosts::Verdict::Refused(why)) => {
+                log(format!("Host key refused: {why}."), "error");
+                if let Ok(mut r) = self.host_key_refusal.lock() {
+                    *r = Some(why);
+                }
+                self.fp_outcome.store(0, std::sync::atomic::Ordering::SeqCst);
+                return Ok(false);
+            }
+            Some(crate::known_hosts::Verdict::Undecided(Some(note))) => log(note, "warn"),
+            Some(crate::known_hosts::Verdict::Undecided(None)) | None => {}
+        }
         let Some(server_public_key) = plain_host_key(offered) else {
-            let _ = self.app.emit(&format!("session-log-{}", self.session_id), serde_json::json!({
-                "msg": "Server presented an SSH host CERTIFICATE. Host certificates can't be verified yet (no trusted CA is configured), so the connection was refused.",
-                "type": "error"
-            }));
+            log(
+                "Server presented an SSH host CERTIFICATE, and no @cert-authority line in your known_hosts covers this host, so it can't be checked; the connection was refused.".into(),
+                "error",
+            );
+            if let Ok(mut r) = self.host_key_refusal.lock() {
+                *r = Some(
+                    "the server presented a host certificate, and no @cert-authority line in your known_hosts covers this host"
+                        .into(),
+                );
+            }
             // A host-key failure (not a transport / algorithm error).
             self.fp_outcome.store(0, std::sync::atomic::Ordering::SeqCst);
             return Ok(false);
@@ -1470,6 +1575,36 @@ mod tests {
             .await
             .expect("pump must stop once the terminal is closed")
             .unwrap();
+    }
+
+    /// A key file signs a certificate login as an agent would: the signature,
+    /// with the RSA hash the server asked for, appended to the data as an SSH
+    /// string.
+    #[test]
+    fn certificate_signer_uses_the_hash_the_server_asks_for() {
+        use russh::keys::signature::Verifier;
+        use russh::keys::ssh_encoding::Decode;
+        use russh::keys::ssh_key::{private::RsaKeypair, Signature};
+        use russh::keys::{HashAlg, PrivateKey};
+        const DATA: &[u8] = b"session id and request";
+        let rsa = PrivateKey::from(RsaKeypair::random(&mut rand::rng(), 2048).unwrap());
+        let ed = PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519).unwrap();
+        for (key, hash, name) in [
+            (&rsa, Some(HashAlg::Sha512), "rsa-sha2-512"),
+            (&rsa, Some(HashAlg::Sha256), "rsa-sha2-256"),
+            (&rsa, None, "ssh-rsa"),
+            (&ed, None, "ssh-ed25519"),
+        ] {
+            let mut data = DATA.to_vec();
+            sign_appended(key, hash, &mut data).unwrap();
+            let (signed, mut rest) = data.split_at(DATA.len());
+            assert_eq!(signed, DATA);
+            let blob = Vec::<u8>::decode(&mut rest).unwrap();
+            assert!(rest.is_empty(), "{name}: nothing after the signature");
+            let signature = Signature::decode(&mut blob.as_slice()).unwrap();
+            assert_eq!(signature.algorithm().as_str(), name);
+            Verifier::verify(key.public_key(), DATA, &signature).unwrap();
+        }
     }
 }
 

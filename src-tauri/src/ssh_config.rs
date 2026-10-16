@@ -1,6 +1,7 @@
 //! What the user's OpenSSH client config (`~/.ssh/config`) says about a
 //! connection (#2): the address and port an alias stands for, the user,
-//! which ssh-agent to use, and a ProxyCommand or ProxyJump.
+//! which ssh-agent to use, key and certificate files, known_hosts files,
+//! and a ProxyCommand or ProxyJump.
 //!
 //! Read-only and on demand: the files are read when a connection starts, and
 //! nothing from them is stored or synced. The device's "Use settings from
@@ -36,6 +37,8 @@ const MAX_DEPTH: usize = 16;
 const MAX_FILES: usize = 64;
 /// Matches of one `Include` glob, and directory entries looked at per level.
 const MAX_GLOB: usize = 256;
+/// `IdentityFile` / `CertificateFile` values kept (OpenSSH's own cap).
+const MAX_KEY_FILES: usize = 100;
 
 static ENABLED: AtomicBool = AtomicBool::new(true);
 
@@ -45,7 +48,7 @@ pub(crate) fn set_enabled(on: bool) {
 }
 
 /// Whether `~/.ssh/config` is read at all on this device.
-fn enabled() -> bool {
+pub(crate) fn enabled() -> bool {
     !cfg!(target_os = "android") && ENABLED.load(Ordering::Relaxed)
 }
 
@@ -60,9 +63,9 @@ pub(crate) enum Proxy {
     Jump(String),
 }
 
-/// What the config says for one connection. Only the settings a connection
-/// uses today: where to connect, who as, which agent, and a ProxyCommand
-/// or ProxyJump.
+/// What the config says for one connection: where to connect, who as, which
+/// agent, which key and certificate files, which known_hosts files, and a
+/// ProxyCommand or ProxyJump.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct HostConfig {
     /// `HostName`, `%h` expanded. Only from blocks that matched the address.
@@ -72,9 +75,18 @@ pub(crate) struct HostConfig {
     pub user: Option<String>,
     /// `IdentityAgent` as written; see `resolve_identity_agent`.
     pub identity_agent: Option<String>,
+    /// `IdentityFile` values as written, in order.
+    pub identity_files: Vec<String>,
+    /// `CertificateFile` values as written, in order.
+    pub certificate_files: Vec<String>,
+    pub identities_only: Option<bool>,
     /// `ProxyCommand` or `ProxyJump`, whichever came first. `Disabled` is
     /// `none` (a direct connection).
     pub proxy: Option<Proxy>,
+    /// `UserKnownHostsFile`: the files of the first line that applies.
+    pub user_known_hosts_files: Option<Vec<String>>,
+    /// `HostKeyAlgorithms` as written (a list, maybe with a +, - or ^ prefix).
+    pub host_key_algorithms: Option<String>,
     /// What was skipped and why, for the connect log.
     pub notes: Vec<String>,
 }
@@ -110,7 +122,7 @@ pub(crate) async fn for_host(address: String, name: Option<String>, user: Option
 /// The home folder `~` stands for. Debug builds take `SUBMARINE_LAB_HOME`
 /// instead when it's set, so tests can point at a fixture without writing one
 /// into the real home. Release builds ignore it.
-fn home_dir() -> Option<String> {
+pub(crate) fn home_dir() -> Option<String> {
     #[cfg(debug_assertions)]
     if let Some(home) = std::env::var("SUBMARINE_LAB_HOME").ok().filter(|h| !h.is_empty()) {
         return Some(home);
@@ -387,6 +399,32 @@ impl Evaluator<'_> {
             }
             "user" if self.out.user.is_none() => self.out.user = first_argument(rest),
             "identityagent" if self.out.identity_agent.is_none() => self.out.identity_agent = first_argument(rest),
+            "identityfile" => {
+                if let Some(v) = first_argument(rest) {
+                    if self.out.identity_files.len() < MAX_KEY_FILES && !self.out.identity_files.contains(&v) {
+                        self.out.identity_files.push(v);
+                    }
+                }
+            }
+            "certificatefile" => {
+                if let Some(v) = first_argument(rest) {
+                    if self.out.certificate_files.len() < MAX_KEY_FILES && !self.out.certificate_files.contains(&v) {
+                        self.out.certificate_files.push(v);
+                    }
+                }
+            }
+            "identitiesonly" if self.out.identities_only.is_none() => {
+                self.out.identities_only = first_argument(rest).and_then(|v| yes_no(&v));
+            }
+            "userknownhostsfile" if self.out.user_known_hosts_files.is_none() => {
+                let files = arguments(rest);
+                if !files.is_empty() {
+                    self.out.user_known_hosts_files = Some(files);
+                }
+            }
+            "hostkeyalgorithms" if self.out.host_key_algorithms.is_none() => {
+                self.out.host_key_algorithms = first_argument(rest);
+            }
             // The rest of the line, quotes included. `none` is a direct connection.
             // A later ProxyCommand or ProxyJump does not replace the first.
             "proxycommand" if self.out.proxy.is_none() => {
@@ -454,6 +492,14 @@ fn first_argument(rest: &str) -> Option<String> {
     arguments(rest).into_iter().next().filter(|a| !a.is_empty())
 }
 
+fn yes_no(v: &str) -> Option<bool> {
+    match v.to_ascii_lowercase().as_str() {
+        "yes" | "true" => Some(true),
+        "no" | "false" => Some(false),
+        _ => None,
+    }
+}
+
 /// `(matches, via_address)` for a `Host` line: one of its patterns matches the
 /// node's address or name and none of its `!` patterns does.
 fn host_line_matches(rest: &str, lookup: &Lookup) -> (bool, bool) {
@@ -489,6 +535,11 @@ fn pattern_list_matches(list: &str, value: &str, ignore_case: bool) -> bool {
     matched
 }
 
+/// OpenSSH's host patterns, case ignored (known_hosts uses them too).
+pub(crate) fn pattern_matches(pattern: &str, name: &str) -> bool {
+    glob_matches(pattern, name, true)
+}
+
 /// OpenSSH's patterns: `*` any run of characters, `?` one.
 fn glob_matches(pattern: &str, name: &str, ignore_case: bool) -> bool {
     let fold = |s: &str| if ignore_case { s.to_lowercase() } else { s.to_string() };
@@ -512,6 +563,59 @@ fn glob_matches(pattern: &str, name: &str, ignore_case: bool) -> bool {
         }
     }
     p[pi..].iter().all(|&c| c == '*')
+}
+
+/// What `%` tokens in IdentityFile, CertificateFile and UserKnownHostsFile
+/// stand for.
+pub(crate) struct PathTokens<'a> {
+    /// `%h`: the host connected to (after HostName).
+    pub host: &'a str,
+    /// `%n`: the address as saved.
+    pub original: &'a str,
+    pub port: u16,
+    /// `%r`: the remote user; blank when it's only asked for later.
+    pub user: &'a str,
+}
+
+/// A file named in the config, as OpenSSH reads it: `~`, `${VAR}`, and the
+/// tokens `%%`, `%d` (home), `%u` (local user), `%h`, `%n`, `%p`, `%r` and
+/// `%l` (this computer's name). A relative path is taken from the home folder.
+pub(crate) fn expand_path(value: &str, t: &PathTokens) -> Result<String, String> {
+    let env = RealEnv { home: home_dir().unwrap_or_default() };
+    let base = expand_basic(value, &env)?;
+    let mut out = String::new();
+    let mut chars = base.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('%') => out.push('%'),
+            Some('d') => out.push_str(&env.home),
+            Some('u') => {
+                out.push_str(&env.local_user().ok_or("uses %u, and the local user name isn't known")?)
+            }
+            Some('h') => out.push_str(t.host),
+            Some('n') => out.push_str(t.original),
+            Some('p') => out.push_str(&t.port.to_string()),
+            Some('r') if t.user.is_empty() => {
+                return Err("uses %r, and the username is only asked for after connecting".into())
+            }
+            Some('r') => out.push_str(t.user),
+            Some('l') => out.push_str(
+                &std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).map_err(|_| {
+                    "uses %l, and this computer's name isn't known"
+                })?,
+            ),
+            Some(x) => return Err(format!("uses %{x}, which Submarine doesn't fill in here")),
+            None => return Err("ends with a lone %".into()),
+        }
+    }
+    if !is_absolute(&out) {
+        out = Path::new(&env.home).join(out).to_string_lossy().into_owned();
+    }
+    Ok(out)
 }
 
 /// `HostName` takes `%h` (the address as given) and `%%`.
@@ -1057,6 +1161,45 @@ mod tests {
         let c = cfg("# IdentityAgent /commented.sock\nHost *\n  ForwardAgent no\n  identityagent   /x.sock   \n", "h");
         assert_eq!(c.identity_agent.as_deref(), Some("/x.sock"));
         assert_eq!(cfg("Host *\n User me\n", "h").identity_agent, None);
+    }
+
+    #[test]
+    fn identity_certificate_and_known_hosts_lines_add_up() {
+        let config = "Host *.teleport.example.com teleport.example.com\n    UserKnownHostsFile \"/Users/u/.tsh/known_hosts\" /etc/kh\n    IdentityFile \"/Users/u/.tsh/keys/t/u\"\n    CertificateFile \"/Users/u/.tsh/keys/t/u-ssh/t-cert.pub\"\n    HostKeyAlgorithms rsa-sha2-512-cert-v01@openssh.com,rsa-sha2-256-cert-v01@openssh.com\n    IdentitiesOnly yes\nHost *\n    IdentityFile ~/.ssh/id_ed25519\n    UserKnownHostsFile ~/.ssh/other\n";
+        let c = cfg(config, "n1.teleport.example.com");
+        assert_eq!(
+            c.identity_files,
+            vec!["/Users/u/.tsh/keys/t/u".to_string(), "~/.ssh/id_ed25519".to_string()]
+        );
+        assert_eq!(c.certificate_files, vec!["/Users/u/.tsh/keys/t/u-ssh/t-cert.pub".to_string()]);
+        assert_eq!(
+            c.user_known_hosts_files,
+            Some(vec!["/Users/u/.tsh/known_hosts".to_string(), "/etc/kh".to_string()])
+        );
+        assert_eq!(
+            c.host_key_algorithms.as_deref(),
+            Some("rsa-sha2-512-cert-v01@openssh.com,rsa-sha2-256-cert-v01@openssh.com")
+        );
+        assert_eq!(c.identities_only, Some(true));
+    }
+
+    #[test]
+    fn identity_file_paths_expand_tokens() {
+        let home = home_dir().expect("home");
+        let tokens = PathTokens { host: "h.example", original: "alias", port: 2200, user: "bob" };
+        assert_eq!(
+            expand_path("~/k/%h_%n_%p_%r_%%", &tokens).unwrap(),
+            format!("{home}/k/h.example_alias_2200_bob_%")
+        );
+        assert_eq!(expand_path("%d/x", &tokens).unwrap(), format!("{home}/x"));
+        let blank = PathTokens { host: "h", original: "h", port: 22, user: "" };
+        assert!(expand_path("%r", &blank).unwrap_err().contains("%r"));
+        assert!(expand_path("%z", &tokens).is_err());
+        assert!(expand_path("${SUBMARINE_UNSET_IDENTITY_VAR}/k", &tokens).is_err());
+        assert_eq!(
+            expand_path("keys/id_ed25519", &tokens).unwrap(),
+            Path::new(&home).join("keys/id_ed25519").to_string_lossy()
+        );
     }
 
     #[test]
