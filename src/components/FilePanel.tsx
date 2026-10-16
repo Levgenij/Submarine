@@ -17,6 +17,7 @@ import {
   acquireTransferSlot, dropQueued, enqueueTransfers, getQueued, isQueued, queueSignal, startQueued, waitForTurn,
 } from "../fs/transferQueue";
 import { parentPathOf } from "../fs/localProvider";
+import { COMPARE_LABEL, compareListings, type CompareMark } from "../fs/compare";
 import { pathCrumbs } from "../fs/pathCrumbs";
 import { canMoveInto, rulesFor, takenNames } from "../fs/moveRules";
 import { useElementWidth } from "../hooks/useViewport";
@@ -146,7 +147,23 @@ export interface FilePanelProps {
   headerExtra?: React.ReactNode;
   /** File operations in this pane run as root - tint the header so it's unmistakable. */
   rootMode?: boolean;
+  /** The other pane's listing, to mark this pane's rows against. None: Compare is off. */
+  compareWith?: FileEntry[] | null;
+  /** While comparing: leave out files that look the same. Folders stay, so they can be opened. */
+  hideSame?: boolean;
+  /** This pane's listing whenever it changes, for the other pane to compare against. */
+  onEntriesChange?: (entries: FileEntry[]) => void;
 }
+
+// How a compare mark shows on its row: a colored edge and a tint, matching
+// the legend. The tooltip says what the mark means.
+const COMPARE_ROW: Record<CompareMark, string> = {
+  only: "border-amber-400 bg-amber-500/[0.08]",
+  type: "border-rose-400 bg-rose-500/[0.08]",
+  size: "border-rose-400 bg-rose-500/[0.08]",
+  newer: "border-emerald-400 bg-emerald-500/[0.08]",
+  older: "border-zinc-500 bg-white/[0.03]",
+};
 
 export interface FilePanelHandle {
   refresh: () => Promise<void>;
@@ -173,6 +190,9 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   bookmarksKey,
   headerExtra,
   rootMode = false,
+  compareWith = null,
+  hideSame = false,
+  onEntriesChange,
 }, ref) => {
   const [currentPath, setCurrentPath] = useState("");
   // Last five distinct directories visited in this panel, MRU first. Lives
@@ -1823,6 +1843,11 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     }
   };
 
+  // ---- compare ----------------------------------------------------------------
+  // The other pane reads this listing. Nothing inside the files is read.
+  useEffect(() => { onEntriesChange?.(entries); }, [entries, onEntriesChange]);
+  const compareMarks = compareWith ? compareListings(entries, compareWith) : null;
+
   // ---- sorting ----------------------------------------------------------------
 
   const sortedEntries = (() => {
@@ -1841,9 +1866,11 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       return 0;
     });
     const matches = nameFilterMatcher(nameFilter);
-    return matches ? sorted.filter(e => matches(e.name)) : sorted;
+    const named = matches ? sorted.filter(e => matches(e.name)) : sorted;
+    // Folders stay, including ones that exist on both sides, so they can be opened.
+    return compareMarks && hideSame ? named.filter((e) => e.isDir || compareMarks.has(e.path)) : named;
   })();
-  const filteredOut = nameFilter.trim() ? entries.length - sortedEntries.length : 0;
+  const filteredOut = nameFilter.trim() || (compareMarks && hideSame) ? entries.length - sortedEntries.length : 0;
 
   // Current-directory totals for the status bar. Size sums regular files
   // only: a directory row's `size` is its own inode, not the files inside
@@ -2566,9 +2593,13 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             </div>
           )}
           {sortedEntries.length === 0 ? (
-            filteredOut ? (
+            filteredOut && nameFilter.trim() ? (
               <div className="text-center py-14 px-3 text-zinc-500 break-words">
                 {`No names match “${nameFilter.trim()}”`}
+              </div>
+            ) : filteredOut ? (
+              <div className="text-center py-14 px-3 text-zinc-500 break-words">
+                Every file here looks the same on the other side
               </div>
             ) : showParent ? null : (
               <div className="text-center py-14 text-zinc-500">Empty</div>
@@ -2577,6 +2608,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             sortedEntries.map((entry) => {
               const isSel = selected.has(entry.path);
               const isCursor = keyNav && entry.path === cursor;
+              const mark = compareMarks?.get(entry.path);
               const opening = openProgress[entry.path];
               const openPct = opening && opening.total > 0
                 ? Math.min(100, (opening.bytes / opening.total) * 100)
@@ -2597,6 +2629,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                 data-fs-row-path={entry.path}
                 data-fs-row-isdir={entry.isDir ? "1" : "0"}
                 data-fs-drop-path={entry.isDir ? entry.path : undefined}
+                data-fs-compare={mark}
+                title={mark ? COMPARE_LABEL[mark] : undefined}
                 className={`group isolate relative overflow-hidden grid ${gridColumns} gap-1.5 px-2.5 py-1 border-l-2 cursor-pointer transition-colors items-center scroll-mt-8 ${
                   dropHover === entry.path
                     ? "bg-indigo-500/20 ring-1 ring-inset ring-indigo-400 border-indigo-400 text-white"
@@ -2604,6 +2638,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                     ? "border-indigo-400 text-indigo-100 font-bold"
                     : isSel
                     ? "bg-indigo-950/40 border-indigo-400 text-indigo-100 font-bold"
+                    : mark
+                    ? `${COMPARE_ROW[mark]} text-zinc-200 hover:bg-white/5 hover:text-white`
                     : "border-transparent text-zinc-200 hover:bg-white/5 hover:text-white"
                 } ${isCursor && dropHover !== entry.path ? "ring-1 ring-inset ring-indigo-400/60" : ""}`}
               >
@@ -2667,10 +2703,11 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                             entry.linkState === "broken" ? " (broken)"
                               : entry.linkState === "error" ? ` (${entry.linkError ?? "target unreadable"})`
                               : ""
-                          }`
-                        : undefined}
+                          }${mark ? `. ${COMPARE_LABEL[mark]}` : ""}`
+                        : mark ? COMPARE_LABEL[mark] : undefined}
                     >
                       {entry.name}
+                      {mark && <span className="sr-only">{COMPARE_LABEL[mark]}</span>}
                       {entry.isSymlink && entry.linkTarget && (
                         <span className={`font-normal ${
                           entry.linkState === "broken" ? "text-rose-400/80"
