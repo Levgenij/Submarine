@@ -13922,6 +13922,157 @@ async fn write_terminal_data(state: tauri::State<'_, SshState>, terminal_id: Str
     Ok(())
 }
 
+/// This server's saved password: its own, or the saved login's when the
+/// server uses one (`auth_type` vault, including a row that never set it).
+/// Empty and missing both mean there is nothing to type. A quick connect
+/// has no server row (`server_id` 0) and returns nothing.
+fn server_saved_password(conn: &Connection, server_id: i32) -> Result<Option<String>, String> {
+    if server_id <= 0 {
+        return Ok(None);
+    }
+    let found = conn.query_row(
+        "SELECT auth_type, password, credential_id FROM servers WHERE id = ?1",
+        rusqlite::params![server_id],
+        |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<i32>>(2)?,
+            ))
+        },
+    );
+    let (auth_type, own, credential_id) = match found {
+        Ok(row) => row,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(e) => return Err(format!("[DATABASE] READ_FAILED: {}", e)),
+    };
+    if auth_type.as_deref().unwrap_or("vault") == "vault" {
+        let Some(id) = credential_id else {
+            return Ok(None);
+        };
+        return credential_password(conn, id);
+    }
+    Ok(own.filter(|password| !password.is_empty()))
+}
+
+fn credential_password(conn: &Connection, id: i32) -> Result<Option<String>, String> {
+    match conn.query_row(
+        "SELECT password FROM credentials WHERE id = ?1",
+        rusqlite::params![id],
+        |row| row.get::<_, Option<String>>(0),
+    ) {
+        Ok(password) => Ok(password.filter(|password| !password.is_empty())),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(format!("[DATABASE] READ_FAILED: {}", e)),
+    }
+}
+
+/// Bytes to write at the prompt. No Enter is added. A line break, a carriage
+/// return, or a null is refused: a break would submit part of it, a null
+/// would cut it off.
+fn password_to_type(password: &str) -> Result<Vec<u8>, &'static str> {
+    if password.is_empty() {
+        return Err("There's no saved password for this server");
+    }
+    if password.chars().any(|c| matches!(c, '\n' | '\r' | '\0')) {
+        return Err("That password has a line break, a carriage return, or a null, so it isn't typed");
+    }
+    Ok(password.as_bytes().to_vec())
+}
+
+fn saved_password_bytes(conn: &Connection, server_id: i32) -> Result<Vec<u8>, String> {
+    let Some(password) = server_saved_password(conn, server_id)? else {
+        return Err("There's no saved password for this server".into());
+    };
+    // Wiped on drop, including the refuse path. The returned bytes are the
+    // only copy, and they are what the PTY write consumes.
+    let password = Zeroizing::new(password);
+    password_to_type(&password).map_err(str::to_string)
+}
+
+/// Types this server's saved password into an open terminal, because the user
+/// pressed Saved password at a sudo or su prompt. The password goes from the
+/// profile to the PTY. It is not returned, written to the connect log, or
+/// emitted as an event. No Enter: the user presses Enter.
+#[tauri::command]
+async fn type_saved_password(
+    ssh: tauri::State<'_, SshState>,
+    db: tauri::State<'_, DbState>,
+    terminal_id: String,
+    server_id: i32,
+) -> Result<(), String> {
+    use crate::ssh_manager::TerminalCommand;
+    let bytes = {
+        let conn_guard = db.conn.lock().map_err(|_| "[STATE] LOCK_FAILED")?;
+        let conn = conn_guard.as_ref().ok_or("[STATE] DATABASE_NOT_INITIALIZED")?;
+        saved_password_bytes(conn, server_id)?
+    };
+    let tx = ssh.terminal_txs.lock().await.get(&terminal_id).cloned()
+        .ok_or("That terminal isn't open")?;
+    tx.send(TerminalCommand::Data(bytes))
+        .await
+        .map_err(|_| "That terminal isn't open".to_string())?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod saved_password_tests {
+    use super::*;
+
+    fn conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE credentials(id INTEGER PRIMARY KEY, password TEXT);
+             CREATE TABLE servers(id INTEGER PRIMARY KEY, auth_type TEXT, password TEXT, credential_id INTEGER);
+             INSERT INTO credentials(id, password) VALUES (1, 'login-secret'), (2, '');
+             INSERT INTO servers(id, auth_type, password, credential_id) VALUES
+               (1, 'custom_pass', 'own-secret', NULL),
+               (2, 'vault', NULL, 1),
+               (3, 'vault', 'leftover', 1),
+               (4, 'custom_key', NULL, NULL),
+               (5, 'custom_pass', '', NULL),
+               (6, 'vault', NULL, 2),
+               (8, 'custom_pass', 'own', 1),
+               (10, 'custom_key', NULL, 1),
+               (12, NULL, NULL, 1);",
+        )
+        .unwrap();
+        for (id, password) in [(7, "bad\nline"), (9, "bad\0line"), (11, "bad\rline")] {
+            conn.execute(
+                "INSERT INTO servers(id, auth_type, password, credential_id) VALUES (?1, 'custom_pass', ?2, NULL)",
+                rusqlite::params![id, password],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn types_this_servers_password_without_enter_and_refuses_the_rest() {
+        let conn = conn();
+        assert_eq!(saved_password_bytes(&conn, 1).unwrap(), b"own-secret");
+        assert_eq!(saved_password_bytes(&conn, 2).unwrap(), b"login-secret");
+        // A server that uses a saved login types that login, not a leftover
+        // password on the server row. Unset auth_type is vault.
+        assert_eq!(saved_password_bytes(&conn, 3).unwrap(), b"login-secret");
+        assert_eq!(saved_password_bytes(&conn, 12).unwrap(), b"login-secret");
+        // Its own password wins when the server does not use a saved login.
+        assert_eq!(saved_password_bytes(&conn, 8).unwrap(), b"own");
+        let typed = saved_password_bytes(&conn, 1).unwrap();
+        assert!(!typed.contains(&b'\n') && !typed.contains(&b'\r') && !typed.contains(&0));
+
+        for id in [0, 4, 5, 6, 10, 99] {
+            let err = saved_password_bytes(&conn, id).unwrap_err();
+            assert!(err.contains("no saved password"), "{id}: {err}");
+        }
+        for id in [7, 9, 11] {
+            let err = saved_password_bytes(&conn, id).unwrap_err();
+            assert!(err.contains("isn't typed"), "{id}: {err}");
+            assert!(!err.contains("bad"), "{id}: password leaked: {err}");
+        }
+    }
+}
+
 #[tauri::command]
 async fn resize_terminal(state: tauri::State<'_, SshState>, terminal_id: String, cols: u32, rows: u32) -> Result<(), String> {
     if let Some(tx) = state.resize_txs.lock().await.get(&terminal_id) {
@@ -20762,7 +20913,7 @@ pub fn run() {
             initiate_rdp, rdp_open_again,
             start_tunnel, stop_tunnel, list_tunnels, restart_session_tunnels, persist_session_tunnels,
             list_tunnel_rules, remove_tunnel_rule, rename_tunnel_rule,
-            open_terminal, local_shell, write_terminal_data, resize_terminal, close_terminal,
+            open_terminal, local_shell, write_terminal_data, type_saved_password, resize_terminal, close_terminal,
             ssh_info_probe_section, ssh_systemctl_action, ssh_kill_process,
             ssh_iptables_chain, ssh_nft_chain,
             docker::ssh_docker_container_action,

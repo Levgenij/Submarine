@@ -5,6 +5,7 @@ import { SearchAddon, ISearchOptions } from '@xterm/addon-search';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import '@xterm/xterm/css/xterm.css';
+import { KeyRound } from 'lucide-react';
 import { useIsNarrow } from '../hooks/useViewport';
 import { MobileKeyBar, ModifiersState, ModKey, SpecialKey } from './MobileKeyBar';
 import { useBroadcast } from '../ui/broadcast';
@@ -497,6 +498,36 @@ const TerminalView = ({
     toastTimerRef.current = window.setTimeout(() => setToast(null), 1400);
   };
 
+  // At a sudo or su prompt, offer to type this server's saved password.
+  // Nothing is typed until the button is pressed. The backend types it, so
+  // the password never arrives here. A quick connect (serverId 0) and a
+  // container exec have no saved password, so the button is not shown.
+  // The button does not take keyboard focus.
+  const [atPasswordPrompt, setAtPasswordPrompt] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const atPasswordPromptRef = useRef(false);
+  const typingPasswordRef = useRef(false);
+  const showPasswordButtonRef = useRef<(on: boolean) => void>(() => {});
+  showPasswordButtonRef.current = (on: boolean) => {
+    if (atPasswordPromptRef.current === on) return;
+    atPasswordPromptRef.current = on;
+    setAtPasswordPrompt(on);
+    if (!on) setPasswordError(null);
+  };
+  const savedPasswordAvailable = serverId > 0 && !containerExec;
+  const typeSavedPassword = () => {
+    if (!savedPasswordAvailable || disabledRef.current || typingPasswordRef.current) return;
+    typingPasswordRef.current = true;
+    setPasswordError(null);
+    void invoke('type_saved_password', { terminalId, serverId })
+      .then(() => showPasswordButtonRef.current(false))
+      .catch((e) => setPasswordError(String(e)))
+      .finally(() => {
+        typingPasswordRef.current = false;
+        xtermRef.current?.focus();
+      });
+  };
+
   useEffect(() => {
     if (!terminalRef.current) return;
 
@@ -606,6 +637,7 @@ const TerminalView = ({
     // forwarded verbatim because we can't sensibly "Ctrl" a phrase.
     const handleData = (data: string) => {
       if (disabledRef.current) return;
+      showPasswordButtonRef.current(false);
       // A paste: our right-click path, or xterm's own keyboard paste, which
       // starts with the bracketed-paste marker when the remote program asked
       // for one. Never run through the armed modifiers or into history.
@@ -941,6 +973,7 @@ const TerminalView = ({
         const txt = new TextDecoder().decode(data);
         const combined = recentOutputRef.current + txt;
         recentOutputRef.current = combined.length > 512 ? combined.slice(-512) : combined;
+        showPasswordButtonRef.current(looksLikePasswordPrompt(recentOutputRef.current));
       } catch { /* decode hiccup on a split multibyte chunk — ignore */ }
     });
 
@@ -1104,6 +1137,31 @@ const TerminalView = ({
         ref={terminalRef}
         className="flex-1 min-h-0 w-full overflow-hidden select-text"
       />
+      {savedPasswordAvailable && atPasswordPrompt && !disabled && (
+        <div className="absolute top-2 left-2 z-20 flex flex-col items-start gap-1 max-w-[calc(100%-1rem)] pointer-events-none">
+          <button
+            type="button"
+            tabIndex={-1}
+            // mousedown would move focus onto the button; cancel it so the
+            // terminal keeps the keyboard and Enter still goes to the prompt.
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={typeSavedPassword}
+            title="Type this server's saved password. You press Enter."
+            className="pointer-events-auto flex items-center gap-1.5 rounded-md bg-zinc-800 border border-white/10 px-2 py-1 shadow-lg text-[11px] text-zinc-200 hover:text-white hover:border-primary/40"
+          >
+            <KeyRound size={12} className="text-primary shrink-0" />
+            <span className="whitespace-nowrap">Saved password</span>
+          </button>
+          {passwordError && (
+            <div
+              onMouseDown={(e) => e.preventDefault()}
+              className="pointer-events-auto rounded-md bg-zinc-900 border border-white/10 px-2 py-1.5 text-[11px] text-zinc-300 shadow-lg leading-snug"
+            >
+              {passwordError}
+            </div>
+          )}
+        </div>
+      )}
       {/* Search chip — floats above xterm; positioned inside the outer
           flex column so it never displaces the terminal grid. Absolute
           top-2 right-2 keeps it clear of the disconnected badge (which

@@ -2286,6 +2286,7 @@ function DesktopApp() {
                                   attachOnly
                                   disabled={false}
                                   isActive={true}
+                                  containerExec={term?.container ? { container: term.container.name, useSudo: term.container.useSudo } : undefined}
                                   serverId={sess.serverId}
                                   serverName={sess.serverName}
                                 />
