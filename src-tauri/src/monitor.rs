@@ -195,7 +195,7 @@ pub struct NodeAuth {
     pub proxy_host: Option<String>,
     pub proxy_port: Option<u16>,
     /// The server's own jump host, when one is saved. It wins over a
-    /// ProxyCommand, the same way a terminal connection does.
+    /// ProxyCommand or ProxyJump, the same way a terminal connection does.
     pub jump_host_id: Option<i32>,
 }
 
@@ -814,10 +814,11 @@ fn classify_auth(auth: &NodeAuth) -> Result<(Option<(String, Option<String>)>, O
 
 /// The node as `~/.ssh/config` resolves it: an alias's HostName and Port, and
 /// its User when none is saved. The monitor takes nothing else from the config
-/// (no ProxyCommand, key files or agent): in the background it never runs
-/// commands or asks for anything, and it still trusts only a host key already
-/// on file. A node the config sends through a ProxyCommand, and that has no
-/// jump host or proxy of its own, isn't checked at all: `Err` says why.
+/// (no ProxyCommand, ProxyJump, key files or agent): in the background it never
+/// runs commands, follows a jump, or asks for anything, and it still trusts
+/// only a host key already on file. A node the config sends through a
+/// ProxyCommand or ProxyJump, and that has no jump host or proxy of its own,
+/// isn't checked at all: `Err` says why, and that is not an outage.
 async fn with_ssh_config(auth: &NodeAuth, node_name: &str) -> Result<NodeAuth, String> {
     let mut t = crate::ConfigTarget::resolve(&auth.host, auth.port, &auth.username, Some(node_name.to_string())).await;
     let own_route = if auth.jump_host_id.is_some() {
@@ -829,14 +830,17 @@ async fn with_ssh_config(auth: &NodeAuth, node_name: &str) -> Result<NodeAuth, S
             _ => None,
         }
     };
-    if matches!(t.proxy(own_route), Some(crate::ssh_config::Proxy::Command(_))) {
-        return Err(NOT_CHECKED_PROXY_COMMAND.into());
+    match t.proxy(own_route) {
+        Some(crate::ssh_config::Proxy::Command(_)) => Err(NOT_CHECKED_PROXY_COMMAND.into()),
+        Some(crate::ssh_config::Proxy::Jump(_)) => Err(NOT_CHECKED_PROXY_JUMP.into()),
+        _ => Ok(NodeAuth { host: t.host, port: t.port, username: t.user, ..auth.clone() }),
     }
-    Ok(NodeAuth { host: t.host, port: t.port, username: t.user, ..auth.clone() })
 }
 
 const NOT_CHECKED_PROXY_COMMAND: &str =
     "Not checked: ~/.ssh/config reaches this server through a ProxyCommand, which status checks don't run.";
+const NOT_CHECKED_PROXY_JUMP: &str =
+    "Not checked: ~/.ssh/config reaches this server through a ProxyJump, which status checks don't use.";
 
 /// russh client config for monitor connections. The algorithm lists and the
 /// DH group-exchange bounds come from the SAME functions as the interactive
