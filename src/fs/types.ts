@@ -58,6 +58,8 @@ export interface LinkInfo {
 export interface ListResult {
   currentPath: string;
   entries: FileEntry[];
+  /** Remote only: the server has no SFTP, so files go over shell commands. */
+  viaShell?: boolean;
 }
 
 export interface FileProvider {

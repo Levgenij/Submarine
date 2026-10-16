@@ -445,6 +445,9 @@ pub struct SshState {
     /// of the same tab (the next SFTP op re-elevates) and is dropped when the
     /// tab closes.
     pub sftp_elevation: Arc<Mutex<HashMap<String, SftpElevation>>>,
+    /// Tabs whose cached SFTP session is file access over shell commands (the
+    /// server has no SFTP, see `shell_sftp`): the pane says so.
+    pub sftp_shell: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 /// How an elevated SFTP channel is started. The sudo password (if any) lives
@@ -453,9 +456,13 @@ pub struct SshState {
 #[derive(Clone)]
 pub struct SftpElevation {
     /// Absolute path of the server's sftp-server binary (probed once).
+    /// Empty when `via_shell` is set.
     pub server_path: String,
     /// `None` = passwordless sudo (`sudo -n`).
     pub password: Option<zeroize::Zeroizing<String>>,
+    /// The SFTP subsystem itself is missing, so root file operations run as
+    /// shell commands under sudo. The sudo sftp-server opener is not used.
+    pub via_shell: bool,
 }
 
 /// Connect-time secrets the user typed when a saved node, login, or key had none.
@@ -556,6 +563,7 @@ impl SshState {
             session_generation: Arc::new(Mutex::new(HashMap::new())),
             prompted_secrets: Arc::new(Mutex::new(HashMap::new())),
             sftp_elevation: Arc::new(Mutex::new(HashMap::new())),
+            sftp_shell: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
     }
 }
