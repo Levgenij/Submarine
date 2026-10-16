@@ -549,7 +549,11 @@ const TerminalView = ({
             cols: term.cols || 80,
             rows: term.rows || 24,
             useLocalShell: readUseLocalShell(),
-          }).catch(e => {
+          }).then(() => {
+            // Its shell takes input from now on: SessionView types a server's
+            // on-connect commands once this arrives for its first terminal.
+            window.dispatchEvent(new CustomEvent('submarine-terminal-opened', { detail: terminalId }));
+          }, e => {
             term.writeln(`\x1b[31mFailed to open terminal: ${e}\x1b[0m`);
           });
         }

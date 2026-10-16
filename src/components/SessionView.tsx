@@ -808,6 +808,22 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
   const confirm = useConfirm();
   const confirmRef = useRef(confirm);
   confirmRef.current = confirm;
+  // Terminals whose shell is open (TerminalView says so). The on-connect
+  // commands wait for the first one. Typed before it was open, they were
+  // dropped: opening a terminal can take longer than the delay they had.
+  const openedTerminalsRef = useRef<Set<string>>(new Set());
+  const stopWaitingForTerminalRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    const onOpened = (e: Event) => {
+      const id = (e as CustomEvent).detail;
+      if (typeof id === 'string') openedTerminalsRef.current.add(id);
+    };
+    window.addEventListener('submarine-terminal-opened', onOpened);
+    return () => {
+      window.removeEventListener('submarine-terminal-opened', onOpened);
+      stopWaitingForTerminalRef.current?.();
+    };
+  }, []);
 
   // ---- Auto-reconnect: fixed 5s cadence, retried FOREVER -------------------
   // After a previously-good session drops we retry every 5 seconds, forever —
@@ -976,9 +992,9 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
         // Per-node on-connect commands: auto-typed ONCE into the first
         // terminal on the INITIAL connect only (the `else` gates out
         // reconnects; ranOnConnectRef gates out any duplicate success
-        // event). Delayed so the PTY is open and the shell has printed its
-        // prompt — the commands then land after it instead of racing the
-        // shell's startup and getting swallowed.
+        // event). Typed once the terminal's shell is open, and a moment
+        // after so it has printed its prompt. The commands then land after
+        // it instead of racing the shell's startup and getting swallowed.
         ranOnConnectRef.current = true;
         const cmds = session.runOnConnect
           .split(/\r?\n/)
@@ -986,10 +1002,25 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
           .filter((l: string) => l.trim().length > 0)
           .join('\n') + '\n';
         const typeThem = () => {
+          const terminalId = `${session.id}-term-0`;
           const bytes = Array.from(new TextEncoder().encode(cmds));
-          setTimeout(() => {
-            invoke('write_terminal_data', { terminalId: `${session.id}-term-0`, data: bytes }).catch(() => {});
+          const type = () => setTimeout(() => {
+            invoke('write_terminal_data', { terminalId, data: bytes }).catch(() => {});
           }, 700);
+          if (openedTerminalsRef.current.has(terminalId)) {
+            type();
+            return;
+          }
+          const onOpened = (e: Event) => {
+            if ((e as CustomEvent).detail !== terminalId) return;
+            stopWaitingForTerminalRef.current?.();
+            type();
+          };
+          window.addEventListener('submarine-terminal-opened', onOpened);
+          stopWaitingForTerminalRef.current = () => {
+            window.removeEventListener('submarine-terminal-opened', onOpened);
+            stopWaitingForTerminalRef.current = null;
+          };
         };
         if (session.runOnConnectHeld) {
           // Someone this profile is shared with set or changed these
