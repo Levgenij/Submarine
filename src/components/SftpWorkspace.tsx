@@ -2,9 +2,10 @@ import { useEffect, useMemo, useRef, useState, forwardRef, useImperativeHandle }
 import { createPortal } from "react-dom";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { File as FileIcon, Folder, FolderUp, Shield, ShieldAlert } from "lucide-react";
+import { File as FileIcon, Folder, FolderUp, GitCompare, Shield, ShieldAlert } from "lucide-react";
 import { useTextPrompt } from "../ui/confirm";
 import FilePanel, { ActiveDrag, FilePanelHandle } from "./FilePanel";
+import type { FileEntry } from "../fs/types";
 import MirrorsPanel from "./MirrorsPanel";
 import TransfersBar, { Transfer } from "./TransfersBar";
 import { createLocalProvider } from "../fs/localProvider";
@@ -156,6 +157,13 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
 
   const localRef = useRef<FilePanelHandle | null>(null);
   const remoteRef = useRef<FilePanelHandle | null>(null);
+
+  // Compare: each pane's listing, so the other can mark what differs by name.
+  // The other listing is passed down only while Compare is on.
+  const [compareOn, setCompareOn] = useState(false);
+  const [hideSame, setHideSame] = useState(false);
+  const [localEntries, setLocalEntries] = useState<FileEntry[]>([]);
+  const [remoteEntries, setRemoteEntries] = useState<FileEntry[]>([]);
 
   // Elevated = SFTP runs as root through sudo (passwordless or with a password
   // kept in backend memory for this tab only). A direct root login is flagged
@@ -507,6 +515,23 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
         </div>
         <div className="flex-1" />
         {view === "files" && (
+          <button
+            type="button"
+            onClick={() => setCompareOn((v) => !v)}
+            aria-pressed={compareOn}
+            aria-label="Compare"
+            title={compareOn ? "Stop comparing" : "Compare: mark what differs between the two folders"}
+            className={`self-center shrink-0 h-7 px-2.5 rounded-md border text-[12.5px] font-semibold flex items-center gap-1.5 transition-colors ${
+              compareOn
+                ? "border-primary/60 bg-primary/10 text-primary"
+                : "border-transparent text-zinc-300 hover:text-white hover:bg-white/5"
+            }`}
+          >
+            <GitCompare size={14} />
+            <span>Compare</span>
+          </button>
+        )}
+        {view === "files" && (
           <div role="radiogroup" aria-label="File panels" onKeyDown={(e) => onRovingKeyDown(e)} className="self-center shrink-0 flex items-center gap-0.5 p-0.5 rounded-lg border border-white/10 bg-black/20">
             {([
               { id: "local", label: "Local", hint: "Local files at full height" },
@@ -546,10 +571,29 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
           Both FilePanels are ALWAYS mounted (one is just CSS-hidden in
           tabs mode) so cd state, scroll position, and selection survive a
           tab toggle. */}
-      <div className={`${view === "files" ? `flex-1 flex min-h-0 ${shownLayout === "side" ? "flex-row" : "flex-col"}` : "hidden"}`}>
+      <div className={view === "files" ? "flex-1 flex flex-col min-h-0" : "hidden"}>
+        {compareOn && (
+          <div className="shrink-0 flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1.5 border-b border-white/5 bg-black/20 text-[10.5px] text-zinc-400">
+            <span className="text-zinc-500">Each folder against the other, by name, size and time:</span>
+            <span className="flex items-center gap-1"><span className="w-1 h-3 rounded-sm bg-amber-400" /> only here</span>
+            <span className="flex items-center gap-1"><span className="w-1 h-3 rounded-sm bg-rose-400" /> another size or kind</span>
+            <span className="flex items-center gap-1"><span className="w-1 h-3 rounded-sm bg-emerald-400" /> newer</span>
+            <span className="flex items-center gap-1"><span className="w-1 h-3 rounded-sm bg-zinc-500" /> older</span>
+            <label className="ml-auto flex items-center gap-1.5 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={hideSame}
+                onChange={(e) => setHideSame(e.target.checked)}
+                className="accent-[var(--primary-hex)]"
+              />
+              Hide files that are the same
+            </label>
+          </div>
+        )}
         {/* Both panels stay mounted. Split stacks them; side puts them in a
             row. Tabs hides the inactive one with CSS so its directory and
             selection survive a side swap. */}
+        <div className={`flex-1 min-h-0 flex ${shownLayout === "side" ? "flex-row" : "flex-col"}`}>
         <div className={
           shownLayout === "split"
             ? "flex-1 min-h-0 border-b border-white/10"
@@ -570,7 +614,11 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
             initialPath={savedDirsRef.current.local}
             onPathChange={(p) => saveDir("local", p)}
             getOppositeDir={() => remoteRef.current?.currentDir()}
-            bookmarksKey={bookmarksKey("local")}          />
+            bookmarksKey={bookmarksKey("local")}
+            onEntriesChange={setLocalEntries}
+            compareWith={compareOn ? remoteEntries : null}
+            hideSame={hideSame}
+          />
         </div>
         <div className={
           shownLayout === "split"
@@ -593,7 +641,11 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
             bookmarksKey={bookmarksKey("remote")}
             headerExtra={elevationControl}
             rootMode={elevation.elevated || rootByLogin}
+            onEntriesChange={setRemoteEntries}
+            compareWith={compareOn ? localEntries : null}
+            hideSame={hideSame}
           />
+        </div>
         </div>
       </div>
 
