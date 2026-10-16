@@ -473,8 +473,10 @@ function SshConfigSetting({ settings, setSettings }: any) {
           <p className="text-[12px] text-zinc-400 leading-relaxed mt-1">
             Connect the way the OpenSSH client would: a server whose address is an alias in
             ~/.ssh/config connects to its HostName and Port, takes its User when no username is
-            saved, and uses the ssh-agent IdentityAgent names. Host blocks are matched against a
-            server's address and its name; Include and Match are followed. The file is only read,
+            saved, uses the ssh-agent IdentityAgent names, and goes through its ProxyCommand (such
+            as cloudflared or tsh) unless the server has a jump host or proxy of its own. Host
+            blocks are matched against a server's address and its name; Include and Match are
+            followed. The file is only read,
             and nothing from it is synced. Turn off to use only what's saved for each server.
           </p>
         </div>
