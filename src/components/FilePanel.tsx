@@ -195,6 +195,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   onEntriesChange,
 }, ref) => {
   const [currentPath, setCurrentPath] = useState("");
+  // The server has no SFTP: the remote pane works over shell commands.
+  const [viaShell, setViaShell] = useState(false);
   // Last five distinct directories visited in this panel, MRU first. Lives
   // in component state (cleared per session) — persistence didn't seem
   // worth the complexity given users usually want recents from this work
@@ -534,6 +536,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             : result.entries;
           const gen = ++listGenRef.current;
           setEntries(listed);
+          setViaShell(!!result.viaShell);
           setCurrentPath(result.currentPath);
           setTempInput(result.currentPath);
           const via = linkEntryRef.current;
@@ -2217,6 +2220,15 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         <span className="text-[10px] font-black uppercase tracking-widest text-zinc-300 px-1.5 shrink-0">
           {provider.label}
         </span>
+        {viaShell && (
+          <span
+            title={"This server has no SFTP, so files go over shell commands. Everything works the same, " +
+              "just slower. On OpenWrt, `opkg install openssh-sftp-server` adds SFTP."}
+            className="text-[9px] font-bold uppercase tracking-wider text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded px-1 shrink-0 cursor-help"
+          >
+            Shell
+          </span>
+        )}
         {headerExtra}
         <div className="relative flex flex-1 flex-wrap items-center gap-1.5 min-w-[min(100%,9rem)] max-w-full">
           <div className="h-5 w-px bg-white/10 shrink-0" />
