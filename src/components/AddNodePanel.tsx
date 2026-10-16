@@ -6,6 +6,7 @@ import PasswordField from "./PasswordField";
 import { useConfirm, useTextPrompt } from "../ui/confirm";
 import { useSlideOverFocus } from "../ui/slideOverFocus";
 import { folderTree } from "../util/folderTree";
+import { DEFAULT_RDP_OPTIONS, RDP_WINDOW_SIZES, type RdpOptions } from "../util/rdpOptions";
 
 // Compact "2h ago" style relative time for the attribution line.
 function relTime(d: Date): string {
@@ -46,6 +47,17 @@ type ImportedSshKey = {
 
 const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credentials, sshKeys, refreshSshKeys, folders, refreshFolders, refreshServers, servers, isEditMode, formError, isMobile }: any) => {
   const [isCreatingFolder, setIsCreatingFolder] = useState(false);
+  // An RDP server has a host, port, user and maybe an SSH server to go
+  // through; the SSH-only parts of the form are hidden for it.
+  const isRdp = newNode.protocol === "rdp";
+  const setProtocol = (protocol: "ssh" | "rdp") => {
+    if (protocol === newNode.protocol) return;
+    const port = protocol === "rdp" && (!newNode.port || newNode.port === 22) ? 3389
+      : protocol === "ssh" && newNode.port === 3389 ? 22
+      : newNode.port;
+    const authType = protocol === "rdp" && newNode.authType === "custom_key" ? "custom_pass" : newNode.authType;
+    setNewNode({ ...newNode, protocol, port, authType });
+  };
   const [newFolderName, setNewFolderName] = useState("");
   // Set while the native key picker is open so the Browse button can't be
   // fired twice — a second dialog would sit behind the first with no way to
@@ -415,7 +427,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                 PuTTY / MobaXterm / JSON" source that doesn't need a local
                 ~/.ssh/config. The SSH-config tab still errors gracefully
                 there — the user just picks the paste tab. */}
-            {!isEditMode && (
+            {!isEditMode && !isRdp && (
               <button
                 onClick={openImportModal}
                 title="Import from ~/.ssh/config"
@@ -437,6 +449,29 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
           {formError && <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-500 text-[12px] font-bold">{formError}</div>}
 
           <div className="grid grid-cols-1 gap-4">
+            {/* SSH or RDP. An RDP server opens in this computer's RDP app,
+                directly or through an SSH server. */}
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-bold text-zinc-400 ml-1">Type</label>
+              <div role="radiogroup" aria-label="Server type" className="grid grid-cols-2 gap-1 p-1 bg-[#1a1a1e] rounded-lg border border-white/10">
+                {([["ssh", "SSH"], ["rdp", "RDP (Remote Desktop)"]] as const).map(([value, label]) => {
+                  const on = (value === "rdp") === isRdp;
+                  return (
+                    <button
+                      key={value}
+                      type="button"
+                      role="radio"
+                      aria-checked={on}
+                      onClick={() => setProtocol(value)}
+                      className={`h-7 rounded-md text-[12px] font-bold transition-all ${on ? "bg-primary text-black" : "text-zinc-400 hover:text-white hover:bg-white/5"}`}
+                    >
+                      {label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             <div className="space-y-1.5">
               <label className="text-[11px] font-bold text-zinc-400 ml-1">Name</label>
               <input type="text" className="w-full h-9 bg-[#1a1a1e] rounded-lg px-3 text-[12px] text-white border border-white/10 outline-none focus:border-primary/50 focus:bg-[#232328] transition-all shadow-inner" placeholder="e.g. Work server" value={newNode.name} onChange={e => setNewNode({ ...newNode, name: e.target.value })} />
@@ -512,15 +547,15 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
 
           <div className="pt-5 border-t border-white/5 space-y-4">
             <div className="flex justify-between items-center">
-              <label className="text-[11px] font-bold text-zinc-400">How to log in</label>
+              <label className="text-[11px] font-bold text-zinc-400">{isRdp ? "Who logs in" : "How to log in"}</label>
               <select
                 className="bg-transparent text-[12px] font-bold text-primary outline-none cursor-pointer"
                 value={newNode.authType}
                 onChange={(e) => setNewNode({ ...newNode, authType: e.target.value })}
               >
                 <option value="vault" className="bg-[#121215] text-primary">Use a saved login</option>
-                <option value="custom_pass" className="bg-[#121215] text-primary">Type a password</option>
-                <option value="custom_key" className="bg-[#121215] text-primary">Use an SSH key</option>
+                <option value="custom_pass" className="bg-[#121215] text-primary">{isRdp ? "Type a user name" : "Type a password"}</option>
+                {!isRdp && <option value="custom_key" className="bg-[#121215] text-primary">Use an SSH key</option>}
               </select>
             </div>
 
@@ -547,7 +582,15 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
               );
             })()}
 
-            {newNode.authType === 'custom_pass' && (
+            {newNode.authType === 'custom_pass' && isRdp && (
+              <div className="space-y-1.5 animate-in fade-in">
+                <label className="text-[11px] font-bold text-zinc-400 ml-1">Username</label>
+                <input type="text" placeholder="Asked by the RDP app" value={newNode.username || ""} onChange={e => setNewNode({ ...newNode, username: e.target.value })} autoCapitalize="none" autoCorrect="off" spellCheck={false} className="w-full h-9 bg-[#1a1a1e] rounded-lg px-3 text-[12px] text-white border border-white/10 outline-none focus:border-primary/50 transition-all shadow-inner" />
+                <p className="text-[10px] text-zinc-500 ml-1">{"DOMAIN\\user works too. The RDP app asks for the password."}</p>
+              </div>
+            )}
+
+            {newNode.authType === 'custom_pass' && !isRdp && (
               <div className="space-y-3 animate-in fade-in">
                 <div className="space-y-1.5">
                   <label className="text-[11px] font-bold text-zinc-400 ml-1">Username</label>
@@ -566,7 +609,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
               </div>
             )}
 
-            {newNode.authType === 'custom_key' && (
+            {newNode.authType === 'custom_key' && !isRdp && (
               <div className="space-y-3 animate-in fade-in">
                 <div className="space-y-1.5">
                   <label className="text-[11px] font-bold text-zinc-400 ml-1">Username</label>
@@ -635,6 +678,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
           </div>
 
           <div className="pt-5 border-t border-white/5 space-y-4">
+            {!isRdp && (<>
             <div className="flex justify-between items-center">
               <label className="text-[11px] font-bold text-zinc-400">Proxy</label>
               <select className="bg-transparent text-[12px] font-bold text-zinc-300 outline-none cursor-pointer" value={newNode.proxyType} onChange={e => setNewNode({ ...newNode, proxyType: e.target.value })}>
@@ -661,6 +705,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                 />
               </div>
             )}
+            </>)}
 
             {/* ProxyJump — bounce through another saved node to reach this one
                 (like `ssh -J bastion target`). Distinct from the SOCKS/HTTP
@@ -668,15 +713,15 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                 that opens a direct-tcpip channel to the target. Self is filtered
                 out so a node can't jump through itself. */}
             <div className="flex justify-between items-center gap-3">
-              <label className="text-[11px] font-bold text-zinc-400 shrink-0">Jump via</label>
+              <label className="text-[11px] font-bold text-zinc-400 shrink-0">{isRdp ? "Through SSH server" : "Jump via"}</label>
               <select
                 className="flex-1 min-w-0 h-9 bg-[#1a1a1e] rounded-lg px-3 text-[12px] text-zinc-300 border border-white/10 outline-none focus:border-primary/50 focus:bg-[#232328] transition-all shadow-inner"
                 value={newNode.jumpHostId || ""}
                 onChange={e => setNewNode({ ...newNode, jumpHostId: e.target.value })}
               >
-                <option value="" className="bg-[#1a1a1e] text-zinc-500">Direct — no jump host</option>
+                <option value="" className="bg-[#1a1a1e] text-zinc-500">{isRdp ? "Direct - no SSH server" : "Direct — no jump host"}</option>
                 {(servers || [])
-                  .filter((s: any) => s.id !== newNode.id)
+                  .filter((s: any) => s.id !== newNode.id && s.protocol !== "rdp")
                   .map((s: any) => (
                     <option key={s.id} value={s.id.toString()} className="bg-[#1a1a1e] text-zinc-300">
                       {s.name} ({s.host})
@@ -685,6 +730,72 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
               </select>
             </div>
 
+            {/* RDP options: this device's own (util/rdpOptions), not synced. */}
+            {isRdp && (() => {
+              const o: RdpOptions = newNode.rdpOptions || DEFAULT_RDP_OPTIONS;
+              const set = (patch: Partial<RdpOptions>) => setNewNode({ ...newNode, rdpOptions: { ...o, ...patch } });
+              const size = `${o.width}x${o.height}`;
+              const known = RDP_WINDOW_SIZES.some(([w, h]) => w === o.width && h === o.height);
+              return (
+                <div className="space-y-3 pt-1">
+                  <div className="flex justify-between items-center gap-3">
+                    <label className="text-[11px] font-bold text-zinc-400 shrink-0">Window</label>
+                    <select
+                      aria-label="RDP window"
+                      className="flex-1 min-w-0 h-9 bg-[#1a1a1e] rounded-lg px-3 text-[12px] text-zinc-300 border border-white/10 outline-none focus:border-primary/50 focus:bg-[#232328] transition-all shadow-inner"
+                      value={o.fullScreen ? "full" : size}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v === "full") return set({ fullScreen: true });
+                        const [width, height] = v.split("x").map(Number);
+                        set({ fullScreen: false, width, height });
+                      }}
+                    >
+                      <option value="full" className="bg-[#1a1a1e]">Full screen</option>
+                      {RDP_WINDOW_SIZES.map(([w, h]) => (
+                        <option key={`${w}x${h}`} value={`${w}x${h}`} className="bg-[#1a1a1e]">{w} × {h}</option>
+                      ))}
+                      {!o.fullScreen && !known && <option value={size} className="bg-[#1a1a1e]">{o.width} × {o.height}</option>}
+                    </select>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-[11px] font-bold text-zinc-300">Share the clipboard</div>
+                      <div className="text-[10.5px] text-zinc-500 leading-snug">Copy and paste between this computer and the server.</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => set({ clipboard: !o.clipboard })}
+                      role="switch"
+                      aria-label="Share the clipboard"
+                      aria-checked={o.clipboard}
+                      className={`relative shrink-0 w-11 h-6 rounded-full transition-colors ${o.clipboard ? "bg-primary" : "bg-white/10"}`}
+                    >
+                      <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-zinc-100 rounded-full shadow transition-transform ${o.clipboard ? "translate-x-5" : "translate-x-0"}`} />
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-[11px] font-bold text-zinc-300">Share this computer's files</div>
+                      <div className="text-[10.5px] text-zinc-500 leading-snug">The server can read and change them (with Remmina: your home folder).</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => set({ drives: !o.drives })}
+                      role="switch"
+                      aria-label="Share this computer's files"
+                      aria-checked={o.drives}
+                      className={`relative shrink-0 w-11 h-6 rounded-full transition-colors ${o.drives ? "bg-primary" : "bg-white/10"}`}
+                    >
+                      <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-zinc-100 rounded-full shadow transition-transform ${o.drives ? "translate-x-5" : "translate-x-0"}`} />
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-zinc-500 ml-1">Window and sharing are kept on this device only, not synced.</p>
+                </div>
+              );
+            })()}
+
+            {!isRdp && (<>
             <div className="space-y-2.5">
               <div className="flex justify-between items-center">
                 <span className="text-[11px] font-bold text-zinc-400">Port forwarding</span>
@@ -893,6 +1004,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                 />
               </button>
             </div>
+            </>)}
 
             {/* Per-node notes — free-form, plain text. Lives on the server
                 row (servers.notes column) and never crosses the network. The
@@ -932,6 +1044,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
             {/* On-connect commands — auto-typed into the FIRST terminal the
                 first time you connect to this server (not on reconnects, not
                 on extra shells you open later). One command per line. */}
+            {!isRdp && (
             <div className="space-y-1.5 pt-1">
               <label className="text-[11px] font-bold text-zinc-400 ml-1 flex items-center gap-2">
                 <span>Run on connect</span>
@@ -948,6 +1061,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                 className="w-full bg-[#1a1a1e] rounded-lg p-3 text-[12px] text-white border border-white/10 outline-none focus:border-primary/50 focus:bg-[#232328] transition-all shadow-inner font-mono leading-relaxed resize-y"
               />
             </div>
+            )}
           </div>
         </div>
 

@@ -630,7 +630,7 @@ pub async fn stop_all_for_session(tunnels_map: &TunnelMap, session_id: &str) {
 ///     turns that dead peer into a socket error within ~a minute, so the pump
 ///     returns and the permit is freed. A genuinely idle-but-alive connection
 ///     is untouched: its keepalive probes get ACKed.
-fn apply_tunnel_sockopts(sock: &tokio::net::TcpStream) {
+pub(crate) fn apply_tunnel_sockopts(sock: &tokio::net::TcpStream) {
     use socket2::{SockRef, TcpKeepalive};
     let _ = sock.set_nodelay(true);
     let ka = TcpKeepalive::new()
@@ -919,7 +919,7 @@ where
 /// nobody reads. Ending drops both ends: the local socket closes and the
 /// channel is closed, so the server stops sending. The idle timeout itself
 /// stays inside `pump_bidirectional`.
-async fn pump_channel<A>(local: &mut A, channel: &mut DrainedChannelStream)
+pub(crate) async fn pump_channel<A>(local: &mut A, channel: &mut DrainedChannelStream)
 where
     A: AsyncRead + AsyncWrite + Unpin,
 {
