@@ -475,10 +475,12 @@ function SshConfigSetting({ settings, setSettings }: any) {
             ~/.ssh/config connects to its HostName and Port, takes its User when no username is
             saved, uses the ssh-agent IdentityAgent names, and goes through its ProxyCommand (such
             as cloudflared or tsh) or ProxyJump unless the server has a jump host or proxy of its
-            own. Host
+            own. Its IdentityFile keys and CertificateFile certificates log in when a server has
+            no saved password or key, and the host keys and certificate authorities in your
+            known_hosts are trusted without the first-time prompt. Host
             blocks are matched against a server's address and its name; Include and Match are
-            followed. The file is only read,
-            and nothing from it is synced. Turn off to use only what's saved for each server.
+            followed. These files are only read,
+            and nothing from them is synced. Turn off to use only what's saved for each server.
           </p>
         </div>
         <PrefToggle

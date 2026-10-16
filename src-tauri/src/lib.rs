@@ -31,6 +31,7 @@ mod webkit_sandbox;
 mod approvals;
 mod agent_auth;
 mod ssh_config;
+mod known_hosts;
 mod proxy_command;
 #[cfg(target_os = "android")]
 mod android_bridge;
@@ -5815,7 +5816,8 @@ fn passphrase_protected_key(normalized: &str) -> bool {
 mod key_format_tests {
     use super::{
         decode_private_key, decode_ssh_private_key, guard_key_kdf_cost, pem_private_key_header,
-        validate_ssh_private_key, server_display_name, AgentSlot, ConfigTarget, KeyDecodeError, MAX_KEY_KDF_ROUNDS,
+        validate_ssh_private_key, server_display_name, AgentSlot, ConfigIdentities, ConfigTarget, KeyDecodeError,
+        MAX_KEY_KDF_ROUNDS,
     };
     use ssh_key::{Algorithm, EcdsaCurve, PrivateKey};
 
@@ -5974,10 +5976,29 @@ mod key_format_tests {
     // looked-and-none, so agent_available never contacts an agent.
     #[test]
     fn with_the_agent_setting_off_no_agent_is_looked_for() {
-        let off = AgentSlot::new(false, None);
+        let off = AgentSlot::new(false, None, ConfigIdentities::default());
         let off = off.try_lock().unwrap();
         assert!(off.looked && off.agent.is_none());
-        assert!(!AgentSlot::new(true, None).try_lock().unwrap().looked);
+        assert!(!AgentSlot::new(true, None, ConfigIdentities::default()).try_lock().unwrap().looked);
+    }
+
+    #[test]
+    fn identities_only_leaves_the_agent_out_even_when_the_switch_is_on() {
+        let only = ConfigIdentities { keys: vec!["/k".into()], certs: Vec::new(), only: true };
+        let held = AgentSlot::new(true, None, only);
+        let slot = held.try_lock().unwrap();
+        assert!(slot.looked && slot.agent.is_none());
+    }
+
+    #[test]
+    fn user_known_hosts_file_none_disables_the_default_files() {
+        let mut target = ConfigTarget::apply(
+            "h",
+            22,
+            "u",
+            host_config(|c| c.user_known_hosts_files = Some(vec!["none".into()])),
+        );
+        assert_eq!(target.known_hosts_files("u"), Some(Vec::<String>::new()));
     }
 
     fn host_config(f: impl FnOnce(&mut crate::ssh_config::HostConfig)) -> Option<crate::ssh_config::HostConfig> {
@@ -7908,15 +7929,41 @@ struct AgentSlot {
     /// What `IdentityAgent` in `~/.ssh/config` says for this host, if it
     /// applies (see `ConfigTarget`).
     identity_agent: Option<ssh_config::IdentityAgent>,
+    /// The key files `IdentityFile` / `CertificateFile` name for this host,
+    /// offered before an agent's keys (see `try_config_identities`).
+    identities: ConfigIdentities,
+    identities_tried: bool,
 }
 
 impl AgentSlot {
     /// `use_agent` is the device's "Use keys from an ssh-agent" setting. Off,
     /// the slot starts as looked-and-none, so no agent is ever contacted, even
-    /// when ~/.ssh/config names one.
-    fn new(use_agent: bool, identity_agent: Option<ssh_config::IdentityAgent>) -> tokio::sync::Mutex<Self> {
-        tokio::sync::Mutex::new(Self { looked: !use_agent, agent: None, identity_agent })
+    /// when ~/.ssh/config names one. With `IdentitiesOnly yes` only the
+    /// config's key files are used.
+    fn new(
+        use_agent: bool,
+        identity_agent: Option<ssh_config::IdentityAgent>,
+        identities: ConfigIdentities,
+    ) -> tokio::sync::Mutex<Self> {
+        let contact_agent = use_agent && !identities.only;
+        tokio::sync::Mutex::new(Self {
+            looked: !contact_agent,
+            agent: None,
+            identity_agent,
+            identities,
+            identities_tried: false,
+        })
     }
+}
+
+/// The key and certificate files `~/.ssh/config` names for a host, paths
+/// expanded. Read from disk only when a login wants them.
+#[derive(Clone, Default)]
+struct ConfigIdentities {
+    keys: Vec<String>,
+    certs: Vec<String>,
+    /// `IdentitiesOnly yes`.
+    only: bool,
 }
 
 /// A node's display name. An imported node keeps its `~/.ssh/config` alias as
@@ -7983,6 +8030,53 @@ impl ConfigTarget {
     /// `IdentityAgent` for this host, resolved on this device.
     fn identity_agent(&self) -> Option<ssh_config::IdentityAgent> {
         self.config.as_ref()?.identity_agent.as_deref().map(ssh_config::resolve_identity_agent)
+    }
+
+    /// Paths from the config with their `~`, `${VAR}` and `%` tokens filled
+    /// in for logging in as `user`; one that can't be is left out, logged.
+    fn expand_paths(&mut self, values: &[String], what: &str, user: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for value in values {
+            let tokens = ssh_config::PathTokens {
+                host: &self.host,
+                original: &self.original,
+                port: self.port,
+                user: user.trim(),
+            };
+            match ssh_config::expand_path(value, &tokens) {
+                Ok(path) => out.push(path),
+                Err(why) => self.log.push(format!("~/.ssh/config: {what} {value} {why}; not used.")),
+            }
+        }
+        out
+    }
+
+    /// `IdentityFile`, `CertificateFile` and `IdentitiesOnly` for this host.
+    fn identities(&mut self, user: &str) -> ConfigIdentities {
+        let Some(c) = self.config.clone() else { return ConfigIdentities::default() };
+        let keys = self.expand_paths(&c.identity_files, "IdentityFile", user);
+        let certs = self.expand_paths(&c.certificate_files, "CertificateFile", user);
+        let only = c.identities_only == Some(true);
+        if only && !keys.is_empty() {
+            self.log.push(
+                "~/.ssh/config: IdentitiesOnly yes: only its IdentityFile keys are used, not an ssh-agent's.".into(),
+            );
+        }
+        ConfigIdentities { keys, certs, only }
+    }
+
+    /// `UserKnownHostsFile` for this host, expanded. `None` means OpenSSH's
+    /// defaults (`~/.ssh/known_hosts` and `known_hosts2`). `Some` of an empty
+    /// list (`none`, or every path failed to expand) reads nothing.
+    fn known_hosts_files(&mut self, user: &str) -> Option<Vec<String>> {
+        let files = self.config.as_ref()?.user_known_hosts_files.clone()?;
+        let files: Vec<String> = files.into_iter().filter(|f| !f.eq_ignore_ascii_case("none")).collect();
+        Some(self.expand_paths(&files, "UserKnownHostsFile", user))
+    }
+
+    /// `HostKeyAlgorithms` for this host, as written.
+    fn host_key_algorithms(&self) -> Option<String> {
+        self.config.as_ref()?.host_key_algorithms.clone()
     }
 
     /// `ProxyCommand` or `ProxyJump` for this host, unless the server has its
@@ -8099,8 +8193,8 @@ async fn proxy_command_note(watch: Option<&proxy_command::Watch>) -> String {
 
 /// Turn the device's "Use settings from ~/.ssh/config" switch on or off. The
 /// page calls this at start and whenever the switch changes; it's on until
-/// then. Off, nothing is read from the config, IdentityAgent, ProxyCommand
-/// and ProxyJump included.
+/// then. Off, the config and known_hosts are not read, IdentityAgent,
+/// ProxyCommand and ProxyJump included.
 #[tauri::command]
 fn set_use_ssh_config(enabled: bool) {
     ssh_config::set_enabled(enabled);
@@ -8136,6 +8230,19 @@ async fn try_agent_keys<H: russh::client::Handler>(
     already_offered: Option<&russh::keys::PublicKey>,
     ctx: &SecretPromptCtx<'_>,
 ) -> Result<Option<agent_auth::AgentOutcome>, russh::Error> {
+    // The key files ~/.ssh/config names for this host come first, ahead of
+    // the agent's keys. Offer::Only is the node's own saved key, checked
+    // through the agent before its passphrase is asked for.
+    if matches!(which, agent_auth::Offer::Rest) {
+        if let Some(outcome @ (agent_auth::AgentOutcome::Authenticated | agent_auth::AgentOutcome::PartialSuccess { .. })) =
+            try_config_identities(session, user, ctx).await?
+        {
+            return Ok(Some(outcome));
+        }
+    }
+    if ctx.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(None);
+    }
     if !agent_available(ctx).await {
         return Ok(None);
     }
@@ -8153,6 +8260,184 @@ async fn try_agent_keys<H: russh::client::Handler>(
             Err(e)
         }
     }
+}
+
+/// Whether this login has device keys to try before asking for a password:
+/// key files from ~/.ssh/config not tried yet, or an ssh-agent with a key.
+/// An off agent switch still counts the key files. It does not contact an agent.
+async fn device_keys_available(ctx: &SecretPromptCtx<'_>) -> bool {
+    {
+        let slot = ctx.agent.lock().await;
+        if !slot.identities_tried && !slot.identities.keys.is_empty() {
+            return true;
+        }
+    }
+    agent_available(ctx).await
+}
+
+/// A key or certificate file, or why it was skipped. Not a regular file, or
+/// larger than a private key this app will load, is skipped. So is anything
+/// that isn't a file on this computer (an agent socket, a network path).
+fn read_identity_text(path: &str) -> Result<String, String> {
+    let file = std::path::Path::new(path);
+    local_file_path(file)?;
+    let meta = std::fs::metadata(file).map_err(|e| e.kind().to_string())?;
+    if !meta.is_file() {
+        return Err("isn't a file".into());
+    }
+    if meta.len() > SSH_KEY_MAX_BYTES {
+        return Err("is too large to be a key".into());
+    }
+    std::fs::read_to_string(file).map_err(|e| e.to_string())
+}
+
+/// A certificate file, if it reads as one.
+fn read_certificate(path: &str) -> Option<russh::keys::Certificate> {
+    russh::keys::Certificate::from_openssh(read_identity_text(path).ok()?.trim()).ok()
+}
+
+/// The private key in `text` (the file `path`). An encrypted key's passphrase
+/// comes from this tab's cache or is asked for. The value stays in that cache;
+/// it is not written into the vault. `None` when the key can't be used.
+/// Cancelling the prompt sets `ctx.cancelled`.
+async fn decode_identity_file(text: &str, path: &str, ctx: &SecretPromptCtx<'_>) -> Option<russh::keys::PrivateKey> {
+    let cache_base = format!("{}|idfile|{}", ctx.base, path);
+    let mut passphrase = cache_get_secret(ctx.cache, &cache_base, SecretSlot::Passphrase).await;
+    let mut from_cache = passphrase.is_some();
+    let mut prompts = 0u32;
+    loop {
+        match decode_private_key(text, passphrase.as_ref().map(|p| p.as_str())) {
+            Ok(key) => {
+                if let Some(p) = passphrase {
+                    if !from_cache {
+                        cache_store_secret(ctx.cache, &cache_base, SecretSlot::Passphrase, p).await;
+                    }
+                }
+                return Some(key);
+            }
+            Err(KeyDecodeError::NeedsPassphrase) => {
+                if from_cache {
+                    cache_clear_secret(ctx.cache, &cache_base, SecretSlot::Passphrase).await;
+                    from_cache = false;
+                }
+                if !ctx.allow_prompt || prompts >= MAX_SECRET_PROMPTS {
+                    ctx.log(&format!("IdentityFile {path} needs its passphrase; skipped."), "info");
+                    return None;
+                }
+                let instructions = if prompts > 0 {
+                    "The passphrase didn't unlock the key. Please try again."
+                } else {
+                    ""
+                };
+                match prompt_for_secret(ctx, &format!("Passphrase for key '{path}'"), instructions, false).await {
+                    Some(typed) => {
+                        prompts += 1;
+                        passphrase = Some(typed);
+                    }
+                    None => {
+                        ctx.log("Passphrase prompt cancelled or timed out.", "error");
+                        return None;
+                    }
+                }
+            }
+            Err(KeyDecodeError::Malformed(why)) => {
+                ctx.log(&format!("IdentityFile {path} can't be used: {why}"), "info");
+                return None;
+            }
+        }
+    }
+}
+
+/// Log in with the key files `IdentityFile` names in ~/.ssh/config, each with
+/// its certificate first (from `CertificateFile`, or `<key>-cert.pub` next to
+/// it), then the key on its own. Read from disk once per login. `Ok(None)`
+/// when there are none, they were tried already, or a passphrase prompt was
+/// cancelled (that stops the attempt).
+async fn try_config_identities<H: russh::client::Handler>(
+    session: &mut russh::client::Handle<H>,
+    user: &str,
+    ctx: &SecretPromptCtx<'_>,
+) -> Result<Option<agent_auth::AgentOutcome>, russh::Error> {
+    use agent_auth::AgentOutcome;
+    let (keys, certs) = {
+        let mut slot = ctx.agent.lock().await;
+        if slot.identities_tried || slot.identities.keys.is_empty() {
+            return Ok(None);
+        }
+        slot.identities_tried = true;
+        (slot.identities.keys.clone(), slot.identities.certs.clone())
+    };
+    let named_certs: Vec<(String, russh::keys::Certificate)> = certs
+        .iter()
+        .filter_map(|p| match read_certificate(p) {
+            Some(c) => Some((p.clone(), c)),
+            None => {
+                ctx.log(&format!("CertificateFile {p} can't be read as a certificate; skipped."), "info");
+                None
+            }
+        })
+        .collect();
+    let mut outcome = AgentOutcome::NothingToOffer;
+    for path in keys {
+        let text = match read_identity_text(&path) {
+            Ok(t) => t,
+            Err(why) => {
+                ctx.log(&format!("IdentityFile {path} can't be read ({why}); skipped."), "info");
+                continue;
+            }
+        };
+        let Some(key) = decode_identity_file(&text, &path, ctx).await else {
+            if ctx.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                return Ok(None);
+            }
+            continue;
+        };
+        let public = key.public_key().clone();
+        let key = std::sync::Arc::new(key);
+        let mut with_certs: Vec<(String, russh::keys::Certificate)> = named_certs
+            .iter()
+            .filter(|(_, c)| c.public_key() == public.key_data())
+            .cloned()
+            .collect();
+        let sibling = format!("{path}-cert.pub");
+        if !with_certs.iter().any(|(p, _)| *p == sibling) {
+            if let Some(c) = read_certificate(&sibling).filter(|c| c.public_key() == public.key_data()) {
+                with_certs.push((sibling, c));
+            }
+        }
+        let mut attempts: Vec<(String, Option<russh::keys::Certificate>)> =
+            with_certs.into_iter().map(|(p, c)| (p, Some(c))).collect();
+        attempts.push((path.clone(), None));
+        for (label, cert) in attempts {
+            let result = match cert {
+                Some(cert) => {
+                    ctx.log(&format!("Trying the certificate {label} (IdentityFile in ~/.ssh/config)..."), "info");
+                    ssh_manager::authenticate_with_certificate(session, user, std::sync::Arc::clone(&key), cert).await?
+                }
+                None => {
+                    ctx.log(&format!("Trying IdentityFile {label} from ~/.ssh/config..."), "info");
+                    ssh_manager::authenticate_with_key_result(session, user, (*key).clone()).await?
+                }
+            };
+            match result {
+                russh::client::AuthResult::Success => {
+                    ctx.log(&format!("Logged in with {label}."), "success");
+                    return Ok(Some(AgentOutcome::Authenticated));
+                }
+                russh::client::AuthResult::Failure { .. } if session.is_closed() => return Err(russh::Error::Disconnect),
+                russh::client::AuthResult::Failure { remaining_methods, partial_success: true } => {
+                    return Ok(Some(AgentOutcome::PartialSuccess { remaining: remaining_methods }));
+                }
+                russh::client::AuthResult::Failure { remaining_methods, .. } => {
+                    outcome = AgentOutcome::NotAccepted;
+                    if !remaining_methods.contains(&russh::MethodKind::PublicKey) {
+                        return Ok(Some(outcome));
+                    }
+                }
+            }
+        }
+    }
+    Ok(Some(outcome))
 }
 
 /// The agent's keys not offered yet, after the node's own credentials didn't
@@ -8319,11 +8604,11 @@ async fn authenticate_password_prompting<H: russh::client::Handler>(
     let mut prompts_used: u32 = 0;
 
     if nothing_in_hand {
-        // An ssh-agent on this device may log in without asking for anything.
-        // Looking for one is local and quick, and only happens here, where the
-        // alternative is a prompt (or, on a connection that can't prompt,
-        // giving up). Without an agent this is exactly as before.
-        let agent_ready = agent_available(ctx).await;
+        // Key files from ~/.ssh/config, or an ssh-agent on this device, may
+        // log in without asking for a password. Looking is local and quick,
+        // and only happens here, where the alternative is a prompt (or, on a
+        // connection that can't prompt, giving up).
+        let agent_ready = device_keys_available(ctx).await;
         if !ctx.allow_prompt && !agent_ready {
             return Ok(false);
         }
@@ -8350,6 +8635,10 @@ async fn authenticate_password_prompting<H: russh::client::Handler>(
                 }
                 _ => {}
             }
+        }
+        // A cancelled key passphrase stops the attempt: no password prompt.
+        if ctx.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(false);
         }
         if !ctx.allow_prompt {
             return Ok(false);
@@ -9233,9 +9522,10 @@ pub(crate) fn ssh_preferred_algorithms() -> russh::Preferred {
     russh::Preferred {
         kex: Cow::Borrowed(KEX),
         key: Cow::Borrowed(KEY),
-        // Never advertise `*-cert-v01@openssh.com` host-key algorithms: there
-        // is no CA trust store, so servers must present their plain host key
-        // (TOFU via known_hosts). See ssh_manager::plain_host_key.
+        // Plain host keys only, until a connection finds a CA in known_hosts
+        // (apply_host_key_algorithms). The monitor keeps this list: it does
+        // not read key files or known_hosts files, and it does not ask for
+        // host certificates.
         host_key_certificates: Cow::Borrowed(&[]),
         cipher: Cow::Borrowed(CIPHER),
         mac: Cow::Borrowed(MAC),
@@ -9334,6 +9624,113 @@ fn build_ssh_client_config_for(
     let mut config = build_ssh_client_config();
     order_preferred_by_known_host_keys(&mut config.preferred, db, host, port)?;
     Ok(config)
+}
+
+/// The client config for one connection: `build_ssh_client_config_for`, then
+/// what known_hosts and `HostKeyAlgorithms` say. A failed read of the app's
+/// known_hosts is returned so the caller refuses before any socket opens.
+/// Host certificates are asked for only when an `@cert-authority` line can
+/// check them. `log` gets what was skipped.
+fn client_config_for_target(
+    db: &std::sync::Arc<StdMutex<Option<Connection>>>,
+    host: &str,
+    port: u16,
+    trust: Option<&known_hosts::HostTrust>,
+    host_key_algorithms: Option<&str>,
+    log: &mut Vec<String>,
+) -> Result<russh::client::Config, String> {
+    let mut config = build_ssh_client_config_for(db, host, port)?;
+    apply_host_key_algorithms(
+        &mut config.preferred,
+        trust.is_some_and(|t| t.has_cas()),
+        host_key_algorithms,
+        log,
+    );
+    Ok(config)
+}
+
+/// Host-key algorithms for a host. With a CA to check them, certificates of
+/// the usual kinds are asked for first (the server's plain key stays a
+/// fallback). `setting` is `HostKeyAlgorithms` from ~/.ssh/config: a list
+/// replaces the choice, `+list` adds, `-list` removes, `^list` puts first.
+/// Certificate names in it only count when a CA can check them.
+fn apply_host_key_algorithms(
+    preferred: &mut russh::Preferred,
+    trusts_ca: bool,
+    setting: Option<&str>,
+    log: &mut Vec<String>,
+) {
+    use russh::keys::{Algorithm, EcdsaCurve, HashAlg};
+    let mut certs: Vec<Algorithm> = if trusts_ca {
+        vec![
+            Algorithm::Ed25519,
+            Algorithm::Ecdsa { curve: EcdsaCurve::NistP256 },
+            Algorithm::Ecdsa { curve: EcdsaCurve::NistP384 },
+            Algorithm::Ecdsa { curve: EcdsaCurve::NistP521 },
+            Algorithm::Rsa { hash: Some(HashAlg::Sha512) },
+            Algorithm::Rsa { hash: Some(HashAlg::Sha256) },
+        ]
+    } else {
+        Vec::new()
+    };
+    let mut keys: Vec<Algorithm> = preferred.key.to_vec();
+    if let Some(value) = setting.map(str::trim).filter(|v| !v.is_empty()) {
+        let (mode, list) = match value.chars().next() {
+            Some(c @ ('+' | '-' | '^')) => (c, &value[c.len_utf8()..]),
+            _ => ('=', value),
+        };
+        let (mut plain, mut certified) = (Vec::new(), Vec::new());
+        for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+            match name.strip_suffix("-cert-v01@openssh.com") {
+                Some(base) => match Algorithm::new(base) {
+                    Ok(a) if trusts_ca => certified.push(a),
+                    Ok(_) => {}
+                    Err(_) => log.push(format!("~/.ssh/config: HostKeyAlgorithms {name} isn't known; skipped.")),
+                },
+                None => match Algorithm::new(name) {
+                    Ok(a) => plain.push(a),
+                    Err(_) => log.push(format!("~/.ssh/config: HostKeyAlgorithms {name} isn't known; skipped.")),
+                },
+            }
+        }
+        match mode {
+            '+' => {
+                for a in plain {
+                    if !keys.contains(&a) {
+                        keys.push(a);
+                    }
+                }
+                for a in certified {
+                    if !certs.contains(&a) {
+                        certs.push(a);
+                    }
+                }
+            }
+            '-' => {
+                keys.retain(|a| !plain.contains(a));
+                certs.retain(|a| !certified.contains(a));
+            }
+            '^' => {
+                keys.retain(|a| !plain.contains(a));
+                plain.extend(keys);
+                keys = plain;
+                certs.retain(|a| !certified.contains(a));
+                certified.extend(certs);
+                certs = certified;
+            }
+            _ => {
+                keys = plain;
+                certs = certified;
+            }
+        }
+        if keys.is_empty() && certs.is_empty() {
+            log.push(
+                "~/.ssh/config: HostKeyAlgorithms leaves no host-key algorithm this connection can check.".into(),
+            );
+        }
+    }
+    preferred.key = std::borrow::Cow::Owned(keys);
+    preferred.host_key_certificates = std::borrow::Cow::Owned(certs);
 }
 
 /// Timing caps for the connect driver's prompt-aware handshake timeout.
@@ -9521,7 +9918,9 @@ mod connect_deadline_tests {
 
 #[cfg(test)]
 mod ssh_config_tests {
-    use super::{build_ssh_client_config, prefer_known_host_keys, ssh_preferred_algorithms};
+    use super::{
+        apply_host_key_algorithms, build_ssh_client_config, prefer_known_host_keys, ssh_preferred_algorithms,
+    };
     use crate::ssh_test_server::{connect, connect_with_client, TestClient, TestServer};
     use std::borrow::Cow;
     use std::sync::Arc;
@@ -9627,6 +10026,52 @@ mod ssh_config_tests {
             ["ssh-ed25519", "ecdsa-sha2-nistp256", "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"]
         );
         assert!(p.host_key_certificates.is_empty());
+    }
+
+    #[test]
+    fn host_certificates_follow_a_ca_and_hostkeyalgorithms() {
+        let names = |algos: &std::borrow::Cow<'_, [russh::keys::Algorithm]>| {
+            algos.iter().map(|a| a.to_string()).collect::<Vec<_>>()
+        };
+        let cert_names = |algos: &std::borrow::Cow<'_, [russh::keys::Algorithm]>| {
+            algos.iter().map(|a| a.to_certificate_type()).collect::<Vec<_>>()
+        };
+        let mut log = Vec::new();
+        let mut p = ssh_preferred_algorithms();
+        apply_host_key_algorithms(&mut p, false, None, &mut log);
+        assert!(p.host_key_certificates.is_empty());
+
+        apply_host_key_algorithms(&mut p, true, None, &mut log);
+        let certs = cert_names(&p.host_key_certificates);
+        assert!(certs.iter().any(|c| c == "rsa-sha2-512-cert-v01@openssh.com"));
+        assert!(certs.iter().any(|c| c == "ssh-ed25519-cert-v01@openssh.com"));
+        assert!(!certs.iter().any(|c| c == "ssh-rsa-cert-v01@openssh.com"));
+
+        let mut p = ssh_preferred_algorithms();
+        apply_host_key_algorithms(
+            &mut p,
+            false,
+            Some("ssh-ed25519,rsa-sha2-512-cert-v01@openssh.com"),
+            &mut log,
+        );
+        assert!(p.host_key_certificates.is_empty());
+        assert_eq!(names(&p.key), vec!["ssh-ed25519".to_string()]);
+
+        let mut p = ssh_preferred_algorithms();
+        apply_host_key_algorithms(&mut p, true, Some("-ssh-ed25519"), &mut log);
+        assert!(!names(&p.key).iter().any(|n| n == "ssh-ed25519"));
+        apply_host_key_algorithms(&mut p, true, Some("+ssh-ed25519"), &mut log);
+        assert!(names(&p.key).iter().any(|n| n == "ssh-ed25519"));
+
+        let mut p = ssh_preferred_algorithms();
+        apply_host_key_algorithms(
+            &mut p,
+            true,
+            Some("^rsa-sha2-256-cert-v01@openssh.com,ssh-ed25519"),
+            &mut log,
+        );
+        assert_eq!(cert_names(&p.host_key_certificates)[0], "rsa-sha2-256-cert-v01@openssh.com");
+        assert_eq!(names(&p.key)[0], "ssh-ed25519");
     }
 
     /// Against a real (in-process) server that PREFERS zlib: the client's
@@ -9963,15 +10408,44 @@ async fn hop_channel(
         .map_err(|e| format!("could not open a channel to {host}:{port} through the jump host: {e}"))
 }
 
-/// Asks this hop for the kinds of host key already on file. A failed read
-/// refuses the hop before it connects. Another kind for the same host and
-/// port is then a changed key, the same as a normal connection.
-fn hop_client_config(
-    ctx: &HopCtx<'_>,
-    host: &str,
-    port: u16,
-) -> Result<std::sync::Arc<russh::client::Config>, String> {
-    Ok(std::sync::Arc::new(build_ssh_client_config_for(ctx.db, host, port)?))
+/// What a hop needs before its socket opens: the client config (a failed read
+/// of the app's known_hosts refuses here), the user's known_hosts trust, and
+/// the key files from ~/.ssh/config.
+struct PreparedHop {
+    config: std::sync::Arc<russh::client::Config>,
+    host_trust: Option<std::sync::Arc<known_hosts::HostTrust>>,
+    identities: ConfigIdentities,
+}
+
+/// Build `PreparedHop` before this hop opens a socket, a ProxyCommand, or a
+/// channel. A failed read of the app's known_hosts is the error.
+async fn prepare_hop(ctx: &HopCtx<'_>, target: &mut ConfigTarget) -> Result<PreparedHop, String> {
+    let user = target.user.clone();
+    let before = target.log.len();
+    let identities = target.identities(&user);
+    let known_files = target.known_hosts_files(&user);
+    let algorithms = target.host_key_algorithms();
+    for line in target.log.iter().skip(before) {
+        ctx.log(line, "info");
+    }
+    let host_trust = known_hosts::for_host(known_files, &target.host, target.port).await;
+    let mut notes = Vec::new();
+    let config = client_config_for_target(
+        ctx.db,
+        &target.host,
+        target.port,
+        host_trust.as_ref(),
+        algorithms.as_deref(),
+        &mut notes,
+    )?;
+    for line in &notes {
+        ctx.log(line, "info");
+    }
+    Ok(PreparedHop {
+        config: std::sync::Arc::new(config),
+        host_trust: host_trust.map(std::sync::Arc::new),
+        identities,
+    })
 }
 
 /// A route's hops being connected, boxed: the steps below call each other.
@@ -10034,10 +10508,11 @@ fn config_jump_chain<'a>(ctx: &'a HopCtx<'a>, spec: String, depth: usize) -> Hop
             if i == 0 {
                 chain = reach_hop(ctx, hop, route, depth + 1).await?;
             } else {
-                let config = hop_client_config(ctx, &hop.target.host, hop.target.port)?;
+                let mut hop = hop;
+                let prepared = prepare_hop(ctx, &mut hop.target).await?;
                 let via = chain.last().ok_or("ProxyJump: no previous hop")?;
                 let stream = hop_channel(via, &hop.target.host, hop.target.port).await?;
-                chain.push(login_hop(ctx, hop, HopStream::Channel(stream), None, config).await?);
+                chain.push(login_hop(ctx, hop, HopStream::Channel(stream), None, prepared).await?);
             }
         }
         Ok(chain)
@@ -10054,9 +10529,11 @@ fn reach_hop<'a>(
 ) -> HopChain<'a> {
     Box::pin(async move {
         use tokio::time::Duration;
+        let mut hop = hop;
         let (host, port) = (hop.target.host.clone(), hop.target.port);
-        // Refuse a failed known-host read before this hop opens anything.
-        let config = hop_client_config(ctx, &host, port)?;
+        // Refuse a failed known-host read before this hop opens anything:
+        // a socket, a ProxyCommand, or a channel through the previous hop.
+        let prepared = prepare_hop(ctx, &mut hop.target).await?;
         match route {
             Some(ssh_config::Proxy::Jump(spec)) => {
                 ctx.log(
@@ -10066,7 +10543,7 @@ fn reach_hop<'a>(
                 let mut chain = config_jump_chain(ctx, spec, depth).await?;
                 let via = chain.last().ok_or("ProxyJump: no hops")?;
                 let stream = hop_channel(via, &host, port).await?;
-                let handle = login_hop(ctx, hop, HopStream::Channel(stream), None, config).await?;
+                let handle = login_hop(ctx, hop, HopStream::Channel(stream), None, prepared).await?;
                 chain.push(handle);
                 Ok(chain)
             }
@@ -10081,7 +10558,7 @@ fn reach_hop<'a>(
                 let user = hop.target.user.trim().to_string();
                 let (stream, watch) =
                     start_proxy_command(ctx.app, ctx.session_id, ctx.attempt, &command, &hop.target, &user)?;
-                Ok(vec![login_hop(ctx, hop, HopStream::Command(stream), Some(watch), config).await?])
+                Ok(vec![login_hop(ctx, hop, HopStream::Command(stream), Some(watch), prepared).await?])
             }
             _ => {
                 ctx.log(&format!("Connecting to jump host {host}:{port}..."), "info");
@@ -10108,7 +10585,7 @@ fn reach_hop<'a>(
                         return Err(format!("jump host {host}:{port} did not respond within 10 seconds"))
                     }
                 };
-                Ok(vec![login_hop(ctx, hop, HopStream::Tcp(tcp), None, config).await?])
+                Ok(vec![login_hop(ctx, hop, HopStream::Tcp(tcp), None, prepared).await?])
             }
         }
     })
@@ -10164,8 +10641,9 @@ async fn login_hop(
     hop: Hop,
     transport: HopStream,
     proxy_watch: Option<proxy_command::Watch>,
-    config: std::sync::Arc<russh::client::Config>,
+    prepared: PreparedHop,
 ) -> Result<russh::client::Handle<ssh_manager::ClientHandler>, String> {
+    let PreparedHop { config, host_trust, identities } = prepared;
     let Hop { target, password, key_data, cache_id } = hop;
     let identity_agent = target.identity_agent();
     let (host, port, user) = (target.host.clone(), i32::from(target.port), target.user.clone());
@@ -10196,6 +10674,8 @@ async fn login_hop(
     // first-time key prompt on the bastion.
     let prompt_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let prompt_pending_for_driver = std::sync::Arc::clone(&prompt_pending);
+    let host_key_refusal: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
 
     let handler = ssh_manager::ClientHandler {
         app: app.clone(),
@@ -10214,6 +10694,8 @@ async fn login_hop(
         attempt: attempt.clone(),
         // The watcher probes the session, not the bastion hop.
         last_heard: ssh_manager::LastHeard::default(),
+        host_trust,
+        host_key_refusal: std::sync::Arc::clone(&host_key_refusal),
     };
 
     // 4. Handshake. `config` already prefers the kinds on file for this bastion.
@@ -10243,9 +10725,16 @@ async fn login_hop(
     }
     // The host-key prompt (if any) is resolved by now — drop the sender.
     fp_txs.lock().await.remove(&jump_nonce);
+    let refused = host_key_refusal.lock().ok().and_then(|r| r.clone());
 
     let mut session = match connect_res {
         Ok(Ok(s)) => s,
+        Ok(Err(_)) if refused.is_some() => {
+            return Err(format!(
+                "jump host {host}: host key refused: {}.",
+                refused.unwrap_or_default()
+            ));
+        }
         Ok(Err(e)) => {
             let note = proxy_command_note(proxy_watch.as_ref()).await;
             return Err(if note.is_empty() {
@@ -10285,7 +10774,7 @@ async fn login_hop(
         allow_prompt,
         attempt,
         cancelled: std::sync::atomic::AtomicBool::new(false),
-        agent: AgentSlot::new(use_agent, identity_agent),
+        agent: AgentSlot::new(use_agent, identity_agent, identities),
         session_unusable: std::sync::atomic::AtomicBool::new(false),
     };
     let (effective_user, user_prompted, login_cancelled) =
@@ -10776,10 +11265,16 @@ async fn initiate_connection(
     };
     let config_proxy = config_target.proxy(own_route);
     let identity_agent = config_target.identity_agent();
-    let config_log = config_target.log.clone();
+    let login_user = config_target.user.clone();
+    let identities = config_target.identities(&login_user);
+    let known_files = config_target.known_hosts_files(&login_user);
+    let host_key_algorithms = config_target.host_key_algorithms();
     let host = config_target.host.clone();
     let port = i32::from(config_target.port);
-    let user = config_target.user.clone();
+    let user = login_user;
+    let host_trust = known_hosts::for_host(known_files, &host, port as u16).await.map(Arc::new);
+    let host_trust_for_config = host_trust.clone();
+    let mut config_log = std::mem::take(&mut config_target.log);
 
     // DB resolution succeeded — now register the fingerprint sender. From here
     // on the worker is always spawned, so its FpCleanupGuard guarantees this
@@ -10802,6 +11297,8 @@ async fn initiate_connection(
     // Second handle so the worker can read known_hosts before the handshake.
     // The handler below takes the other one.
     let db_for_key_order = Arc::clone(&db_conn_shared);
+    let host_key_refusal: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let host_key_refusal_for_driver = Arc::clone(&host_key_refusal);
 
     let handler = ssh_manager::ClientHandler {
         app: app.clone(),
@@ -10817,6 +11314,8 @@ async fn initiate_connection(
         prompt_allowed: !is_secondary,
         attempt: attempt.clone(),
         last_heard: last_heard.clone(),
+        host_trust,
+        host_key_refusal,
     };
 
     let cleanup_nonce = connect_nonce.clone();
@@ -10868,16 +11367,28 @@ async fn initiate_connection(
         };
 
         emit_log("Initializing SSH connection process...", "info");
-        for line in &config_log {
-            emit_log(line, "info");
-        }
-        // Ask this host for the kinds of host key on file first. A failed
-        // read refuses the connection before any socket is opened. The
-        // primary session and the dedicated ::sftp / ::fwd connections all
-        // enter here.
-        let client_config = match build_ssh_client_config_for(&db_for_key_order, &host, port as u16) {
-            Ok(config) => Arc::new(config),
+        // Ask this host for the kinds of host key on file first, then for
+        // host certificates when a CA covers it. A failed read refuses the
+        // connection before any socket is opened. The primary session and
+        // the dedicated ::sftp / ::fwd connections all enter here.
+        let client_config = match client_config_for_target(
+            &db_for_key_order,
+            &host,
+            port as u16,
+            host_trust_for_config.as_deref(),
+            host_key_algorithms.as_deref(),
+            &mut config_log,
+        ) {
+            Ok(config) => {
+                for line in &config_log {
+                    emit_log(line, "info");
+                }
+                Arc::new(config)
+            }
             Err(reason) => {
+                for line in &config_log {
+                    emit_log(line, "info");
+                }
                 emit_log(&reason, "error");
                 cleanup().await;
                 emit_connection_failed(
@@ -11198,7 +11709,7 @@ async fn initiate_connection(
                     allow_prompt: allow_kbi,
                     attempt: &attempt,
                     cancelled: std::sync::atomic::AtomicBool::new(false),
-                    agent: AgentSlot::new(use_agent, identity_agent),
+                    agent: AgentSlot::new(use_agent, identity_agent, identities),
                     session_unusable: std::sync::atomic::AtomicBool::new(false),
                 };
 
@@ -11879,7 +12390,10 @@ async fn initiate_connection(
                         ConnectErrorKind::HostKey,
                     ),
                     0 => (
-                        "Host key was not approved. Reconnect to see the fingerprint prompt again.".to_string(),
+                        match host_key_refusal_for_driver.lock().ok().and_then(|r| r.clone()) {
+                            Some(why) => format!("Host key refused: {why}."),
+                            None => "Host key was not approved. Reconnect to see the fingerprint prompt again.".to_string(),
+                        },
                         ConnectErrorKind::HostKey,
                     ),
                     _ => {
