@@ -1,6 +1,6 @@
 //! What the user's OpenSSH client config (`~/.ssh/config`) says about a
 //! connection (#2): the address and port an alias stands for, the user,
-//! which ssh-agent to use, and a ProxyCommand.
+//! which ssh-agent to use, and a ProxyCommand or ProxyJump.
 //!
 //! Read-only and on demand: the files are read when a connection starts, and
 //! nothing from them is stored or synced. The device's "Use settings from
@@ -49,17 +49,20 @@ fn enabled() -> bool {
     !cfg!(target_os = "android") && ENABLED.load(Ordering::Relaxed)
 }
 
-/// `ProxyCommand`. `none` connects directly. The first value wins.
+/// `ProxyCommand` or `ProxyJump`, whichever came first. `none` connects directly.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Proxy {
-    /// `ProxyCommand none`: connect directly.
+    /// `ProxyCommand none` / `ProxyJump none`: connect directly.
     Disabled,
     /// The command as written (tokens not yet expanded).
     Command(String),
+    /// The `ProxyJump` list as written: `[user@]host[:port]`, comma-separated.
+    Jump(String),
 }
 
 /// What the config says for one connection. Only the settings a connection
-/// uses today: where to connect, who as, which agent, and a ProxyCommand.
+/// uses today: where to connect, who as, which agent, and a ProxyCommand
+/// or ProxyJump.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct HostConfig {
     /// `HostName`, `%h` expanded. Only from blocks that matched the address.
@@ -69,7 +72,8 @@ pub(crate) struct HostConfig {
     pub user: Option<String>,
     /// `IdentityAgent` as written; see `resolve_identity_agent`.
     pub identity_agent: Option<String>,
-    /// `ProxyCommand` as written. `Disabled` is `none` (a direct connection).
+    /// `ProxyCommand` or `ProxyJump`, whichever came first. `Disabled` is
+    /// `none` (a direct connection).
     pub proxy: Option<Proxy>,
     /// What was skipped and why, for the connect log.
     pub notes: Vec<String>,
@@ -384,7 +388,7 @@ impl Evaluator<'_> {
             "user" if self.out.user.is_none() => self.out.user = first_argument(rest),
             "identityagent" if self.out.identity_agent.is_none() => self.out.identity_agent = first_argument(rest),
             // The rest of the line, quotes included. `none` is a direct connection.
-            // A later ProxyCommand does not replace the first.
+            // A later ProxyCommand or ProxyJump does not replace the first.
             "proxycommand" if self.out.proxy.is_none() => {
                 let value = rest.trim();
                 if !value.is_empty() {
@@ -392,6 +396,17 @@ impl Evaluator<'_> {
                         Proxy::Disabled
                     } else {
                         Proxy::Command(value.to_string())
+                    });
+                }
+            }
+            // One token: `[user@]host[:port]` or `ssh://...`, commas included.
+            // `none` is a direct connection. A later proxy does not replace it.
+            "proxyjump" if self.out.proxy.is_none() => {
+                if let Some(value) = first_argument(rest) {
+                    self.out.proxy = Some(if value.eq_ignore_ascii_case("none") {
+                        Proxy::Disabled
+                    } else {
+                        Proxy::Jump(value)
                     });
                 }
             }
@@ -868,6 +883,29 @@ mod tests {
             &imported,
         );
         assert_eq!(c.proxy, Some(Proxy::Command("cloudflared access ssh --hostname %h".into())));
+    }
+
+    #[test]
+    fn proxycommand_and_proxyjump_the_first_one_wins() {
+        assert_eq!(
+            cfg("Host x\n ProxyCommand ssh -W %h:%p bastion\n ProxyJump other\n", "x").proxy,
+            Some(Proxy::Command("ssh -W %h:%p bastion".into()))
+        );
+        assert_eq!(
+            cfg("Host x\n ProxyJump a@b:2222,c\n ProxyCommand nc %h %p\n", "x").proxy,
+            Some(Proxy::Jump("a@b:2222,c".into()))
+        );
+        assert_eq!(
+            cfg("Host x\n ProxyCommand none\nHost *\n ProxyJump b\n", "x").proxy,
+            Some(Proxy::Disabled)
+        );
+        assert_eq!(cfg("Host x\n ProxyJump none\nHost *\n ProxyJump b\n", "x").proxy, Some(Proxy::Disabled));
+        // An empty ProxyJump is ignored, so a later one applies.
+        assert_eq!(
+            cfg("Host x\n ProxyJump \nHost *\n ProxyJump bastion\n", "x").proxy,
+            Some(Proxy::Jump("bastion".into()))
+        );
+        assert_eq!(cfg("Host x\n ProxyJump=a,b\n", "x").proxy, Some(Proxy::Jump("a,b".into())));
     }
 
     #[test]

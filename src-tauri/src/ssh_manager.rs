@@ -398,12 +398,12 @@ pub struct SshState {
     /// keyboard-interactive runs during auth) but carry different value types.
     pub kbi_txs: Arc<Mutex<HashMap<String, oneshot::Sender<Option<Vec<String>>>>>>,
     pub connections: Arc<Mutex<HashMap<String, Arc<Mutex<client::Handle<ClientHandler>>>>>>,
-    /// ProxyJump bastion handles, keyed by the TARGET session_id. Each target
-    /// session that routes through a jump host stows the jump's live `Handle`
-    /// here purely to keep it (and thus the direct-tcpip channel carrying the
-    /// target's transport) alive for the session's lifetime. Removed — and so
-    /// dropped/closed — on reconnect teardown, disconnect, and profile close.
-    pub jump_connections: Arc<Mutex<HashMap<String, client::Handle<ClientHandler>>>>,
+    /// Jump-host handles for one target session, keyed by the TARGET
+    /// session_id. Every hop of the route is kept so the direct-tcpip channel
+    /// on the last hop (which carries the target's transport) stays open for
+    /// the session's lifetime. The whole list is removed, and so dropped,
+    /// together on reconnect teardown, disconnect, and profile close.
+    pub jump_connections: Arc<Mutex<HashMap<String, Vec<client::Handle<ClientHandler>>>>>,
     pub terminal_txs: Arc<Mutex<HashMap<String, mpsc::Sender<TerminalCommand>>>>,
     /// Per-terminal "last requested PTY size" watch. The PTY task selects
     /// on this in parallel with `terminal_txs` and forwards `window_change`
