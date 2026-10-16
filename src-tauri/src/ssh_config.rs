@@ -1,6 +1,6 @@
 //! What the user's OpenSSH client config (`~/.ssh/config`) says about a
-//! connection (#2): the address and port an alias stands for, the user, and
-//! which ssh-agent to use.
+//! connection (#2): the address and port an alias stands for, the user,
+//! which ssh-agent to use, and a ProxyCommand.
 //!
 //! Read-only and on demand: the files are read when a connection starts, and
 //! nothing from them is stored or synced. The device's "Use settings from
@@ -49,8 +49,17 @@ fn enabled() -> bool {
     !cfg!(target_os = "android") && ENABLED.load(Ordering::Relaxed)
 }
 
+/// `ProxyCommand`. `none` connects directly. The first value wins.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Proxy {
+    /// `ProxyCommand none`: connect directly.
+    Disabled,
+    /// The command as written (tokens not yet expanded).
+    Command(String),
+}
+
 /// What the config says for one connection. Only the settings a connection
-/// uses today: where to connect, who as, and which agent.
+/// uses today: where to connect, who as, which agent, and a ProxyCommand.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct HostConfig {
     /// `HostName`, `%h` expanded. Only from blocks that matched the address.
@@ -60,6 +69,8 @@ pub(crate) struct HostConfig {
     pub user: Option<String>,
     /// `IdentityAgent` as written; see `resolve_identity_agent`.
     pub identity_agent: Option<String>,
+    /// `ProxyCommand` as written. `Disabled` is `none` (a direct connection).
+    pub proxy: Option<Proxy>,
     /// What was skipped and why, for the connect log.
     pub notes: Vec<String>,
 }
@@ -372,6 +383,18 @@ impl Evaluator<'_> {
             }
             "user" if self.out.user.is_none() => self.out.user = first_argument(rest),
             "identityagent" if self.out.identity_agent.is_none() => self.out.identity_agent = first_argument(rest),
+            // The rest of the line, quotes included. `none` is a direct connection.
+            // A later ProxyCommand does not replace the first.
+            "proxycommand" if self.out.proxy.is_none() => {
+                let value = rest.trim();
+                if !value.is_empty() {
+                    self.out.proxy = Some(if value.eq_ignore_ascii_case("none") {
+                        Proxy::Disabled
+                    } else {
+                        Proxy::Command(value.to_string())
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -804,6 +827,47 @@ mod tests {
         let c = cfg("Host x\n HostName %r.example\n", "x");
         assert_eq!(c.hostname, None);
         assert!(c.notes[0].contains("%r"));
+    }
+
+    #[test]
+    fn proxy_command_is_the_rest_of_the_line_and_none_is_direct() {
+        assert_eq!(
+            cfg("Host x\n ProxyCommand ssh -W %h:%p bastion\n", "x").proxy,
+            Some(Proxy::Command("ssh -W %h:%p bastion".into()))
+        );
+        // A later line does not replace the first.
+        assert_eq!(
+            cfg("Host x\n ProxyCommand nc %h %p\n ProxyCommand other\n", "x").proxy,
+            Some(Proxy::Command("nc %h %p".into()))
+        );
+        assert_eq!(
+            cfg("Host x\n ProxyCommand none\nHost *\n ProxyCommand nc %h %p\n", "x").proxy,
+            Some(Proxy::Disabled)
+        );
+        // An empty one is ignored, so a later one applies.
+        assert_eq!(
+            cfg("Host x\n ProxyCommand \nHost *\n ProxyCommand nc %h %p\n", "x").proxy,
+            Some(Proxy::Command("nc %h %p".into()))
+        );
+        // Quotes stay: CreateProcess reads them.
+        assert_eq!(
+            cfg(
+                "Host x\n ProxyCommand \"C:\\Program Files\\cloudflared\\cloudflared.exe\" access ssh --hostname %h\n",
+                "x",
+            )
+            .proxy,
+            Some(Proxy::Command(
+                "\"C:\\Program Files\\cloudflared\\cloudflared.exe\" access ssh --hostname %h".into(),
+            ))
+        );
+        assert_eq!(cfg("Host x\n ProxyCommand=nc %h %p\n", "x").proxy, Some(Proxy::Command("nc %h %p".into())));
+        // A block that matched the node's name still gives the command.
+        let imported = Lookup { address: "10.0.0.5".into(), name: Some("prod".into()), user: None };
+        let c = eval(
+            &Fixture::new("Host prod\n  ProxyCommand cloudflared access ssh --hostname %h\n"),
+            &imported,
+        );
+        assert_eq!(c.proxy, Some(Proxy::Command("cloudflared access ssh --hostname %h".into())));
     }
 
     #[test]
