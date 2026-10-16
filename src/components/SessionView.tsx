@@ -355,14 +355,8 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
   const customPasswordRef = useRef("");
   useEffect(() => { customPasswordRef.current = customPassword; }, [customPassword]);
 
-  // Mirror `status` into a ref so the one-shot effect below (which registers
-  // the `connection-success` listener from its INITIAL closure) can see the
-  // latest value. Without this ref, `wasReconnect` was computed against a
-  // status snapshot captured at effect-run time (always `'connecting'`), so
-  // a manual reconnect via the banner — which zeroes reconnectAttemptRef —
-  // failed to bump `connectionEpoch`. TerminalView's per-epoch effect then
-  // never re-called open_terminal against the new SSH handle, and the
-  // reconnected terminal appeared frozen while SFTP/tunnels worked fine.
+  // Mirror `status` into a ref. Listeners registered once would otherwise
+  // see the status from the first render, which is always `connecting`.
   const statusRef = useRef(status);
   useEffect(() => { statusRef.current = status; }, [status]);
 
@@ -827,19 +821,27 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
   }, []);
 
   // ---- Auto-reconnect: fixed 5s cadence, retried FOREVER -------------------
-  // After a previously-good session drops we retry every 5 seconds, forever —
-  // no backoff ramp, no give-up. The user wants the session/tunnel to keep
-  // trying relentlessly on any drop (laptop sleep, mobile-hotspot dropout, a
-  // flaky link) so a forward always comes back by itself once the link
-  // returns. Only a genuine AUTH failure (wrong credentials) or an explicit
-  // Cancel stops the cycle — retrying auth-rejected attempts every 5s would
-  // just spam the server and risk locking the account. The terminal/SFTP
-  // overlay stays in place the whole time so the user keeps their context.
+  // After a previously-good session drops we retry every 5 seconds, forever.
+  // No backoff ramp, no give-up. The user wants the session/tunnel to keep
+  // trying on any drop (laptop sleep, mobile-hotspot dropout, a flaky link)
+  // so a forward comes back by itself once the link returns. A failure
+  // waiting cannot fix (the backend's `retry` is false) or an explicit
+  // Cancel stops the cycle. Retrying a rejected login every 5s would spam
+  // the server and risk locking the account, and a host key that was not
+  // approved would bring its prompt straight back. The terminal/SFTP overlay
+  // stays in place the whole time so the user keeps their context.
+  //
+  // A connect that fails before the session was ever up (a timeout, the
+  // server not reachable yet) is retried the same way. Until the first
+  // success there is no terminal to keep, so those retries stay in the
+  // full-screen connect view.
   const RECONNECT_INTERVAL_MS = 5000;
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const [nextReconnectAt, setNextReconnectAt] = useState<number | null>(null);
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [everConnected, setEverConnected] = useState(false);
+  const everConnectedRef = useRef(false);
 
   const updateAttempt = (n: number) => {
     reconnectAttemptRef.current = n;
@@ -922,9 +924,10 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
       setSftpConnStatus('ready');
     });
     const unlistenSftpFail = listen(`connection-failed-${session.id}::sftp`, (event: any) => {
-      // Auth-style failures (2FA-only server, bad credentials) won't get
-      // better on retry — go straight to failed; SFTP rides the primary.
-      if (event.payload?.is_auth_error) setSftpConnStatus('failed');
+      // A rejected login, a host key that was not approved, or a setting
+      // will not get better on retry. SFTP rides the primary. A timeout or
+      // a broken link (`retry`) is tried again.
+      if (event.payload?.is_auth_error || event.payload?.retry === false) setSftpConnStatus('failed');
       else if (separateSftpRef.current && statusRef.current === 'connected') scheduleSecondaryRetry('sftp');
       else setSftpConnStatus('off');
     });
@@ -944,8 +947,9 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
       // Tunnel migration onto the fresh transport happens backend-side.
     });
     const unlistenFwdFail = listen(`connection-failed-${session.id}::fwd`, (event: any) => {
-      if (event.payload?.is_auth_error) {
-        // Won't get better on retry — run the tunnels on the primary instead.
+      if (event.payload?.is_auth_error || event.payload?.retry === false) {
+        // A rejected login, a host key, or a setting will not get better
+        // on retry. Run the tunnels on the primary instead.
         setFwdConnStatus('failed');
         invoke("restart_session_tunnels", { sessionId: session.id, serverId: session.serverId }).catch(console.error);
       } else if (separateFwdRef.current && statusRef.current === 'connected') {
@@ -967,10 +971,13 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
     });
 
     const unlistenSuccess = listen(`connection-success-${session.id}`, () => {
-      // statusRef.current is authoritative here — the plain `status` we
-      // could reach through closure is frozen at effect-run time.
-      const prevStatus = statusRef.current;
-      const wasReconnect = reconnectAttemptRef.current > 0 || prevStatus === 'disconnected' || prevStatus === 'failed';
+      // A reconnect is a success after this session has already been up.
+      // Retries of a first connect that never got through are still the
+      // first connect: terminals open fresh, and on-connect commands run
+      // once the shell is actually open.
+      const wasReconnect = everConnectedRef.current;
+      everConnectedRef.current = true;
+      setEverConnected(true);
       setStatus('connected');
       cancelReconnect();
       // Whatever got this connection in, the password typed into the failed
@@ -1077,12 +1084,14 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
       setIsAuthError(isAuth);
       resetSecondaryStatus();
       addLog(`SSH_CONNECTION_FAILED [${session.serverName}]: ${event.payload?.reason}`, "error");
-      // If this failure happened during an auto-reconnect attempt, queue the
-      // next try unless we've exhausted them or the credentials are wrong
-      // (retrying auth-rejected attempts just wastes time).
-      if (reconnectAttemptRef.current > 0 && !isAuth) {
+      // Try again in a few seconds, the first connect included, when waiting
+      // can help: a timeout, a refusal, a link that broke. A rejected or
+      // cancelled login, a host key that was not approved (its prompt would
+      // come straight back), no common algorithm, or a setting stops the
+      // cycle. Reconnect is still there.
+      if (event.payload?.retry === true) {
         scheduleReconnect(reconnectAttemptRef.current + 1);
-      } else if (isAuth) {
+      } else {
         cancelReconnect();
       }
     });
@@ -1184,6 +1193,8 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
     reconnectTimerRef.current = setTimeout(() => {
       setNextReconnectAt(null);
       setStatus('connecting');
+      // Seen in the connect view while a first connect is being retried.
+      pushLog({ msg: `Trying again (attempt ${attempt})...`, type: 'info' });
       clearConnectPrompts();
       primarySeparateRef.current = separateFwdRef.current;
       invoke("initiate_connection", {
@@ -1194,12 +1205,24 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
         sessionRole: "primary",
         separateSessions: separateFwdRef.current,
         useSshAgent: readUseSshAgent(),
-      }).catch(console.error);
+      }).catch((e) => {
+        // Refused before any connecting (the server was deleted, say): no
+        // failure event follows, so don't sit on "Connecting...".
+        pushLog({ msg: `Failed to initiate: ${e}`, type: 'error' });
+        setStatus('failed');
+        cancelReconnect();
+      });
     }, delay);
   };
 
   const reconnect = () => {
+    // Once the session has been up, Reconnect and Now are the next attempt
+    // of the cycle. The terminals stay mounted behind the banner. The
+    // full-screen connect view would unmount them and drop their scrollback.
+    // A timeout keeps retrying.
+    const attempt = everConnectedRef.current ? Math.max(1, reconnectAttemptRef.current) : 0;
     cancelReconnect();
+    updateAttempt(attempt);
     setStatus('connecting');
     setLogs([]);
     setIsAuthError(false);
@@ -1215,7 +1238,13 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
       sessionRole: "primary",
       separateSessions: separateFwdRef.current,
       useSshAgent: readUseSshAgent(),
-    }).catch(console.error);
+    }).catch((e) => {
+      // Refused before any connecting (the server was deleted, say): no
+      // failure event follows, so don't sit on "Connecting...".
+      pushLog({ msg: `Failed to initiate: ${e}`, type: 'error' });
+      setStatus('failed');
+      cancelReconnect();
+    });
   };
 
   // Tab-strip right-click "Reconnect" fires a DOM CustomEvent rather than
@@ -1461,10 +1490,12 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
     </div>
   );
 
-  // Only render the full-screen log view for the FIRST connection - once an
-  // auto-reconnect cycle is running, the user's terminal output and SFTP
-  // state stay visible behind a slim banner.
-  if (reconnectAttempt === 0 && (status === 'connecting' || status === 'failed')) {
+  // Full-screen log for the first connection, including its retries. Once
+  // the session has been up, a reconnect cycle keeps the terminals and
+  // their scrollback behind the banner.
+  if ((reconnectAttempt === 0 || !everConnected) && (status === 'connecting' || status === 'failed')) {
+    const retryWaiting = reconnectAttempt > 0 && nextReconnectAt !== null;
+    const retryIn = nextReconnectAt ? Math.max(0, Math.ceil((nextReconnectAt - Date.now()) / 1000)) : 0;
     return (
       <div className="relative flex-1 flex flex-col p-4 sm:p-8 bg-[#0a0a0c] text-white overflow-hidden">
         <div className="max-w-2xl w-full mx-auto flex-1 flex flex-col min-h-0">
@@ -1479,11 +1510,25 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                 {session.customName || session.serverName}
               </h2>
               <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest mt-1">
-                {status === 'connecting' ? 'Establishing Connection...' : 'Connection Failed'}
+                {status === 'connecting'
+                  ? (reconnectAttempt > 0 ? `Trying again · attempt ${reconnectAttempt}` : 'Establishing Connection...')
+                  : retryWaiting
+                    ? `Connection failed · trying again in ${retryIn}s`
+                    : 'Connection Failed'}
               </p>
             </div>
             {status === 'failed' && (
               <div className="flex flex-wrap gap-2 items-center">
+                {retryWaiting && (
+                  <button
+                    onClick={cancelReconnect}
+                    title="Stop trying again"
+                    aria-label="Stop trying again"
+                    className="flex-1 sm:flex-none px-4 py-2 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white rounded-lg text-xs font-bold uppercase tracking-wider transition-colors"
+                  >
+                    Cancel
+                  </button>
+                )}
                 {isAuthError && (
                   <input
                     type="password"
@@ -1552,9 +1597,9 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
   return (
     <div className="relative flex-1 flex flex-col bg-background overflow-hidden animate-in fade-in">
       {/* Auth prompts during an auto-reconnect. The full-screen view above
-          only renders on the first connect (reconnectAttempt===0); once a
-          reconnect cycle is running the terminal stays up behind a slim
-          banner, so the prompt floats over this session. See promptOverlay. */}
+          covers the first connect and its retries. Once the session has
+          been up, the terminal stays behind this banner, so the prompt
+          floats over this session. See promptOverlay. */}
       {promptWaiting && promptOverlay}
       {/* Nested Tab Bar — hidden in `chromeless` mode. Chromeless is
           used by the App-level Split-view tiling: merged (non-focused)
