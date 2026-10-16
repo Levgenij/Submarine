@@ -9067,6 +9067,27 @@ mod secret_prompt_tests {
     fn missing_passphrase_error_is_auth_shaped() {
         let err = russh::Error::from(russh::keys::Error::KeyIsEncrypted);
         assert!(classify_russh_error(&err).is_auth());
+        assert!(!classify_russh_error(&err).retries());
+    }
+
+    /// The tab retries a failed connect on its own only when waiting can help:
+    /// the server did not answer, could not be reached, or the link broke. A
+    /// host key that was not approved must not bring its prompt back every few
+    /// seconds, nor a rejected login or a missing algorithm be tried forever.
+    #[test]
+    fn only_network_failures_are_retried() {
+        use russh::Error::*;
+        for e in [ConnectionTimeout, KeepaliveTimeout, InactivityTimeout, HUP, Disconnect, SendError] {
+            assert!(classify_russh_error(&e).retries(), "{e:?}");
+        }
+        let refused = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");
+        assert!(classify_russh_error(&IO(refused)).retries());
+        for e in [NotAuthenticated, NoAuthMethod, WrongServerSig, UnknownKey, UnknownAlgo] {
+            assert!(!classify_russh_error(&e).retries(), "{e:?}");
+        }
+        assert!(!ConnectErrorKind::HostKey.retries());
+        assert!(!ConnectErrorKind::Algorithm.retries());
+        assert!(!ConnectErrorKind::Auth.retries());
     }
 
     #[test]
@@ -10328,6 +10349,11 @@ struct HopCtx<'a> {
     // caller reports an auth error and auto-reconnect stops instead of asking
     // again every few seconds.
     auth_failed: &'a std::sync::atomic::AtomicBool,
+    // Set when a hop could not be reached or its link broke (a timeout, a
+    // refusal, a dropped handshake), so the caller reports a failure worth
+    // retrying. Not for a host key, a login, or a setting: waiting will not
+    // fix those.
+    network_failed: &'a std::sync::atomic::AtomicBool,
     // The target session's connect attempt; the hops' prompts belong to it.
     attempt: &'a ssh_manager::ConnectAttempt,
     session_id: &'a str,
@@ -10347,6 +10373,13 @@ impl HopCtx<'_> {
             &format!("session-log-{}", self.session_id),
             serde_json::json!({"msg": msg, "type": ty}),
         );
+    }
+
+    /// `msg` as the error of a hop that could not be reached or whose link
+    /// broke (see `network_failed`).
+    fn network_error(&self, msg: String) -> String {
+        self.network_failed.store(true, std::sync::atomic::Ordering::Relaxed);
+        msg
     }
 }
 
@@ -10592,7 +10625,9 @@ fn config_jump_chain<'a>(ctx: &'a HopCtx<'a>, spec: String, depth: usize) -> Hop
                 let mut hop = hop;
                 let prepared = prepare_hop(ctx, &mut hop.target).await?;
                 let via = chain.last().ok_or("ProxyJump: no previous hop")?;
-                let stream = hop_channel(via, &hop.target.host, hop.target.port).await?;
+                let stream = hop_channel(via, &hop.target.host, hop.target.port)
+                    .await
+                    .map_err(|e| ctx.network_error(e))?;
                 chain.push(login_hop(ctx, hop, HopStream::Channel(stream), None, prepared).await?);
             }
         }
@@ -10623,7 +10658,7 @@ fn reach_hop<'a>(
                 );
                 let mut chain = config_jump_chain(ctx, spec, depth).await?;
                 let via = chain.last().ok_or("ProxyJump: no hops")?;
-                let stream = hop_channel(via, &host, port).await?;
+                let stream = hop_channel(via, &host, port).await.map_err(|e| ctx.network_error(e))?;
                 let handle = login_hop(ctx, hop, HopStream::Channel(stream), None, prepared).await?;
                 chain.push(handle);
                 Ok(chain)
@@ -10655,15 +10690,17 @@ fn reach_hop<'a>(
                         s
                     }
                     Ok(Err(e)) => {
-                        return Err(humanize_network_err(
+                        return Err(ctx.network_error(humanize_network_err(
                             &e.to_string(),
                             &host,
                             i32::from(port),
                             "Jump host connection",
-                        ))
+                        )))
                     }
                     Err(_) => {
-                        return Err(format!("jump host {host}:{port} did not respond within 10 seconds"))
+                        return Err(ctx.network_error(format!(
+                            "jump host {host}:{port} did not respond within 10 seconds"
+                        )))
                     }
                 };
                 Ok(vec![login_hop(ctx, hop, HopStream::Tcp(tcp), None, prepared).await?])
@@ -10751,6 +10788,7 @@ async fn login_hop(
     };
     fp_txs.lock().await.insert(jump_nonce.clone(), fp_tx);
     let fp_outcome = std::sync::Arc::new(std::sync::atomic::AtomicI8::new(-1));
+    let fp_outcome_for_driver = std::sync::Arc::clone(&fp_outcome);
     // Shared with the connect driver so the 15s handshake cap does not kill a
     // first-time key prompt on the bastion.
     let prompt_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -10818,19 +10856,27 @@ async fn login_hop(
         }
         Ok(Err(e)) => {
             let note = proxy_command_note(proxy_watch.as_ref()).await;
-            return Err(if note.is_empty() {
+            let msg = if note.is_empty() {
                 format!("jump host handshake failed: {}", e)
             } else {
                 format!("jump host handshake failed: {e}.{note}")
-            });
+            };
+            // A declined or timed-out fingerprint (fp_outcome 0 or 2) will
+            // not change by waiting. Anything else is the link.
+            let declined = matches!(
+                fp_outcome_for_driver.load(std::sync::atomic::Ordering::SeqCst),
+                0 | 2
+            );
+            return Err(if declined { msg } else { ctx.network_error(msg) });
         }
         Err(ConnectTimeout::HandshakeStall) => {
             let note = proxy_command_note(proxy_watch.as_ref()).await;
-            return Err(if note.is_empty() {
-                "jump host handshake timed out".into()
+            let msg = if note.is_empty() {
+                "jump host handshake timed out".to_string()
             } else {
                 format!("jump host handshake timed out.{note}")
-            });
+            };
+            return Err(ctx.network_error(msg));
         }
         Err(ConnectTimeout::PromptHardCap) => {
             return Err(
@@ -10945,14 +10991,19 @@ async fn login_hop(
             Err("jump host authentication failed".into())
         }
         Err(e) => {
-            let is_auth = classify_russh_error(&e).is_auth();
+            let kind = classify_russh_error(&e);
+            let is_auth = kind.is_auth();
             if is_auth {
                 auth_failed.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             if is_auth && prompt_ctx.session_unusable.load(std::sync::atomic::Ordering::Relaxed) {
                 return Err(format!("jump host: {}", AGENT_DID_NOT_SIGN));
             }
-            Err(format!("jump host auth error: {}", e))
+            let msg = format!("jump host auth error: {}", e);
+            if kind.retries() && !prompt_ctx.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(ctx.network_error(msg));
+            }
+            Err(msg)
         }
     }
 }
@@ -11482,6 +11533,7 @@ async fn initiate_connection(
                     serde_json::json!({
                         "reason": reason,
                         "is_auth_error": false,
+                        "retry": false,
                     }),
                 )
                 .await;
@@ -11550,6 +11602,12 @@ async fn initiate_connection(
         let mut jump_handles: Vec<russh::client::Handle<ssh_manager::ClientHandler>> = Vec::new();
         // Set when a hop's login itself failed (rejected or cancelled).
         let jump_auth_failed = std::sync::atomic::AtomicBool::new(false);
+        // Set when a hop could not be reached or its link broke.
+        let jump_network_failed = std::sync::atomic::AtomicBool::new(false);
+        // Whether failing to open the stream below is worth retrying: the
+        // network (a timeout, a refusal, no route), not a setting, a host
+        // key, or a login. Sent to the tab as `retry` with the failure.
+        let mut reach_retry = false;
         // The ProxyCommand this connection goes through, if any: what it said
         // when the handshake fails.
         let mut proxy_watch: Option<proxy_command::Watch> = None;
@@ -11561,6 +11619,7 @@ async fn initiate_connection(
             cache: &prompted_secrets_clone,
             allow_prompt: allow_kbi,
             auth_failed: &jump_auth_failed,
+            network_failed: &jump_network_failed,
             attempt: &attempt,
             session_id: &session_id_clone,
             use_agent,
@@ -11589,11 +11648,17 @@ async fn initiate_connection(
                             jump_handles = chain;
                             Ok(Box::new(channel) as Box<dyn AsyncStream>)
                         }
-                        Err(e) => Err(format!("ProxyJump: {e}")),
+                        Err(e) => {
+                            reach_retry = true;
+                            Err(format!("ProxyJump: {e}"))
+                        }
                     },
                     None => Err("ProxyJump: no jump host".into()),
                 },
-                Err(e) => Err(format!("ProxyJump: {}", e)),
+                Err(e) => {
+                    reach_retry = jump_network_failed.load(std::sync::atomic::Ordering::Relaxed);
+                    Err(format!("ProxyJump: {}", e))
+                }
             }
         } else if let Some(ssh_config::Proxy::Command(command)) = &config_proxy {
             emit_log(
@@ -11611,6 +11676,10 @@ async fn initiate_connection(
                 Err(e) => Err(e),
             }
         } else {
+        // Any failure below is the network: the proxy or the server did not
+        // answer, refused, or could not be reached. An empty proxy host is
+        // reported on its own and is not retried.
+        reach_retry = true;
         match proxy_type.as_str() {
             "socks5" => {
                 let p_host = match proxy_host.as_ref().filter(|h| !h.is_empty()) {
@@ -11619,7 +11688,7 @@ async fn initiate_connection(
                         let err_msg = "SOCKS5 Proxy Host is empty";
                         emit_log(&format!("Error: {}", err_msg), "error");
                         cleanup().await;
-                        emit_connection_failed(&app, &attempt, &session_id_clone, serde_json::json!({"reason": err_msg})).await;
+                        emit_connection_failed(&app, &attempt, &session_id_clone, serde_json::json!({"reason": err_msg, "retry": false})).await;
                         return;
                     }
                 };
@@ -11653,7 +11722,7 @@ async fn initiate_connection(
                         let err_msg = "HTTP Proxy Host is empty";
                         emit_log(&format!("Error: {}", err_msg), "error");
                         cleanup().await;
-                        emit_connection_failed(&app, &attempt, &session_id_clone, serde_json::json!({"reason": err_msg})).await;
+                        emit_connection_failed(&app, &attempt, &session_id_clone, serde_json::json!({"reason": err_msg, "retry": false})).await;
                         return;
                     }
                 };
@@ -11728,15 +11797,18 @@ async fn initiate_connection(
                 emit_log(&e, "error");
                 cleanup().await;
                 // A failed or cancelled bastion login is an auth error, so
-                // auto-reconnect stops instead of asking again every few seconds.
-                // Other transport failures leave the flag false and keep retrying.
+                // auto-reconnect stops instead of asking again every few
+                // seconds. A hop that could not be reached is tried again.
+                // A host key, a setting, or a login is not.
+                let auth = jump_auth_failed.load(std::sync::atomic::Ordering::Relaxed);
                 emit_connection_failed(
                     &app,
                     &attempt,
                     &session_id_clone,
                     serde_json::json!({
                         "reason": e,
-                        "is_auth_error": jump_auth_failed.load(std::sync::atomic::Ordering::Relaxed),
+                        "is_auth_error": auth,
+                        "retry": reach_retry && !auth,
                     }),
                 )
                 .await;
@@ -12432,6 +12504,7 @@ async fn initiate_connection(
                             serde_json::json!({
                                 "reason": reason,
                                 "is_auth_error": true,
+                                "retry": false,
                             }),
                         )
                         .await;
@@ -12439,6 +12512,7 @@ async fn initiate_connection(
                     Err(e) => {
                         let kind = classify_russh_error(&e);
                         let target = format!("{}:{}", host, port);
+                        let cancelled = prompt_ctx.cancelled.load(std::sync::atomic::Ordering::Relaxed);
                         let reason = if prompt_ctx.session_unusable.load(std::sync::atomic::Ordering::Relaxed)
                             && kind.is_auth()
                         {
@@ -12454,6 +12528,7 @@ async fn initiate_connection(
                             serde_json::json!({
                                 "reason": reason,
                                 "is_auth_error": kind.is_auth(),
+                                "retry": kind.retries() && !cancelled,
                             }),
                         )
                         .await;
@@ -12499,6 +12574,7 @@ async fn initiate_connection(
                     serde_json::json!({
                         "reason": reason,
                         "is_auth_error": kind.is_auth(),
+                        "retry": kind.retries(),
                     }),
                 )
                 .await;
@@ -12529,6 +12605,7 @@ async fn initiate_connection(
                     serde_json::json!({
                         "reason": msg,
                         "is_auth_error": false,
+                        "retry": true,
                     }),
                 )
                 .await;
@@ -12549,6 +12626,7 @@ async fn initiate_connection(
                     serde_json::json!({
                         "reason": reason,
                         "is_auth_error": ConnectErrorKind::HostKey.is_auth(),
+                        "retry": ConnectErrorKind::HostKey.retries(),
                     }),
                 )
                 .await;
@@ -13372,6 +13450,8 @@ async fn initiate_rdp(
                 let via_name = jump_name.clone().unwrap_or_else(|| format!("server {jid}"));
                 log(&format!("Going through the SSH server {via_name}..."), "info");
                 let auth_failed = std::sync::atomic::AtomicBool::new(false);
+                // An RDP tab does not retry on its own, so nothing reads this.
+                let network_failed = std::sync::atomic::AtomicBool::new(false);
                 let ctx = HopCtx {
                     app: &app,
                     db: &db,
@@ -13380,6 +13460,7 @@ async fn initiate_rdp(
                     cache: &cache,
                     allow_prompt: true,
                     auth_failed: &auth_failed,
+                    network_failed: &network_failed,
                     attempt: &attempt,
                     session_id: &session_id,
                     use_agent,
@@ -16789,8 +16870,8 @@ async fn sftp_cancel_transfer(
 }
 
 /// Bucket the failure modes that can come out of an SSH connect / auth round.
-/// Drives both the UI's `is_auth_error` flag (so auto-reconnect only stops
-/// on real credential rejection) and the wording of the error message.
+/// Drives the UI's `is_auth_error` flag, the `retry` flag on
+/// `connection-failed`, and the wording of the error message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectErrorKind {
     /// Server refused the credentials we presented.
@@ -16817,6 +16898,14 @@ enum ConnectErrorKind {
 impl ConnectErrorKind {
     fn is_auth(self) -> bool {
         matches!(self, Self::Auth)
+    }
+
+    /// Whether trying again later can work: the server did not answer, could
+    /// not be reached, or the link broke. A rejected login, a host key that
+    /// was not approved, or no algorithm in common stays that way, so
+    /// automatic reconnect stops on those (`retry` in `connection-failed`).
+    fn retries(self) -> bool {
+        matches!(self, Self::Transport | Self::Timeout | Self::Unreachable | Self::Unknown)
     }
 }
 
