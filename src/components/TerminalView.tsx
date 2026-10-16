@@ -10,6 +10,7 @@ import { MobileKeyBar, ModifiersState, ModKey, SpecialKey } from './MobileKeyBar
 import { useBroadcast } from '../ui/broadcast';
 import HistorySearchOverlay from './HistorySearchOverlay';
 import { bundledAlias, fontFamilyCss, readFontFamily, readFontSize } from '../util/terminalFont';
+import { readScrollback } from '../util/terminalScrollback';
 import { readUseLocalShell } from '../util/terminalShell';
 import { IS_ANDROID, IS_LINUX } from '../util/platform';
 import { httpLinkPrompt, multilinePastePrompt } from '../util/terminalLinkPaste';
@@ -473,6 +474,7 @@ const TerminalView = ({
     const term = new Terminal({
       cursorBlink: true,
       fontSize: readFontSize(),
+      scrollback: readScrollback(),
       fontFamily: fontFamilyCss(readFontFamily()),
       theme: {
         background: '#09090b',
@@ -930,6 +932,10 @@ const TerminalView = ({
     // fetching then, and xterm only remeasures when fontFamily changes.
     let bundledMeasured = false;
     const handleSettingsChange = () => {
+      // So does the scrollback; fewer lines than the terminal holds drops the
+      // oldest ones.
+      const scrollback = readScrollback();
+      if (term.options.scrollback !== scrollback) term.options.scrollback = scrollback;
       const size = readFontSize();
       const family = fontFamilyCss(readFontFamily());
       const unchanged = term.options.fontSize === size && term.options.fontFamily === family;
