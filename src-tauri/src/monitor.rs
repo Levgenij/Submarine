@@ -497,7 +497,10 @@ async fn run_poller(
         if handle.as_ref().map(|h| h.is_closed()).unwrap_or(true) {
             let connected = tokio::select! {
                 _ = &mut stop_rx => break,
-                r = connect_for_monitor(&db, &auth, connect_timeout) => r,
+                r = async {
+                    let target = with_ssh_config(&auth, &node_name).await;
+                    connect_for_monitor(&db, &target, connect_timeout).await
+                } => r,
             };
             match connected {
                 Ok(h) => {
@@ -794,6 +797,15 @@ fn classify_auth(auth: &NodeAuth) -> Result<(Option<(String, Option<String>)>, O
         );
     }
     Ok((key, pass))
+}
+
+/// The node as `~/.ssh/config` resolves it: an alias's HostName and Port, and
+/// its User when none is saved. The monitor takes nothing else from the config
+/// (no key files or agent): in the background it never asks for anything, and
+/// it still trusts only a host key already on file.
+async fn with_ssh_config(auth: &NodeAuth, node_name: &str) -> NodeAuth {
+    let t = crate::ConfigTarget::resolve(&auth.host, auth.port, &auth.username, Some(node_name.to_string())).await;
+    NodeAuth { host: t.host, port: t.port, username: t.user, ..auth.clone() }
 }
 
 /// russh client config for monitor connections. The algorithm lists and the
