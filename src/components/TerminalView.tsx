@@ -11,6 +11,7 @@ import { useBroadcast } from '../ui/broadcast';
 import HistorySearchOverlay from './HistorySearchOverlay';
 import { bundledAlias, fontFamilyCss, readFontFamily, readFontSize } from '../util/terminalFont';
 import { readScrollback } from '../util/terminalScrollback';
+import { READABLE_CONTRAST, readBoldBright, readMinContrast, readScheme } from '../util/terminalTheme';
 import { readUseLocalShell } from '../util/terminalShell';
 import { IS_ANDROID, IS_LINUX } from '../util/platform';
 import { httpLinkPrompt, multilinePastePrompt } from '../util/terminalLinkPaste';
@@ -486,6 +487,8 @@ const TerminalView = ({
   // Tiny inline toast for clipboard feedback (copy / paste / errors). Pattern
   // matches the per-component notify() used in SftpWorkspace / FilePanel —
   // keeps the component self-contained without a global toast provider.
+  // The colour scheme's background also fills the padding around xterm.
+  const [termBg, setTermBg] = useState(() => readScheme().theme.background ?? '#09090b');
   const [toast, setToast] = useState<{ msg: string; tone: "ok" | "err" } | null>(null);
   const toastTimerRef = useRef<number | null>(null);
   const notify = (msg: string, tone: "ok" | "err" = "ok") => {
@@ -502,12 +505,10 @@ const TerminalView = ({
       fontSize: readFontSize(),
       scrollback: readScrollback(),
       fontFamily: fontFamilyCss(readFontFamily()),
-      theme: {
-        background: '#09090b',
-        foreground: '#e4e4e7',
-        cursor: '#60a5fa',
-        selectionBackground: 'rgba(96, 165, 250, 0.3)',
-      },
+      // Colours: Settings, Terminal (util/terminalTheme).
+      theme: readScheme().theme,
+      drawBoldTextInBrightColors: readBoldBright(),
+      minimumContrastRatio: readMinContrast() ? READABLE_CONTRAST : 1,
       allowProposedApi: true,
       // OSC 8 hyperlinks a program on the server prints. What they show can
       // differ from where they go, so the real target is shown first, and
@@ -964,7 +965,8 @@ const TerminalView = ({
     });
     resizeObserver.observe(terminalRef.current);
     
-    // Handle Settings Change - font size and face apply live to open terminals.
+    // Font, colours and scrollback apply live to every open view of this
+    // terminal, including a Wall tile (each view listens here).
     let fontDisposed = false;
     // A newer change can start another fonts.load before the previous one
     // settles. Only the latest generation may apply. A no-op event (colors,
@@ -974,10 +976,18 @@ const TerminalView = ({
     // fetching then, and xterm only remeasures when fontFamily changes.
     let bundledMeasured = false;
     const handleSettingsChange = () => {
-      // So does the scrollback; fewer lines than the terminal holds drops the
-      // oldest ones.
+      // Fewer lines than the terminal holds drops the oldest ones.
       const scrollback = readScrollback();
       if (term.options.scrollback !== scrollback) term.options.scrollback = scrollback;
+      const theme = readScheme().theme;
+      if (JSON.stringify(term.options.theme) !== JSON.stringify(theme)) {
+        term.options.theme = theme;
+        setTermBg(theme.background ?? '#09090b');
+      }
+      const boldBright = readBoldBright();
+      if (term.options.drawBoldTextInBrightColors !== boldBright) term.options.drawBoldTextInBrightColors = boldBright;
+      const contrast = readMinContrast() ? READABLE_CONTRAST : 1;
+      if (term.options.minimumContrastRatio !== contrast) term.options.minimumContrastRatio = contrast;
       const size = readFontSize();
       const family = fontFamilyCss(readFontFamily());
       const unchanged = term.options.fontSize === size && term.options.fontFamily === family;
@@ -1089,7 +1099,7 @@ const TerminalView = ({
     // pane (between xterm and the system soft keyboard). On desktop the bar
     // isn't rendered at all, so the xterm child claims the full height as
     // before.
-    <div className="h-full w-full bg-[#09090b] p-2 pr-2 pb-0 relative flex flex-col">
+    <div className="h-full w-full p-2 pr-2 pb-0 relative flex flex-col" style={{ background: termBg }}>
       <div
         ref={terminalRef}
         className="flex-1 min-h-0 w-full overflow-hidden select-text"
