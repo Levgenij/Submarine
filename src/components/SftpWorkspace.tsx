@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, forwardRef, useImperativeHandle }
 import { createPortal } from "react-dom";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { File as FileIcon, Folder, FolderUp, GitCompare, Shield, ShieldAlert } from "lucide-react";
+import { Columns, File as FileIcon, Folder, FolderUp, GitCompare, HardDrive, Rows, Server, Shield, ShieldAlert } from "lucide-react";
 import { useTextPrompt } from "../ui/confirm";
 import FilePanel, { ActiveDrag, FilePanelHandle } from "./FilePanel";
 import type { FileEntry } from "../fs/types";
@@ -145,11 +145,13 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
   };
   // What the Local / Remote / Split / Side switcher shows as selected.
   const panelMode: FilesSide | "split" | "side" = layout === "tabs" ? activeSide : layout;
-  // Files / Mirror drop to icons when the pane is dragged too narrow for
-  // both the tabs and the panel switcher.
+  // Labels stay only while Files, Mirror, Compare, and the panel switcher
+  // all fit as words (~520px). Below that every control is an icon and its
+  // title is the tooltip. The tool pane floor is 240px, so the icon row is
+  // padded tighter than the labeled one.
   const subBarRef = useRef<HTMLDivElement>(null);
   const subBarWidth = useElementWidth(subBarRef);
-  const showSubLabels = subBarWidth >= 380;
+  const showSubLabels = subBarWidth >= 560;
   // Providers are created once per session so the panels' provider identity
   // is stable across renders (the FilePanel's load-on-mount effect keys off it).
   const localProvider = useMemo(() => createLocalProvider(), []);
@@ -484,8 +486,8 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
           height, Split stacks both (drag-drop between them). The Mirror
           panel keeps state across tab switches via CSS hidden so the live
           worker's counters and rolling log survive a switch back to Files. */}
-      <div ref={subBarRef} className="shrink-0 h-11 flex items-stretch gap-2 px-2 border-b border-white/5 bg-white/[0.02]">
-        <div role="tablist" aria-label="SFTP views" onKeyDown={(e) => onRovingKeyDown(e)} className="flex items-stretch min-w-0">
+      <div ref={subBarRef} className={`shrink-0 h-11 flex items-stretch border-b border-white/5 bg-white/[0.02] ${showSubLabels ? "gap-2 px-2" : "gap-1 px-1.5"}`}>
+        <div role="tablist" aria-label="SFTP views" onKeyDown={(e) => onRovingKeyDown(e)} className="flex items-stretch shrink-0">
           {([
             { id: "files", icon: Folder, label: "Files" },
             { id: "mirror", icon: FolderUp, label: "Mirror" },
@@ -501,10 +503,10 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
                 aria-label={label}
                 onClick={() => setView(id)}
                 disabled={off}
-                title={off ? "Mirror needs a saved server" : undefined}
-                className={`relative shrink-0 px-3 flex items-center gap-2 text-[13px] transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-                  on ? "text-primary font-semibold" : "text-zinc-400 font-medium hover:text-zinc-100"
-                }`}
+                title={off ? "Mirror needs a saved server" : showSubLabels ? undefined : label}
+                className={`relative shrink-0 flex items-center text-[13px] transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                  showSubLabels ? "px-3 gap-2" : "px-1.5"
+                } ${on ? "text-primary font-semibold" : "text-zinc-400 font-medium hover:text-zinc-100"}`}
               >
                 <Icon size={15} className="shrink-0" />
                 {showSubLabels && <span>{label}</span>}
@@ -521,30 +523,33 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
             aria-pressed={compareOn}
             aria-label="Compare"
             title={compareOn ? "Stop comparing" : "Compare: mark what differs between the two folders"}
-            className={`self-center shrink-0 h-7 px-2.5 rounded-md border text-[12.5px] font-semibold flex items-center gap-1.5 transition-colors ${
+            className={`self-center shrink-0 h-7 rounded-md border text-[12.5px] font-semibold flex items-center justify-center transition-colors ${
+              showSubLabels ? "px-2.5 gap-1.5" : "w-7"
+            } ${
               compareOn
                 ? "border-primary/60 bg-primary/10 text-primary"
                 : "border-transparent text-zinc-300 hover:text-white hover:bg-white/5"
             }`}
           >
             <GitCompare size={14} />
-            <span>Compare</span>
+            {showSubLabels && <span>Compare</span>}
           </button>
         )}
         {view === "files" && (
           <div role="radiogroup" aria-label="File panels" onKeyDown={(e) => onRovingKeyDown(e)} className="self-center shrink-0 flex items-center gap-0.5 p-0.5 rounded-lg border border-white/10 bg-black/20">
             {([
-              { id: "local", label: "Local", hint: "Local files at full height" },
-              { id: "remote", label: "Remote", hint: "Remote files at full height" },
-              { id: "split", label: "Split", hint: "Show both panels stacked (drag-drop between them)" },
-              { id: "side", label: "Side", hint: "Show both panels side by side (drag-drop between them)" },
-            ] as const).map(({ id, label, hint }) => {
+              { id: "local", label: "Local", hint: "Local files at full height", icon: HardDrive },
+              { id: "remote", label: "Remote", hint: "Remote files at full height", icon: Server },
+              { id: "split", label: "Split", hint: "Show both panels stacked (drag-drop between them)", icon: Rows },
+              { id: "side", label: "Side", hint: "Show both panels side by side (drag-drop between them)", icon: Columns },
+            ] as const).map(({ id, label, hint, icon: Icon }) => {
               const on = panelMode === id;
               return (
                 <button
                   key={id}
                   role="radio"
                   aria-checked={on}
+                  aria-label={label}
                   tabIndex={on ? 0 : -1}
                   title={hint}
                   onClick={() => {
@@ -552,13 +557,16 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
                     setLayoutPersisted("tabs");
                     setActiveSidePersisted(id);
                   }}
-                  className={`h-7 px-3 rounded-md border text-[12.5px] font-semibold transition-colors ${
+                  className={`h-7 rounded-md border text-[12.5px] font-semibold transition-colors flex items-center justify-center ${
+                    showSubLabels ? "px-3 gap-1.5" : "w-7"
+                  } ${
                     on
                       ? "border-primary/60 bg-primary/10 text-primary"
                       : "border-transparent text-zinc-300 hover:text-white hover:bg-white/5"
                   }`}
                 >
-                  {label}
+                  <Icon size={14} className="shrink-0" />
+                  {showSubLabels && <span>{label}</span>}
                 </button>
               );
             })}
