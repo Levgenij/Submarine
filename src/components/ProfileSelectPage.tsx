@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   Plus, Trash2, X, AlertTriangle, ArrowRight, Download, Upload,
   CheckCircle2, Cloud, CloudOff, HardDrive, ChevronDown, RefreshCw, ArrowUpCircle,
-  Eye, EyeOff, ArrowBigUp, Check,
+  Eye, EyeOff, ArrowBigUp, Check, Fingerprint, Loader2,
 } from "lucide-react";
 import CloudPanel from "./CloudPanel";
 import { bookmarksKeyPrefix } from "./SftpWorkspace";
@@ -135,6 +135,11 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
   const [password, setPassword] = useState("");
   // Why the last unlock failed, under the password box.
   const [unlockError, setUnlockError] = useState<string | null>(null);
+  // This profile opens with Windows Hello or a fingerprint on this device,
+  // if that was turned on. The password field stays either way.
+  const [quick, setQuick] = useState<{ name: string; method: string } | null>(null);
+  const [quickBusy, setQuickBusy] = useState(false);
+  const autoQuickTried = useRef(false);
 
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
@@ -287,6 +292,59 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
     setUnlockError(null);
     setError(null);
     requestAnimationFrame(() => passwordInputRef.current?.focus());
+  }, [selected]);
+
+  // Ask Windows Hello (or the fingerprint) once, for the profile opened last
+  // on this device. Closing that prompt leaves the password.
+  const quickLabel = quick?.method === "android-biometric" ? "Unlock with fingerprint" : "Unlock with Windows Hello";
+  const quickUnlock = async (name: string) => {
+    if (busy) return;
+    autoQuickTried.current = true;
+    setBusy(true);
+    setQuickBusy(true);
+    setUnlockError(null);
+    try {
+      await invoke("quick_unlock", { name });
+    } catch (e: unknown) {
+      const raw = String(e);
+      setBusy(false);
+      setQuickBusy(false);
+      if (raw.includes("[QUICK_UNLOCK] CANCELLED")) {
+        requestAnimationFrame(() => passwordInputRef.current?.focus());
+        return;
+      }
+      if (raw.includes("[QUICK_UNLOCK] STALE")) {
+        setQuick(null);
+        setUnlockError("Quick unlock no longer fits this profile here. Unlock with the password, then turn it on again.");
+      } else {
+        setUnlockError(cleanErr(e));
+      }
+      requestAnimationFrame(() => passwordInputRef.current?.focus());
+      return;
+    }
+    rememberProfile(name);
+    onUnlocked(name);
+  };
+  useEffect(() => {
+    let live = true;
+    const name = selected;
+    setQuick(null);
+    if (!name) return;
+    (async () => {
+      try {
+        const support = await invoke<{ method: string | null; ready: boolean }>("quick_unlock_support");
+        if (!live || !support.method || !support.ready) return;
+        const on = await invoke<boolean>("quick_unlock_status", { name });
+        if (!live || !on) return;
+        setQuick({ name, method: support.method });
+        if (!autoQuickTried.current && name === lastProfile()) {
+          autoQuickTried.current = true;
+          void quickUnlock(name);
+        }
+      } catch { /* the password still works */ }
+    })();
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected]);
 
   useEffect(() => {
@@ -844,7 +902,7 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
                                 title="Open"
                                 className="h-10 px-3.5 rounded-lg text-[13px] font-semibold bg-primary text-black hover:shadow-[0_0_20px_rgba(var(--primary),0.3)] disabled:opacity-40 flex items-center gap-1.5 shrink-0 transition-all"
                               >
-                                {busy ? <RefreshCw size={14} className="animate-spin" /> : <>Open <ArrowRight size={14} /></>}
+                                {busy && !quickBusy ? <RefreshCw size={14} className="animate-spin" /> : <>Open <ArrowRight size={14} /></>}
                               </button>
                             </div>
                             {(unlockError || capsLock) && (
@@ -853,6 +911,17 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
                                   ? <FieldHint tone="error">{unlockError}</FieldHint>
                                   : <FieldHint tone="warn">Caps Lock is on</FieldHint>}
                               </div>
+                            )}
+                            {quick?.name === row.name && (
+                              <button
+                                type="button"
+                                onClick={() => void quickUnlock(row.name)}
+                                disabled={busy}
+                                className="flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-white/10 text-[13px] text-zinc-200 outline-none transition-colors hover:border-primary/40 hover:text-white focus-visible:ring-2 focus-visible:ring-primary/50 disabled:opacity-50"
+                              >
+                                {quickBusy ? <Loader2 size={15} className="animate-spin" /> : <Fingerprint size={15} className="text-primary" />}
+                                {quickLabel}
+                              </button>
                             )}
                             <div className="flex flex-wrap items-center gap-1.5">
                               <RowAction onClick={() => exportProfile(row.name)} disabled={busy} icon={<Download size={12} />} label="Export" />
