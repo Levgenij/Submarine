@@ -8705,6 +8705,62 @@ fn base_session_id(session_id: &str) -> &str {
         .unwrap_or(session_id)
 }
 
+/// How many times in a row a server may start a keyboard-interactive round with
+/// nothing to answer before the method is given up on (a real one has a
+/// banner, or two).
+const MAX_EMPTY_KBI_ROUNDS: u32 = 20;
+
+/// A host an HTTP proxy is asked to CONNECT to. It goes into the request line,
+/// so one with a CR or LF in it would end that line and let the rest be a
+/// second request to the proxy: the host comes from the saved server, which a
+/// co-member of a shared profile can write. Names (any script), IPv4 and
+/// bracketed IPv6 pass; controls, spaces and what has no place in a host don't.
+pub(crate) fn http_connect_host_ok(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && host
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']' | '%'))
+}
+
+#[cfg(test)]
+mod hostile_server_loop_tests {
+    use super::http_connect_host_ok;
+
+    #[test]
+    fn a_host_for_an_http_proxy_has_nothing_that_could_start_another_request() {
+        for ok in [
+            "example.com",
+            "10.0.0.5",
+            "[::1]",
+            "fe80::1%eth0",
+            "my_host-1.internal",
+            "b\u{fc}cher.example",
+            "\u{645}\u{62b}\u{627}\u{644}.com",
+        ] {
+            assert!(http_connect_host_ok(ok), "{ok}");
+        }
+        let too_long = "x".repeat(254);
+        for bad in [
+            "",
+            "a b",
+            "a\r\nHost: evil",
+            "x\r\n\r\nGET / HTTP/1.1",
+            "a\nb",
+            "tab\there",
+            "a/b",
+            "a@b",
+            "a\\b",
+            "a#b",
+            "a?b",
+            "nul\0",
+            too_long.as_str(),
+        ] {
+            assert!(!http_connect_host_ok(bad), "{bad:?}");
+        }
+    }
+}
+
 /// Cache key: base session id plus the target this secret belongs to.
 /// A password typed for one host is never offered to another.
 fn prompted_cache_key(session_id: &str, target: &str) -> String {
@@ -10113,6 +10169,8 @@ async fn run_keyboard_interactive<H: russh::client::Handler>(
     // Empty is not an answer. Taken by the one automatic reply.
     let mut saved_password = saved_password.filter(|p| !p.is_empty());
     let mut answered_with_saved = false;
+    // Rounds the server asked nothing in: a server can go on with them for ever.
+    let mut empty_rounds = 0u32;
 
     loop {
         match resp {
@@ -10147,6 +10205,14 @@ async fn run_keyboard_interactive<H: russh::client::Handler>(
                 // A banner-only InfoRequest (zero prompts) needs an empty
                 // response set to advance — nothing to ask the user.
                 if prompts.is_empty() {
+                    empty_rounds += 1;
+                    if empty_rounds > MAX_EMPTY_KBI_ROUNDS {
+                        log(
+                            "The server keeps asking for nothing, so this method was given up on.",
+                            "error",
+                        );
+                        return None;
+                    }
                     resp = match session
                         .authenticate_keyboard_interactive_respond(Vec::new())
                         .await
@@ -12635,6 +12701,16 @@ async fn initiate_connection(
                         // best-effort; some platforms / virtual NICs reject it.
                         let _ = tcp_stream.set_nodelay(true);
                         apply_tcp_keepalive(&tcp_stream);
+                        if !http_connect_host_ok(&host) {
+                            let err_msg = format!(
+                                "'{}' can't be asked of an HTTP proxy: a host has no spaces or control characters.",
+                                host.escape_debug()
+                            );
+                            emit_log(&format!("Error: {}", err_msg), "error");
+                            cleanup().await;
+                            emit_connection_failed(&app, &attempt, &session_id_clone, serde_json::json!({"reason": err_msg, "retry": false})).await;
+                            return;
+                        }
                         emit_log(&format!("Requesting HTTP CONNECT tunnel to {}:{}...", host, port), "info");
                         match tokio::time::timeout(
                             Duration::from_secs(10),
