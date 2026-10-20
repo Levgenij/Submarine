@@ -5993,11 +5993,131 @@ fn validate_ssh_private_key(private_key: &str) -> Result<(), String> {
 /// second, so a key cannot make decoding hang.
 const MAX_KEY_KDF_ROUNDS: u32 = 1024;
 
-/// Refuse an OpenSSH private key whose bcrypt KDF asks for more rounds than a
-/// real key ever would, before the expensive derivation runs. The round count
-/// is in the key's cleartext envelope (`PrivateKey::from_openssh` / `kdf()`),
-/// read here without the passphrase. Keys in other formats (PEM, PKCS#8, SEC1)
-/// do not parse as an encrypted OpenSSH bcrypt key and pass through untouched.
+/// What a key's passphrase may cost to try, for the formats that name the cost
+/// in the file. A synced key is read with the passphrase it was saved with, and
+/// what the file asks for is run as it says. Numbers far past what any tool
+/// writes would pin a thread for hours, or ask for more memory than there is.
+const MAX_PBKDF2_ITERATIONS: u64 = 2_000_000; // OpenSSL writes 2048..600000
+const MAX_SCRYPT_BYTES: u64 = 256 * 1024 * 1024; // 128 * N * r; OpenSSL's default is 16 MB
+const MAX_SCRYPT_PARALLEL: u64 = 16;
+const MAX_PPK_ARGON2_KIB: u64 = 256 * 1024; // PuTTYgen writes 8192 (8 MB)
+const MAX_PPK_ARGON2_WORK: u64 = 64 * 1024 * 1024; // memory (KiB) times passes; PuTTYgen is about 100000
+const MAX_PPK_ARGON2_LANES: u64 = 16;
+
+/// One DER element at the start of `input`: its tag, its content, and what
+/// follows it. `None` when it is not well formed or runs past the end.
+fn der_next(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let tag = *input.first()?;
+    let first = *input.get(1)?;
+    let (len, header) = if first < 0x80 {
+        (first as usize, 2)
+    } else {
+        let n = (first & 0x7f) as usize;
+        // Indefinite length (n == 0), and a length field longer than 4 bytes, are rejected.
+        if n == 0 || n > 4 {
+            return None;
+        }
+        let mut len = 0usize;
+        for i in 0..n {
+            len = len.checked_mul(256)?.checked_add(*input.get(2 + i)? as usize)?;
+        }
+        (len, 2 + n)
+    };
+    let end = header.checked_add(len)?;
+    Some((tag, input.get(header..end)?, &input[end..]))
+}
+
+/// A DER INTEGER as an unsigned number. One that does not fit counts as the largest,
+/// so a huge encoding is refused instead of panicking.
+fn der_uint(content: &[u8]) -> u64 {
+    let mut digits = content;
+    while digits.len() > 1 && digits[0] == 0 {
+        digits = &digits[1..];
+    }
+    if digits.len() > 8 {
+        u64::MAX
+    } else {
+        digits.iter().fold(0u64, |acc, &b| (acc << 8) | u64::from(b))
+    }
+}
+
+#[derive(Debug)]
+enum Pbes2Kdf {
+    Pbkdf2 { iterations: u64 },
+    Scrypt { n: u64, r: u64, p: u64 },
+}
+
+/// The key derivation named by a PKCS#8 `EncryptedPrivateKeyInfo` (PBES2), read
+/// from its DER without the passphrase. `None` when it is anything else.
+fn pbes2_kdf(der: &[u8]) -> Option<Pbes2Kdf> {
+    const OID_PBES2: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x05, 0x0d];
+    const OID_PBKDF2: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x05, 0x0c];
+    const OID_SCRYPT: &[u8] = &[0x2b, 0x06, 0x01, 0x04, 0x01, 0xda, 0x47, 0x04, 0x0b];
+    let (_, info, _) = der_next(der)?;
+    let (_, algorithm, _) = der_next(info)?;
+    let (tag, oid, rest) = der_next(algorithm)?;
+    if tag != 0x06 || oid != OID_PBES2 {
+        return None;
+    }
+    let (_, pbes2, _) = der_next(rest)?;
+    let (_, kdf, _) = der_next(pbes2)?;
+    let (tag, oid, rest) = der_next(kdf)?;
+    if tag != 0x06 {
+        return None;
+    }
+    let (_, params, _) = der_next(rest)?;
+    let (tag, _salt, rest) = der_next(params)?;
+    let (int_tag, first, rest) = der_next(rest)?;
+    if tag != 0x04 || int_tag != 0x02 {
+        return None;
+    }
+    if oid == OID_PBKDF2 {
+        return Some(Pbes2Kdf::Pbkdf2 { iterations: der_uint(first) });
+    }
+    if oid == OID_SCRYPT {
+        let (r_tag, r, rest) = der_next(rest)?;
+        let (p_tag, p, _) = der_next(rest)?;
+        if r_tag != 0x02 || p_tag != 0x02 {
+            return None;
+        }
+        return Some(Pbes2Kdf::Scrypt { n: der_uint(first), r: der_uint(r), p: der_uint(p) });
+    }
+    None
+}
+
+/// Argon2 settings in a PuTTY `.ppk` header: memory (KiB), passes, lanes.
+/// `None` unless all three are present and fit in a `u64` (a huge unreadable
+/// number is left to the decoder, and does not panic here).
+fn ppk_argon2(text: &str) -> Option<(u64, u64, u64)> {
+    let (mut memory, mut passes, mut lanes) = (None, None, None);
+    for line in text.lines() {
+        if let Some((key, value)) = line.split_once(':') {
+            let value = value.trim().parse::<u64>().ok();
+            match key.trim() {
+                "Argon2-Memory" => memory = value,
+                "Argon2-Passes" => passes = value,
+                "Argon2-Parallelism" => lanes = value,
+                _ => {}
+            }
+        }
+    }
+    Some((memory?, passes?, lanes?))
+}
+
+fn kdf_too_costly(what: &str) -> String {
+    format!(
+        "this key asks for far more work to unlock than a real key needs ({what}); \
+         re-save it with a lower cost (an OpenSSH key: `ssh-keygen -p -f <keyfile>`)"
+    )
+}
+
+/// Refuse a private key that asks for more work to unlock than a real key ever
+/// would, before the expensive derivation runs. What it asks for is in the
+/// key's cleartext envelope, read here without the passphrase: the bcrypt
+/// rounds of an OpenSSH key (`PrivateKey::from_openssh` / `kdf()`), the Argon2
+/// settings of a PuTTY `.ppk`, the PBKDF2 iterations or scrypt cost of an
+/// encrypted PKCS#8 key. Anything else (a legacy PEM key, whose derivation is
+/// a hash or two) parses past this.
 fn guard_key_kdf_cost(pem: &str) -> Result<(), String> {
     if let Ok(key) = ssh_key::PrivateKey::from_openssh(pem.trim()) {
         if let ssh_key::Kdf::Bcrypt { rounds, .. } = key.kdf() {
@@ -6007,14 +6127,54 @@ fn guard_key_kdf_cost(pem: &str) -> Result<(), String> {
                 ));
             }
         }
+        return Ok(());
+    }
+    if pem.trim_start().starts_with("PuTTY-User-Key-File-") {
+        if let Some((kib, passes, lanes)) = ppk_argon2(pem) {
+            if kib > MAX_PPK_ARGON2_KIB
+                || kib.saturating_mul(passes) > MAX_PPK_ARGON2_WORK
+                || lanes > MAX_PPK_ARGON2_LANES
+            {
+                return Err(kdf_too_costly(&format!(
+                    "Argon2: {kib} KiB, {passes} passes, {lanes} lanes"
+                )));
+            }
+        }
+        return Ok(());
+    }
+    if pem_private_key_header(pem) == "-----BEGIN ENCRYPTED PRIVATE KEY-----" {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let body: String = pem
+            .lines()
+            .map(str::trim)
+            .skip_while(|line| !line.starts_with("-----BEGIN "))
+            .skip(1)
+            .take_while(|line| !line.starts_with("-----END "))
+            .collect();
+        if let Some(kdf) = STANDARD.decode(body.as_bytes()).ok().as_deref().and_then(pbes2_kdf) {
+            match kdf {
+                Pbes2Kdf::Pbkdf2 { iterations } if iterations > MAX_PBKDF2_ITERATIONS => {
+                    return Err(kdf_too_costly(&format!("PBKDF2: {iterations} iterations")));
+                }
+                Pbes2Kdf::Scrypt { n, r, p } => {
+                    let bytes = 128u64.saturating_mul(n).saturating_mul(r);
+                    if bytes > MAX_SCRYPT_BYTES || p > MAX_SCRYPT_PARALLEL {
+                        return Err(kdf_too_costly(&format!("scrypt: N {n}, r {r}, p {p}")));
+                    }
+                }
+                _ => {}
+            }
+        }
     }
     Ok(())
 }
 
 /// Decode a stored private key for connect.
 ///
-/// `\r\n` is normalized first. An OpenSSH bcrypt key with more than
-/// [`MAX_KEY_KDF_ROUNDS`] rounds is refused before decryption. An unencrypted
+/// `\r\n` is normalized first. The derivation cost named in the cleartext
+/// envelope is refused before decryption: OpenSSH bcrypt above
+/// [`MAX_KEY_KDF_ROUNDS`] rounds, a PuTTY `.ppk` Argon2 cost, or a PKCS#8
+/// PBKDF2 or scrypt cost. An unencrypted
 /// SEC1 or PKCS#8 key is decoded with no passphrase: russh treats any
 /// passphrase as "this PEM is encrypted" and fails an unencrypted key that
 /// was saved with a leftover passphrase. Encrypted PKCS#8 keeps the
@@ -6025,8 +6185,8 @@ pub(crate) fn decode_ssh_private_key(
     passphrase: Option<&str>,
 ) -> Result<PrivateKey, String> {
     let normalized = private_key.replace("\r\n", "\n");
-    // The round count is cleartext. Check it before `decode_secret_key`,
-    // which is what actually runs the bcrypt rounds.
+    // The cost is cleartext. Check it before `decode_secret_key`, which is
+    // what actually runs the derivation (bcrypt, Argon2, PBKDF2, scrypt).
     guard_key_kdf_cost(&normalized)?;
     if is_legacy_encrypted_ec_pem(&normalized) {
         return Err(LEGACY_ENCRYPTED_EC_PEM.into());
@@ -6055,8 +6215,8 @@ pub(crate) enum KeyDecodeError {
 ///
 /// An empty passphrase is treated as none. Decoding itself is
 /// [`decode_ssh_private_key`] (SEC1, PKCS#8, leftover-passphrase stripping,
-/// legacy encrypted EC refusal, and the bcrypt round cap). This wrapper only
-/// sorts the error. A round-cap refusal stays [`KeyDecodeError::Malformed`].
+/// legacy encrypted EC refusal, and the KDF cost cap). This wrapper only
+/// sorts the error. A cost-cap refusal stays [`KeyDecodeError::Malformed`].
 pub(crate) fn decode_private_key(
     private_key: &str,
     passphrase: Option<&str>,
@@ -6403,6 +6563,197 @@ mod key_format_tests {
         let plain = kp.to_openssh(ssh_key::LineEnding::LF).unwrap().to_string();
         assert!(guard_key_kdf_cost(&plain).is_ok());
         assert!(decode_ssh_private_key(&plain, None).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod guard_key_kdf_tests {
+    use super::{
+        decode_private_key, decode_ssh_private_key, guard_key_kdf_cost, pbes2_kdf, KeyDecodeError,
+        Pbes2Kdf, MAX_PBKDF2_ITERATIONS,
+    };
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        if content.len() < 0x80 {
+            out.push(content.len() as u8);
+        } else {
+            let len = (content.len() as u32).to_be_bytes();
+            let skip = len.iter().take_while(|b| **b == 0).count();
+            out.push(0x80 | (4 - skip) as u8);
+            out.extend_from_slice(&len[skip..]);
+        }
+        out.extend_from_slice(content);
+        out
+    }
+
+    fn int(n: u64) -> Vec<u8> {
+        let mut bytes: Vec<u8> = n.to_be_bytes().iter().copied().skip_while(|b| *b == 0).collect();
+        if bytes.is_empty() || bytes[0] & 0x80 != 0 {
+            bytes.insert(0, 0);
+        }
+        tlv(0x02, &bytes)
+    }
+
+    const OID_PBES2: [u8; 9] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x05, 0x0d];
+    const OID_PBKDF2: [u8; 9] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x05, 0x0c];
+    const OID_SCRYPT: [u8; 9] = [0x2b, 0x06, 0x01, 0x04, 0x01, 0xda, 0x47, 0x04, 0x0b];
+    const OID_AES256: [u8; 9] = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x01, 0x2a];
+
+    /// An encrypted PKCS#8 key with the given key derivation and no real key in it.
+    fn pkcs8(kdf_oid: &[u8], kdf_params: Vec<u8>) -> String {
+        let kdf = tlv(0x30, &[tlv(0x06, kdf_oid), tlv(0x30, &kdf_params)].concat());
+        let cipher = tlv(0x30, &[tlv(0x06, &OID_AES256), tlv(0x04, &[7u8; 16])].concat());
+        let pbes2 = tlv(0x30, &[kdf, cipher].concat());
+        let algorithm = tlv(0x30, &[tlv(0x06, &OID_PBES2), pbes2].concat());
+        let der = tlv(0x30, &[algorithm, tlv(0x04, &[1u8; 48])].concat());
+        let b64 = STANDARD.encode(der);
+        let mut out = String::from("-----BEGIN ENCRYPTED PRIVATE KEY-----\n");
+        for chunk in b64.as_bytes().chunks(64) {
+            out.push_str(std::str::from_utf8(chunk).unwrap());
+            out.push('\n');
+        }
+        out.push_str("-----END ENCRYPTED PRIVATE KEY-----\n");
+        out
+    }
+
+    fn pbkdf2(iterations: Vec<u8>) -> String {
+        pkcs8(&OID_PBKDF2, [tlv(0x04, &[9u8; 16]), iterations].concat())
+    }
+
+    fn scrypt(n: u64, r: u64, p: u64) -> String {
+        pkcs8(&OID_SCRYPT, [tlv(0x04, &[9u8; 16]), int(n), int(r), int(p)].concat())
+    }
+
+    fn refused(pem: &str) -> bool {
+        matches!(guard_key_kdf_cost(pem), Err(_))
+    }
+
+    #[test]
+    fn pbkdf2_iterations_are_capped() {
+        for ok in [2048, 10_000, 600_000, MAX_PBKDF2_ITERATIONS] {
+            assert!(!refused(&pbkdf2(int(ok))), "{ok}");
+        }
+        for bad in [MAX_PBKDF2_ITERATIONS + 1, 100_000_000, 1 << 31, u64::MAX] {
+            assert!(refused(&pbkdf2(int(bad))), "{bad}");
+        }
+        // More digits than a u64 holds.
+        assert!(refused(&pbkdf2(tlv(0x02, &[0x01; 12]))));
+        let bad = pbkdf2(int(100_000_000));
+        let err = decode_ssh_private_key(&bad, Some("pw")).expect_err("capped before decrypt");
+        assert!(err.contains("PBKDF2"), "{err}");
+        match decode_private_key(&bad, Some("pw")) {
+            Err(KeyDecodeError::Malformed(msg)) => assert!(msg.contains("PBKDF2"), "{msg}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scrypt_memory_and_parallelism_are_capped() {
+        assert!(!refused(&scrypt(1 << 14, 8, 1)), "OpenSSL's default");
+        assert!(!refused(&scrypt(1 << 20, 1, 1)), "128 MB");
+        assert!(refused(&scrypt(1 << 20, 8, 1)), "1 GB");
+        assert!(refused(&scrypt(1 << 30, 8, 1)), "a TB");
+        assert!(refused(&scrypt(1 << 14, 8, 1000)));
+        assert!(refused(&scrypt(u64::MAX, u64::MAX, u64::MAX)));
+    }
+
+    #[test]
+    fn a_normal_encrypted_pkcs8_key_still_passes_the_guard() {
+        use ssh_key::{Algorithm, PrivateKey};
+        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).expect("generate");
+        let mut buf = Vec::new();
+        russh::keys::encode_pkcs8_pem_encrypted(&key, b"pkcs8-pass", 16, &mut buf).expect("encrypt");
+        let pem = String::from_utf8(buf).expect("utf8");
+        let body: String = pem
+            .lines()
+            .map(str::trim)
+            .skip_while(|line| !line.starts_with("-----BEGIN "))
+            .skip(1)
+            .take_while(|line| !line.starts_with("-----END "))
+            .collect();
+        let der = STANDARD.decode(body.as_bytes()).expect("der");
+        match pbes2_kdf(&der) {
+            Some(Pbes2Kdf::Pbkdf2 { iterations }) => assert_eq!(iterations, 16),
+            other => panic!("expected PBKDF2, got {other:?}"),
+        }
+        assert!(guard_key_kdf_cost(&pem).is_ok());
+        let decoded = decode_ssh_private_key(&pem, Some("pkcs8-pass")).expect("decrypt");
+        assert_eq!(decoded.public_key(), key.public_key());
+    }
+
+    fn ppk(memory: &str, passes: &str, lanes: &str) -> String {
+        format!(
+            "\
+PuTTY-User-Key-File-3: ssh-ed25519
+Encryption: aes256-cbc
+Comment: k
+Public-Lines: 2
+AAAA
+BBBB
+Key-Derivation: Argon2id
+Argon2-Memory: {memory}
+Argon2-Passes: {passes}
+Argon2-Parallelism: {lanes}
+Argon2-Salt: 00
+Private-Lines: 1
+CCCC
+Private-MAC: 00
+"
+        )
+    }
+
+    #[test]
+    fn ppk_argon2_settings_are_capped() {
+        assert!(guard_key_kdf_cost(&ppk("8192", "13", "1")).is_ok(), "PuTTYgen's defaults");
+        assert!(guard_key_kdf_cost(&ppk("8192", "200", "1")).is_ok());
+        assert!(refused(&ppk("4000000", "13", "1")), "4 GB");
+        assert!(refused(&ppk("8192", "100000", "1")));
+        assert!(refused(&ppk("8192", "13", "1000")));
+        let huge = ppk("99999999999999999999", "1", "1");
+        assert!(
+            refused(&huge) || guard_key_kdf_cost(&huge).is_ok(),
+            "does not panic"
+        );
+        // Missing or unreadable numbers are left to the decoder.
+        assert!(guard_key_kdf_cost("PuTTY-User-Key-File-3: ssh-ed25519\nArgon2-Memory: lots\n").is_ok());
+        let costly = ppk("4000000", "13", "1");
+        let err = decode_ssh_private_key(&costly, Some("pw")).expect_err("capped before argon2");
+        assert!(err.contains("Argon2"), "{err}");
+    }
+
+    #[test]
+    fn junk_in_the_armor_never_panics() {
+        let mut seed = 0x2545f4914f6cdd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..4000 {
+            let len = (next() % 200) as usize;
+            let mut der: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            if next() % 2 == 0 && der.len() > 12 {
+                der[..3].copy_from_slice(&[0x30, 0x82, 0x01]);
+            }
+            let _ = pbes2_kdf(&der);
+            let pem = format!(
+                "-----BEGIN ENCRYPTED PRIVATE KEY-----\n{}\n-----END ENCRYPTED PRIVATE KEY-----",
+                STANDARD.encode(&der)
+            );
+            let _ = guard_key_kdf_cost(&pem);
+        }
+        for der in [
+            &[0x30u8][..],
+            &[0x30, 0x80],
+            &[0x30, 0x85, 1, 2, 3, 4, 5],
+            &[0x30, 0x84, 0xff, 0xff, 0xff, 0xff],
+            &[0x30, 0x82, 0x01],
+        ] {
+            assert!(pbes2_kdf(der).is_none());
+        }
     }
 }
 
