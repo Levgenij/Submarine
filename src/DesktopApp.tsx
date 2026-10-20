@@ -33,6 +33,7 @@ import { IS_ANDROID } from "./util/platform";
 import { Sidebar } from "./components/Sidebar";
 import { NodeGrid } from "./components/NodeGrid";
 import { CommandScope, describeScope, parseCommandScope, scopeToJson } from "./util/commandScope";
+import { parseObjectList } from "./util/serverJson";
 import CommandScopePicker from "./components/CommandScopePicker";
 import type { HeldDeletion } from "./components/HeldDeletions";
 import AddNodePanel from "./components/AddNodePanel";
@@ -1015,11 +1016,9 @@ function DesktopApp() {
       proxyType: server.proxy_type || "none",
       proxyHost: server.proxy_host || "",
       proxyPort: server.proxy_port || 1080,
-      tunnels: server.tunnels ? JSON.parse(server.tunnels) : [],
+      tunnels: parseObjectList(server.tunnels),
       autostart: !!server.autostart,
-      mirrors: (() => {
-        try { return JSON.parse(server.mirrors || "[]"); } catch { return []; }
-      })(),
+      mirrors: parseObjectList(server.mirrors),
       color: server.color ?? null,
       notes: server.notes || "",
       runOnConnect: server.run_on_connect || "",
