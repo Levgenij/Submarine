@@ -1,5 +1,103 @@
 # Changelog
 
+## 0.4.0
+
+### Connect
+
+- Key exchange also offers the NIST curves, P-256, P-384, and P-521, after X25519 and before the finite-field groups. SHA-1 group exchange sits with the other SHA-1 exchanges, after every SHA-2 one. A server that offers only one of these can connect. MLKEM and Curve25519 stay first.
+- Keyboard-interactive gives up after 20 empty rounds. Telnet through an SSH server gives the channel 15 seconds to open. An HTTP proxy host is checked before CONNECT and has to be a host name, with no spaces or line breaks.
+- PuTTY and PKCS#8 keys are refused when the cost in the key header is too high, before the passphrase is tried. OpenSSH bcrypt still stops above 1024 rounds. Exactly 1024 is still allowed.
+- A ProxyCommand host written as an IPv6 address in brackets is passed without the brackets. Any other bracket in the host is refused and nothing runs.
+- The connect log lists the first notes from ~/.ssh/config, then one line that further lines were skipped.
+
+### Servers
+
+- A Telnet server opens in a terminal tab, directly or through an SSH server. It is not encrypted, and the form, the list, the tab, and the log say so. The saved-password button types the password and does not press Enter. Telnet is not monitored and does not autostart.
+- A VNC server shows its screen in the tab, directly or through an SSH server. The saved password is used, or the tab asks when the server wants one. The password is not written to the log. A direct connection is marked not encrypted. Through an SSH server, only the hop after that server is called not encrypted. VNC is not monitored, not autostarted, and not a jump host.
+- Open in for an RDP server stays this computer's RDP app. A built-in client in the tab is optional and marked experimental. On a phone the tab offers it and does not connect until it is chosen. The certificate is pinned on its own and checked before any secret is sent.
+- VNC and the built-in RDP client hold the next frame while the page is still drawing, so a slow window does not pile up pictures.
+- Tag colours add more swatches, and a last swatch opens the system colour picker. A saved colour that is not one of the swatches is shown on that swatch. The list still paints whatever colour is saved.
+- Copying a server also copies the approval hold on its on-connect command and forwards. If the original is still waiting, the copy waits and does not run them. Autostart stays off on the copy. Monitor-command holds stay on the original.
+- A service action quotes the unit name, so a systemd instance name that contains a backslash reaches systemctl as written.
+
+### Files
+
+- Files, Mirror, Compare, and the Local / Remote / Split / Side switch keep their words only while the bar is wide enough. Below that every control is an icon, and its name is the tooltip.
+- Double-clicking a remote file looks at the real name before anything is downloaded. A program is not opened. The message says to download it and run it only if you trust it. A script Windows would run opens in Notepad. .js, .ps1, .py, and .sh open in Notepad only when Windows would run them. An editor you set for those still gets them. Case, trailing dots and spaces, and a right-to-left mark do not change the type. Saving a file you are already editing is unchanged.
+- A mirror folder is refused when it is a network path or a device path. A normal drive path still works, and system folders stay refused.
+- A local rename or move does not replace a file or folder that is already there. Renaming a file to another spelling of its own name still works.
+
+### Terminal
+
+- The shell size is sent once it has held still for a moment. A size replaced before that is not sent. While a Wall tile is open, that tile is the one that waits and sends, and the session tab sends nothing.
+- If the view is already at the bottom, a resize puts it back there. A view you scrolled up stays where it is.
+- The Wall can show 1 to 4 rows, or as many as the tiles need. Each row has its own height, so pinning more tiles resizes the rows. One tile still fills the screen.
+- Control characters are left out of a paste. Tab and line breaks stay. The terminal says when something was left out.
+- Escape sequences with a huge parameter are cut down before they reach the page, so a hostile server cannot hang the window. Colours, the alternate screen, titles, and images pass through.
+
+### Sharing
+
+- A sync reply stops at 64 MB. Other API reads stop at 1 MB, an error body at 16 KB, and the update check at 8 MB. A declared length over the limit is refused before the body is read, and gzip is counted after it unpacks. Redirects stay refused.
+- A synced server's tunnels and mirrors are kept only when they are a list of objects, including each forward's name and whether it is stopped. A bare object, a list of numbers or strings, or broken JSON is refused.
+- MobaXterm import stays quick when thousands of sessions share one name. PuTTY session names are read as UTF-8, so an accented or non-Latin name comes out as typed. A name from an older PuTTY that is not UTF-8 keeps one character per byte.
+
+### App
+
+- Minimize, Maximize, and Close stay on a narrow PC window. Android never shows them, including sideways, and a double tap on the bar does not maximize.
+- On Windows, the page is allowed to call the app at the address those calls use.
+- A profile can be unlocked with Windows Hello or a fingerprint. It stays off until you turn it on for that profile on this device, which asks for the password once. The password is not stored. The sealed key sits outside the vault, so export, sync, and backup do not take it. Windows uses a Hello key in the TPM and hides the feature when there is no TPM. Android uses a key that needs a strong biometric. Linux and macOS are not offered it. A vault that cannot be read, because it is busy or the path did not answer, does not delete the Hello key. Only a vault that is gone does. Deleting the profile removes the file. Portable mode keeps it under submarine-data.
+- One window holds a profile. A second window is told the profile is open elsewhere. Other profiles still open. Deleting a profile another window has open is refused. A wrong password or a reload does not leave it locked.
+- A profile file past 65 MB is refused before it is read. Import does not overwrite a profile file that already has that name. Export refuses the profile's own file.
+- Locking or switching a profile stops every status check, including one still waiting on a server that never answers. A connect that does not answer is given up after four times the connect timeout, and a poll after three times the poll timeout. The host is then reported down.
+
+### Dependencies
+
+- rustls 0.23.46, for sync and the update check, and zip 9.0.5. An archive entry that points outside the destination is still refused.
+
+Vault format is unchanged. Existing profiles open without a migration.
+
+## 0.3.11
+
+### Connect
+
+- Settings can follow ~/.ssh/config. Include and Match are read, with a limit on depth and on how many files are opened. A Match block that would run a command is skipped, and the connect log says so. An alias takes HostName and Port from the block that matched the address, and User only when the server has none saved. The switch is on unless this device stored off, and it is hidden on Android. Turning it off reads nothing, including IdentityAgent. The ssh-agent switch still stops every agent contact.
+- A ProxyCommand from that config is the transport when the server has no jump host and no SOCKS or HTTP proxy. ProxyCommand none stays direct. A host or user that a shell would treat specially is refused and nothing runs. The handshake may take two minutes, and the process stops with the connection.
+- A ProxyJump list is a chain of hops, at most 8, and a bad list connects nothing. Each hop uses its own alias. The first hop may use its own ProxyCommand or ProxyJump. Later hops go through the one before. A saved jump host and a SOCKS or HTTP proxy win, and that saved jump host can still use the config. Host keys are checked on every hop.
+- The monitor never runs a ProxyCommand or follows a ProxyJump, and it does not count that server as down.
+- IdentityFile and CertificateFile log in before the agent. IdentitiesOnly leaves the agent out. An RSA certificate uses the hash the server asks for. A key listed in known_hosts, including a hashed line, is trusted with no first-time prompt. A different listed key still goes through the changed-key check. A revoked key is refused. Those files are only read. The monitor still has no prompt and does not read key files.
+- A single hidden keyboard-interactive password question is answered once with the saved password. If the server rejects it, you are asked. Codes, PINs, tokens, and echoed questions still ask.
+- A timeout, a refusal, an unreachable server, or a broken link is tried again every 5 seconds, including through a jump host. A rejected or cancelled login, a host key that was not approved, no common algorithm, and a setting that cannot be used are not. Cancel stops the cycle. After the session has been up, the terminals stay.
+- The first connect waits until the session is listening for the result. On-connect commands are typed once the first terminal is open. Held commands stay held until you allow them.
+
+### Servers
+
+- An RDP server opens this computer's RDP app. The file has the address and the user, and the app asks for the password. Full screen or a window, the clipboard, and shared drives are options on this device. A host with a space, a control character, or a leading dash is refused before any file or command. An SSH server can carry the connection. An RDP server is not a jump host, is not monitored, and does not autostart. A sync edit from an older app keeps the local protocol. On Android they are listed, and they open on a computer.
+
+### Files
+
+- A server with no SFTP program says so at once, before the handshake. A channel that ends at once says the program is missing. The sudo path still says when its own SFTP server is missing.
+- When the SFTP subsystem is missing, listings and transfers go through one fixed shell command. The remote pane shows Shell. A sudo refusal is not tried again. The sudo sftp-server path stays when the subsystem exists.
+- Compare marks the local and remote panes by name: only here, another kind, another size, or newer or older when the times are more than 2 seconds apart. Hiding files that are the same leaves every folder.
+
+### Terminal
+
+- Each terminal keeps 10,000 lines unless Terminal settings set 1,000 to 50,000 for this device. A typed number applies on Enter or blur. Open terminals pick up a change.
+- Terminal settings offer the current colours and named schemes, or a scheme pasted from Windows Terminal. A colour that is not a #hex value is rejected and the scheme already in use stays. Bold in bright colours is on. Keep text readable is off. Open terminals, including a Wall tile, pick the change up at once.
+- At a sudo or su prompt the terminal shows Saved password. Nothing is typed until you press it. This server's saved password, or the saved login's when the server uses one, is typed with no Enter. A password with a line break, a carriage return, or a null is not typed, and the password does not reach the window. A quick connect and a container shell do not show the button.
+- While a terminal is pinned to the Wall, the tile sets the shell size and the session tab does not. When the last tile closes, the tab sends its own size.
+- The phone key bar adds slash and dash. A tap goes through the terminal, so an armed modifier still applies.
+
+### Library
+
+- A saved command can be for every server, or for the servers and folders ticked in its form. A ticked folder includes the servers inside it and the folders under it. In a session, the Library shows that server's commands first, then the ones for every server, and hides the rest. An edit from an older app keeps the choice.
+
+### App
+
+- The window minimum is 480 by 320, so a tiled window can snap. The desktop rail scrolls, so Lock and Settings stay reachable.
+- On Android, export saves through the system picker. The copy stays in the app cache and is removed after a save, a cancel, or a failed write. Recents shows no snapshot on Android 13 and later. Block screenshots is off by default, and that setting is only on Android.
+
+Vault format is unchanged. Existing profiles open without a migration.
+
 ## 0.3.10
 
 ### Connect
