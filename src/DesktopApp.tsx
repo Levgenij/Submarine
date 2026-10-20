@@ -42,6 +42,7 @@ import ProfilePanel from "./components/ProfilePanel";
 import { SessionView } from "./components/SessionView";
 import RdpSessionView from "./components/RdpSessionView";
 import TelnetSessionView from "./components/TelnetSessionView";
+import VncSessionView from "./components/VncSessionView";
 import MonitoringPanel from "./components/MonitoringPanel";
 import { ErrorBoundary } from "./ui/ErrorBoundary";
 
@@ -57,7 +58,7 @@ const appWindow = getCurrentWindow();
 // `serverUuid` is the saved server's sync id. It keys this device's Shell
 // button (see util/shellSync.ts). Quick connect leaves it unset.
 type Session = {
-  id: string; serverId: number; serverName: string; serverUuid?: string | null; protocol?: "ssh" | "rdp" | "telnet"; customName?: string; mirrors?: string; runOnConnect?: string; runOnConnectHeld?: boolean;
+  id: string; serverId: number; serverName: string; serverUuid?: string | null; protocol?: "ssh" | "rdp" | "telnet" | "vnc"; customName?: string; mirrors?: string; runOnConnect?: string; runOnConnectHeld?: boolean;
   quickAuth?: QuickAuth | null; initialTerminals?: SnapTerm[]; initialActiveIndex?: number;
 };
 const tabLabel = (s: Session) => s.customName || s.serverName;
@@ -273,9 +274,9 @@ function DesktopApp() {
 
   const defaultNode = {
     id: null as number | null,
-    // "ssh", "rdp" (it opens in the system's RDP app) or "telnet" (it opens
-    // in a terminal, over telnet).
-    protocol: "ssh" as "ssh" | "rdp" | "telnet",
+    // "ssh", "rdp" (it opens in the system's RDP app), "telnet" (it opens
+    // in a terminal, over telnet) or "vnc" (its screen in the tab).
+    protocol: "ssh" as "ssh" | "rdp" | "telnet" | "vnc",
     // An RDP server's window and sharing on this device (util/rdpOptions).
     rdpOptions: { ...DEFAULT_RDP_OPTIONS },
     name: "", host: "", port: 22, username: "", password: "",
@@ -796,9 +797,9 @@ function DesktopApp() {
         addLog(`Autostart: ${waiting.map((s) => s.name).join(", ")} waiting for your OK (Servers → Review).`, "info");
       }
       // Only an SSH server starts by itself. An RDP server would open an app,
-      // and a telnet server waits until it is opened.
+      // and a telnet or VNC server waits until it is opened.
       const toStart = list.filter((s) => s.autostart && !isHeld(s) && !restoredIds.has(s.id) && (s.protocol ?? "ssh") === "ssh");
-      const base = (s: any): Session => ({ id: `session-${s.id}`, serverId: s.id, serverName: s.name, serverUuid: s.uuid ?? null, protocol: s.protocol === "rdp" || s.protocol === "telnet" ? s.protocol : "ssh", mirrors: s.mirrors });
+      const base = (s: any): Session => ({ id: `session-${s.id}`, serverId: s.id, serverName: s.name, serverUuid: s.uuid ?? null, protocol: s.protocol === "rdp" || s.protocol === "telnet" || s.protocol === "vnc" ? s.protocol : "ssh", mirrors: s.mirrors });
       const newSessions: Session[] = [
         ...snap.sessions.map((r) => ({
           ...base(byId.get(r.serverId)),
@@ -939,7 +940,7 @@ function DesktopApp() {
         id: sessionId,
         serverId: server.id,
         serverName: server.name,
-        protocol: server.protocol === "rdp" || server.protocol === "telnet" ? server.protocol : "ssh",
+        protocol: server.protocol === "rdp" || server.protocol === "telnet" || server.protocol === "vnc" ? server.protocol : "ssh",
         // Pass the raw mirrors JSON through to SessionView so the
         // MirrorsPanel can pre-populate "Saved on this node" without
         // another round-trip to the backend.
@@ -1000,7 +1001,7 @@ function DesktopApp() {
     }
     setNewNode({
       id: server.id,
-      protocol: server.protocol === "rdp" || server.protocol === "telnet" ? server.protocol : "ssh",
+      protocol: server.protocol === "rdp" || server.protocol === "telnet" || server.protocol === "vnc" ? server.protocol : "ssh",
       rdpOptions: readRdpOptions(server.uuid),
       name: server.name || "",
       host: server.host || "",
@@ -2174,6 +2175,15 @@ function DesktopApp() {
                                 isActiveView={isFocused}
                                 onPromptChange={handlePromptChange}
                               />
+                            ) : sess.protocol === "vnc" ? (
+                              <VncSessionView
+                                session={sess}
+                                displayName={tabLabel(sess)}
+                                onClose={getCloseHandler(sess.id)}
+                                onStatusChange={handleSessionStatus}
+                                isActiveView={isFocused}
+                                onPromptChange={handlePromptChange}
+                              />
                             ) : sess.protocol === "telnet" ? (
                               <TelnetSessionView
                                 session={sess}
@@ -2748,19 +2758,22 @@ function DesktopApp() {
             // `normalize_server_identity` enforces this again on the server
             // side as a belt-and-suspenders guarantee.
             const isInline = newNode.authType === "custom_pass" || newNode.authType === "custom_key";
-            // An RDP or telnet server has a host, port, user (its own or a
-            // saved login's) and maybe an SSH server to go through; nothing
+            // An RDP, telnet, or VNC server has a host, port, login (its own
+            // or a saved one) and maybe an SSH server to go through; nothing
             // that runs over SSH (forwards, mirrors, autostart, a proxy, a
             // key). An RDP server's saved password isn't touched: the RDP app
-            // asks. A telnet server's is kept, for the terminal's password button.
+            // asks. A telnet server's is kept, for the terminal's password
+            // button. A VNC server's is kept, for its login.
             const isRdp = newNode.protocol === "rdp";
             const isTelnet = newNode.protocol === "telnet";
-            const payload = isRdp || isTelnet ? {
+            const isVnc = newNode.protocol === "vnc";
+            const keepsPassword = isTelnet || isVnc;
+            const payload = isRdp || isTelnet || isVnc ? {
               name: newNode.name,
               host: newNode.host,
               port: newNode.port,
-              username: isInline ? (newNode.username?.trim() || null) : null,
-              password: isTelnet && newNode.authType === "custom_pass" ? (newNode.password || null) : null,
+              username: isInline && !isVnc ? (newNode.username?.trim() || null) : null,
+              password: keepsPassword && newNode.authType === "custom_pass" ? (newNode.password || null) : null,
               credentialId: (newNode.authType === "vault" && newNode.credentialId) ? parseInt(newNode.credentialId) : null,
               folderId: newNode.folderId ? parseInt(newNode.folderId) : null,
               proxyType: "none",
@@ -2772,7 +2785,7 @@ function DesktopApp() {
               autostart: false,
               mirrors: [],
               color: newNode.color ?? null,
-              preservePassword: isTelnet ? !!newNode.id && !newNode.password_dirty : true,
+              preservePassword: keepsPassword ? !!newNode.id && !newNode.password_dirty : true,
             } : {
               name: newNode.name,
               host: newNode.host,
@@ -2831,9 +2844,9 @@ function DesktopApp() {
             } catch (e) {
               addLog(`SAVE_JUMP_HOST_FAILED: ${e}`, "error");
             }
-            // SSH, RDP or telnet: the same separate-write pattern.
+            // SSH, RDP, telnet or VNC: the same separate-write pattern.
             try {
-              await invoke("set_server_protocol", { id: savedId, value: isRdp ? "rdp" : isTelnet ? "telnet" : null });
+              await invoke("set_server_protocol", { id: savedId, value: isRdp ? "rdp" : isTelnet ? "telnet" : isVnc ? "vnc" : null });
             } catch (e) {
               addLog(`SAVE_PROTOCOL_FAILED: ${e}`, "error");
             }

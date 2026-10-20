@@ -6,6 +6,12 @@ import { HeldReview } from "./HeldReview";
 import { HeldDeletions } from "./HeldDeletions";
 import { folderTree } from "../util/folderTree";
 
+function vncListTitle(jumpHostId: unknown): string {
+  return jumpHostId
+    ? "Only the hop after the SSH server isn't encrypted"
+    : "VNC server (not encrypted)";
+}
+
 export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp, onActiveFolderChange, onOpenServer, onEditServer, onAddClick, onQuickConnect, onRemoveServer, onRemoveFolder, onRenameFolder, onCreateFolder, onMoveServer, onMoveFolder, onCloneServer, onReorderServers, keyChange, onAcceptKey, onAllowHeld, heldDeletions, onResolveDeletions, isMobile }: any) => {
   const [search, setSearch] = useState("");
   // Changes someone else made in a shared profile that this device holds
@@ -452,7 +458,9 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
               ? <span title="RDP server" className="shrink-0 px-1 rounded text-[9px] font-bold tracking-wider leading-[14px] text-sky-300 bg-sky-500/10 border border-sky-500/20">RDP</span>
               : s.protocol === "telnet"
                 ? <span title="Telnet server (not encrypted)" className="shrink-0 px-1 rounded text-[9px] font-bold tracking-wider leading-[14px] text-amber-300 bg-amber-500/10 border border-amber-500/20">TELNET</span>
-                : <Globe size={10} className="text-zinc-400 shrink-0" />}
+                : s.protocol === "vnc"
+                  ? <span title={vncListTitle(s.jump_host_id)} className="shrink-0 px-1 rounded text-[9px] font-bold tracking-wider leading-[14px] text-violet-300 bg-violet-500/10 border border-violet-500/20">VNC</span>
+                  : <Globe size={10} className="text-zinc-400 shrink-0" />}
             <span className="text-[10.5px] text-zinc-300 font-mono truncate">{s.host}</span>
           </div>
         </div>
@@ -899,7 +907,9 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
                   ? <span title="RDP server" className="shrink-0 px-1 rounded text-[9px] font-bold tracking-wider leading-[14px] text-sky-300 bg-sky-500/10 border border-sky-500/20">RDP</span>
                   : draggedServer.protocol === "telnet"
                     ? <span title="Telnet server (not encrypted)" className="shrink-0 px-1 rounded text-[9px] font-bold tracking-wider leading-[14px] text-amber-300 bg-amber-500/10 border border-amber-500/20">TELNET</span>
-                    : <Globe size={10} className="text-zinc-400 shrink-0" />}
+                    : draggedServer.protocol === "vnc"
+                      ? <span title={vncListTitle(draggedServer.jump_host_id)} className="shrink-0 px-1 rounded text-[9px] font-bold tracking-wider leading-[14px] text-violet-300 bg-violet-500/10 border border-violet-500/20">VNC</span>
+                      : <Globe size={10} className="text-zinc-400 shrink-0" />}
                 <span className="text-[10.5px] text-zinc-300 font-mono truncate">{draggedServer.host}</span>
               </div>
             </div>
