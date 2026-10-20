@@ -17,6 +17,7 @@ import { fontFamilyCss, readFontFamily, readFontSize } from "../util/terminalFon
 import { readShellSyncPairs, useShellSyncServer, type ShellSyncPair } from "../util/shellSync";
 import { readUseLocalShell } from "../util/terminalShell";
 import { readUseSshAgent } from "../util/sshAgent";
+import { parseObjectList } from "../util/serverJson";
 import { useConfirm } from "../ui/confirm";
 
 // What the shell-config push commands answer (mirror.rs' ShellSync* types).
@@ -2242,9 +2243,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   sessionId={session.id}
                   disabled={status !== 'connected'}
                   serverId={session.serverId}
-                  mirrorsConfig={(() => {
-                    try { return JSON.parse(session.mirrors || "[]"); } catch { return []; }
-                  })()}
+                  mirrorsConfig={parseObjectList(session.mirrors)}
                   terminalId={activeTab}
                   onRevealTerminal={toolAlone ? () => {
                     // Compact has no room for both, so close the tool. A roomy
