@@ -14073,8 +14073,9 @@ async fn restart_session_tunnels(
 async fn mirror_dry_run(
     ssh: tauri::State<'_, SshState>,
     session_id: String,
-    spec: mirror::MirrorSpec,
+    mut spec: mirror::MirrorSpec,
 ) -> Result<mirror::DryRunReport, String> {
+    spec.local = guard_mirror_folder(&spec.local)?;
     let handle = {
         let conns = ssh.connections.lock().await;
         conns.get(&session_id).cloned()
@@ -14089,8 +14090,9 @@ async fn start_mirror(
     ssh: tauri::State<'_, SshState>,
     mirrors: tauri::State<'_, MirrorMap>,
     session_id: String,
-    spec: mirror::MirrorSpec,
+    mut spec: mirror::MirrorSpec,
 ) -> Result<String, String> {
+    spec.local = guard_mirror_folder(&spec.local)?;
     let handle = {
         let conns = ssh.connections.lock().await;
         conns.get(&session_id).cloned()
@@ -21459,6 +21461,72 @@ fn guard_local_path_nofollow(path: &str, must_exist: bool) -> Result<std::path::
         std::fs::symlink_metadata(&full).map_err(|e| format!("Invalid path: {}", e))?;
     }
     check_local_path_policy(full)
+}
+
+/// A mirror's local folder, checked before any filesystem call.
+///
+/// The folder is saved with the server, so a co-member of a shared profile can
+/// change it, and a mirror writes into it. A network path (`\\host\share`),
+/// a device path (`\\.\...`), or a verbatim UNC (`\\?\UNC\...`) is refused
+/// here: the first lookup sends this account's Windows login to that host.
+/// A drive path still passes, including a portable-mode folder and the
+/// `\\?\C:\...` spelling canonicalize uses. Then the usual local-path guard
+/// and the folder check apply. The resolved path is what the mirror uses.
+fn guard_mirror_folder(local: &str) -> Result<String, String> {
+    use std::path::{Component, Prefix};
+    if let Some(Component::Prefix(prefix)) = std::path::Path::new(local).components().next() {
+        if matches!(
+            prefix.kind(),
+            Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(..)
+        ) {
+            return Err(format!(
+                "[MIRROR] A network share or device path ({local}) can't be a mirror's local folder."
+            ));
+        }
+    }
+    let folder = guard_local_path(local, false)?;
+    if !folder.is_dir() {
+        return Err(format!("[MIRROR] The local folder isn't a folder: {local}"));
+    }
+    Ok(display_path(&folder))
+}
+
+#[cfg(test)]
+mod mirror_folder_guard_tests {
+    use super::guard_mirror_folder;
+
+    #[test]
+    fn a_relative_or_empty_folder_is_refused() {
+        for bad in ["", ".", "..", "sub/dir", "folder", "./x"] {
+            assert!(guard_mirror_folder(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_missing_folder_and_a_file_are_refused() {
+        let dir = std::env::temp_dir().join(format!("submarine-mirror-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(guard_mirror_folder(&dir.join("nope").to_string_lossy()).is_err());
+        assert!(guard_mirror_folder(&file.to_string_lossy()).is_err());
+        // A real folder passes, and what comes back is its resolved path.
+        let ok = guard_mirror_folder(&dir.to_string_lossy()).unwrap();
+        assert!(std::path::Path::new(&ok).is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_network_share_is_refused_before_anything_is_looked_at() {
+        for bad in [r"\\attacker.example\share\dir", r"\\?\UNC\attacker.example\share", r"\\.\pipe\x"] {
+            let t = std::time::Instant::now();
+            let err = guard_mirror_folder(bad).unwrap_err();
+            assert!(err.contains("network share") || err.contains("MIRROR"), "{bad}: {err}");
+            assert!(t.elapsed() < std::time::Duration::from_secs(1), "{bad} was looked up on the network");
+        }
+    }
 }
 
 fn check_local_path_policy(canonical: std::path::PathBuf) -> Result<std::path::PathBuf, String> {
