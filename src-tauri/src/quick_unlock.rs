@@ -15,9 +15,10 @@
 //!   a strong biometric check (BiometricPrompt) and is dropped when a new
 //!   fingerprint is enrolled (SubmarinePlugin.kt).
 //! The file also holds the vault's salt: a vault replaced since (imported or
-//! restored again) doesn't match, and the file is dropped. A copy of the file
-//! on another machine (a portable folder moved) can't be opened there: the
-//! platform key it needs stays behind.
+//! restored again) doesn't match, and the file is dropped. One that can't be
+//! read just now (in use, or on a network drive that isn't there) is left
+//! alone. A copy of the file on another machine (a portable folder moved)
+//! can't be opened there: the platform key it needs stays behind.
 //!
 //! The password itself is never kept. Linux and macOS aren't offered it.
 //! The file lives under app data (`quick-unlock/<profile>.json`), which portable
@@ -88,11 +89,57 @@ fn read_file(path: &Path) -> Option<SealedFile> {
     (f.v == FILE_VERSION && f.method == METHOD).then_some(f)
 }
 
-/// The salt in a vault file's header (it never changes for that vault).
-fn vault_salt(app: &tauri::AppHandle, name: &str) -> Option<[u8; SALT_LEN]> {
-    let data = std::fs::read(crate::profile_path(app, name).ok()?).ok()?;
-    let (salt, _, _) = crate::parse_vault_blob(&data).ok()?;
-    salt.try_into().ok()
+/// What a vault file says about its salt.
+#[derive(Debug, PartialEq, Eq)]
+enum VaultSalt {
+    Salt([u8; SALT_LEN]),
+    /// No vault there: no file, or not a vault.
+    Gone,
+    /// There may be one, but it couldn't be read just now (an antivirus or a
+    /// backup tool has the file, or a network drive didn't answer). That says
+    /// nothing about the vault, so nothing is dropped over it.
+    Unreadable,
+}
+
+/// The salt in a vault file's header (it never changes for that vault). Only
+/// the header is read, not the vault.
+fn salt_in(path: &Path) -> VaultSalt {
+    use std::io::{ErrorKind, Read as _};
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if vault_file_gone(&e) => return VaultSalt::Gone,
+        Err(_) => return VaultSalt::Unreadable,
+    };
+    let mut head = [0u8; crate::HEADER_LEN + crate::NONCE_LEN];
+    match file.read_exact(&mut head) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::UnexpectedEof => return VaultSalt::Gone,
+        Err(_) => return VaultSalt::Unreadable,
+    }
+    match crate::parse_vault_blob(&head) {
+        Ok((salt, _, _)) => salt.try_into().map(VaultSalt::Salt).unwrap_or(VaultSalt::Gone),
+        Err(_) => VaultSalt::Gone,
+    }
+}
+
+/// A missing vault file. `NotFound` is not enough: Rust also reports a missing
+/// drive letter and a network path that didn't answer as `NotFound`.
+fn vault_file_gone(err: &std::io::Error) -> bool {
+    if err.kind() != std::io::ErrorKind::NotFound {
+        return false;
+    }
+    const WIN_INVALID_DRIVE: i32 = 15;
+    const WIN_BAD_NETPATH: i32 = 53;
+    const WIN_BAD_NET_NAME: i32 = 67;
+    !matches!(err.raw_os_error(), Some(WIN_INVALID_DRIVE | WIN_BAD_NETPATH | WIN_BAD_NET_NAME))
+}
+
+fn vault_salt(app: &tauri::AppHandle, name: &str) -> VaultSalt {
+    match crate::profile_path(app, name) {
+        Ok(path) => salt_in(&path),
+        // The path couldn't be resolved. That is not a missing vault.
+        Err(_) => VaultSalt::Unreadable,
+    }
 }
 
 /// Removes the file and its platform key. Best effort: nothing to remove is
@@ -160,7 +207,8 @@ pub async fn quick_unlock_support(app: tauri::AppHandle) -> Result<Support, Stri
 }
 
 /// Whether it's on for this profile on this device. A file that no longer
-/// fits the profile's vault is dropped here.
+/// fits the profile's vault is dropped here. A vault that can't be read
+/// right now is left in place.
 #[tauri::command]
 pub async fn quick_unlock_status(app: tauri::AppHandle, name: String) -> Result<bool, String> {
     if METHOD.is_empty() {
@@ -169,7 +217,10 @@ pub async fn quick_unlock_status(app: tauri::AppHandle, name: String) -> Result<
     let path = file_for(&app, &name)?;
     let Some(f) = read_file(&path) else { return Ok(false) };
     match vault_salt(&app, &name) {
-        Some(salt) if hex::encode(salt) == f.vault_salt => Ok(true),
+        VaultSalt::Salt(salt) if hex::encode(salt) == f.vault_salt => Ok(true),
+        // Can't be read now: leave it as it is. Dropping it here lost the
+        // Windows Hello key to a vault file that was only busy for a moment.
+        VaultSalt::Unreadable => Ok(true),
         _ => {
             forget(&app, &name);
             Ok(false)
@@ -180,6 +231,7 @@ pub async fn quick_unlock_status(app: tauri::AppHandle, name: String) -> Result<
 /// Turns it on for the open profile. Takes its password again, so a profile
 /// left open can't be set to open with somebody else's finger. The password
 /// is checked before anything is written; a wrong one leaves the disk as it was.
+/// The setting already there stays until the new one is written.
 #[tauri::command]
 pub async fn quick_unlock_enable(app: tauri::AppHandle, state: tauri::State<'_, DbState>, password: String) -> Result<(), String> {
     if METHOD.is_empty() || !platform::offered() {
@@ -199,12 +251,14 @@ pub async fn quick_unlock_enable(app: tauri::AppHandle, state: tauri::State<'_, 
     if !ct_eq(derived.as_ref(), key.as_ref()) {
         return Err("[QUICK_UNLOCK] WRONG_PASSWORD".into());
     }
-    if vault_salt(&app, &name) != Some(salt) {
+    if vault_salt(&app, &name) != VaultSalt::Salt(salt) {
         // The open vault isn't the one on disk (not saved yet): nothing to seal against.
         return Err("[QUICK_UNLOCK] NOT_SAVED".into());
     }
 
-    forget(&app, &name);
+    // What is set up now stays until the new one is in place: a prompt the
+    // user cancels, or a write that fails, must not turn it off.
+    let previous = read_file(&file_for(&app, &name)?);
     let mut raw = [0u8; 16];
     rand::rng().fill_bytes(&mut raw);
     let id = format!("submarine-quick-unlock-{}", hex::encode(raw));
@@ -219,11 +273,24 @@ pub async fn quick_unlock_enable(app: tauri::AppHandle, state: tauri::State<'_, 
         sealed: B64.encode(&sealed.sealed),
         iv: sealed.iv.map(|v| B64.encode(v)),
     };
-    let dir = quick_unlock_dir(&app)?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("[FILE] DIR_CREATION_FAILED: {e}"))?;
-    let path = file_for(&app, &name)?;
-    let bytes = serde_json::to_vec(&file).map_err(|e| e.to_string())?;
-    commit_sealed(&path, &bytes)?;
+    // From here, a failure leaves the platform key just made with no file to
+    // go with it: drop that key.
+    let new_id = file.id.clone();
+    let written = (|| -> Result<(), String> {
+        let dir = quick_unlock_dir(&app)?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("[FILE] DIR_CREATION_FAILED: {e}"))?;
+        let path = file_for(&app, &name)?;
+        let bytes = serde_json::to_vec(&file).map_err(|e| e.to_string())?;
+        commit_sealed(&path, &bytes)
+    })();
+    if let Err(e) = written {
+        platform::forget(&app, &new_id);
+        return Err(e);
+    }
+    // The new one is in place: now the old key can go.
+    if let Some(old) = previous {
+        platform::forget(&app, &old.id);
+    }
     Ok(())
 }
 
@@ -243,7 +310,13 @@ pub async fn quick_unlock(app: tauri::AppHandle, state: tauri::State<'_, DbState
     }
     let path = file_for(&app, &name)?;
     let f = read_file(&path).ok_or(STALE)?;
-    let salt = vault_salt(&app, &name).ok_or(STALE)?;
+    let salt = match vault_salt(&app, &name) {
+        VaultSalt::Salt(salt) => salt,
+        VaultSalt::Gone => return Err(STALE.into()),
+        VaultSalt::Unreadable => {
+            return Err("[QUICK_UNLOCK] The profile's file couldn't be read just now. Try again, or use the password.".into())
+        }
+    };
     if hex::encode(salt) != f.vault_salt {
         forget(&app, &name);
         return Err(STALE.into());
@@ -589,6 +662,87 @@ mod tests {
         let partial = dir.join("x.json");
         std::fs::write(&partial, &text.as_bytes()[..text.len() / 2]).unwrap();
         assert!(read_file(&partial).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod vault_salt_tests {
+    use super::*;
+
+    fn temp(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("submarine-quick-salt-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn header(salt: [u8; SALT_LEN]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"OMNV");
+        v.push(1);
+        v.extend_from_slice(&salt);
+        v.extend_from_slice(&[0u8; crate::NONCE_LEN]);
+        v
+    }
+
+    #[test]
+    fn the_salt_is_read_from_the_header_alone() {
+        let dir = temp("ok");
+        let path = dir.join("p.submarine");
+        let mut file = header([7u8; SALT_LEN]);
+        file.extend_from_slice(&vec![0xAA; 3 * 1024 * 1024]); // the vault itself is not looked at
+        std::fs::write(&path, &file).unwrap();
+        assert_eq!(salt_in(&path), VaultSalt::Salt([7u8; SALT_LEN]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_file_or_no_vault_is_gone_and_a_busy_file_is_unreadable() {
+        let dir = temp("gone");
+        assert_eq!(salt_in(&dir.join("missing.submarine")), VaultSalt::Gone);
+        let short = dir.join("short.submarine");
+        std::fs::write(&short, b"OMNV").unwrap();
+        assert_eq!(salt_in(&short), VaultSalt::Gone);
+        let other = dir.join("other.submarine");
+        std::fs::write(&other, vec![b'x'; 200]).unwrap();
+        assert_eq!(salt_in(&other), VaultSalt::Gone);
+        let mut bad_version = header([1u8; SALT_LEN]);
+        bad_version[4] = 9;
+        let versioned = dir.join("v9.submarine");
+        std::fs::write(&versioned, bad_version).unwrap();
+        assert_eq!(salt_in(&versioned), VaultSalt::Gone);
+        // Something that can't be opened as a file (a folder here) is not a verdict on any vault.
+        assert_eq!(salt_in(&dir), VaultSalt::Unreadable);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn not_found_is_gone_unless_the_drive_or_network_path_failed() {
+        use std::io::{Error, ErrorKind};
+        assert!(vault_file_gone(&Error::new(ErrorKind::NotFound, "missing")));
+        assert!(!vault_file_gone(&Error::new(ErrorKind::PermissionDenied, "busy")));
+        #[cfg(windows)]
+        {
+            assert!(vault_file_gone(&Error::from_raw_os_error(2)));
+            assert!(vault_file_gone(&Error::from_raw_os_error(3)));
+            assert!(!vault_file_gone(&Error::from_raw_os_error(15)));
+            assert!(!vault_file_gone(&Error::from_raw_os_error(53)));
+            assert!(!vault_file_gone(&Error::from_raw_os_error(67)));
+            assert!(!vault_file_gone(&Error::from_raw_os_error(32)));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_file_held_open_exclusively_is_unreadable() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = temp("busy");
+        let path = dir.join("p.submarine");
+        std::fs::write(&path, header([1u8; SALT_LEN])).unwrap();
+        let _lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
+        assert_eq!(salt_in(&path), VaultSalt::Unreadable);
+        drop(_lock);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
