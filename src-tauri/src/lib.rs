@@ -36,6 +36,7 @@ mod proxy_command;
 mod rdp;
 mod rdp_client;
 mod telnet;
+mod term_filter;
 mod vnc_client;
 mod screen_flow;
 mod quick_unlock;
