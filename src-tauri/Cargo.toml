@@ -138,6 +138,7 @@ zstd = { version = "0.14", default-features = false }
 # String/Vec passed as args to argon2/aes-gcm are zeroized internally by
 # those crates.
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
+vnc-rs = "0.6"
 # Archive / extract in the local file panel (the remote side runs tar / zip on
 # the server). deflate-flate2 reuses the flate2 already in the tree via russh.
 zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2"] }
