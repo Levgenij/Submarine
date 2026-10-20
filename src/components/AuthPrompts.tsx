@@ -2,7 +2,8 @@ import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { Check, X, ShieldAlert, KeyRound } from "lucide-react";
 
 // The host-key and keyboard-interactive (2FA / password) prompts of a
-// connection, as an SSH tab and an RDP tab (its SSH server) show them.
+// connection, as an SSH tab, an RDP tab (its SSH server), and a telnet tab
+// show them.
 // State and answers stay with the tab; this only draws them.
 export function AuthPrompts({
   fingerprintPrompt,

@@ -113,6 +113,7 @@ const TerminalView = ({
   serverId = 0,
   serverName = "",
   attachOnly = false,
+  telnet = false,
 }: {
   sessionId: string;
   terminalId: string;
@@ -148,6 +149,10 @@ const TerminalView = ({
   /// Docker tab in InfoPanel to open an interactive session inside a
   /// specific container without leaving the app.
   containerExec?: { container: string; useSudo: boolean };
+  /// A telnet server's terminal: it opens the connection its tab made
+  /// (`telnet_open_terminal`) instead of a shell over SSH. Keys, sizes and
+  /// the saved-password button work the same.
+  telnet?: boolean;
   /// Bumped by the parent SessionView on every successful reconnect.
   /// When the value changes we re-open a fresh PTY against the new SSH
   /// handle WITHOUT disposing xterm — the user keeps their scroll-back
@@ -352,7 +357,16 @@ const TerminalView = ({
     // again once the reopen succeeds. An open Wall tile keeps its own size.
     const syncSize = () => resendPtySize(terminalId, term.cols, term.rows);
     const ce = containerExecRef.current;
-    if (ce) {
+    if (telnet) {
+      invoke('telnet_open_terminal', {
+        sessionId,
+        terminalId,
+        cols: term.cols || 80,
+        rows: term.rows || 24,
+      }).then(syncSize, e => {
+        term.writeln(`\x1b[31mReconnect failed: ${e}\x1b[0m`);
+      });
+    } else if (ce) {
       invoke('open_container_terminal', {
         sessionId,
         terminalId,
@@ -518,7 +532,7 @@ const TerminalView = ({
     toastTimerRef.current = window.setTimeout(() => setToast(null), 1400);
   };
 
-  // At a sudo or su prompt, offer to type this server's saved password.
+  // At a sudo, su, or telnet password prompt, offer to type this server's saved password.
   // Nothing is typed until the button is pressed. The backend types it, so
   // the password never arrives here. A quick connect (serverId 0) and a
   // container exec have no saved password, so the button is not shown.
@@ -651,7 +665,16 @@ const TerminalView = ({
         // The backend drops resizes while a shell is starting, so send the
         // fitted size again once the open succeeds.
         const syncSize = () => resendPtySize(terminalId, term.cols, term.rows);
-        if (containerExec) {
+        if (telnet) {
+          invoke('telnet_open_terminal', {
+            sessionId,
+            terminalId,
+            cols: term.cols || 80,
+            rows: term.rows || 24,
+          }).then(syncSize, e => {
+            term.writeln(`\x1b[31mFailed to open terminal: ${e}\x1b[0m`);
+          });
+        } else if (containerExec) {
           invoke('open_container_terminal', {
             sessionId,
             terminalId,
