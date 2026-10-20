@@ -9706,8 +9706,9 @@ fn apply_tcp_keepalive(stream: &tokio::net::TcpStream) {
 /// Everything here is pure Rust in russh 0.63, so the set is identical in
 /// debug, release and Android builds (the old OpenSSL-backed `full-ssh-algos`
 /// feature is gone). Order = preference: modern first; the legacy entries
-/// (ssh-rsa/SHA-1 host keys, DH group14/group1 SHA-1 KEX, HMAC-SHA1) stay
-/// last, purely for old/embedded servers that offer nothing better.
+/// (ssh-rsa/SHA-1 host keys, DH group14/group-exchange/group1 SHA-1 KEX,
+/// HMAC-SHA1) stay last, purely for old/embedded servers that offer nothing
+/// better.
 pub(crate) fn ssh_preferred_algorithms() -> russh::Preferred {
     use russh::keys::{Algorithm, EcdsaCurve, HashAlg};
     use russh::{cipher, compression, kex, mac};
@@ -9717,6 +9718,11 @@ pub(crate) fn ssh_preferred_algorithms() -> russh::Preferred {
         kex::MLKEM768X25519_SHA256, // hybrid post-quantum (OpenSSH 9.9+; its default since 10.0)
         kex::CURVE25519,
         kex::CURVE25519_PRE_RFC_8731,
+        // The NIST curves, in OpenSSH's own order: the only KEX of some
+        // servers and network devices.
+        kex::ECDH_SHA2_NISTP256,
+        kex::ECDH_SHA2_NISTP384,
+        kex::ECDH_SHA2_NISTP521,
         // Group exchange: the only KEX some hardened / appliance servers enable.
         // Bounds in ssh_gex_params.
         kex::DH_GEX_SHA256,
@@ -9725,8 +9731,10 @@ pub(crate) fn ssh_preferred_algorithms() -> russh::Preferred {
         kex::DH_G16_SHA512,
         kex::DH_G15_SHA512,
         kex::DH_G14_SHA256,
-        // Legacy, last resort for old servers.
+        // Legacy, last resort for old servers (group exchange over SHA-1 is
+        // the only one of some old network devices).
         kex::DH_G14_SHA1,
+        kex::DH_GEX_SHA1,
         kex::DH_G1_SHA1,
         // Pseudo-algorithms, never selected as the KEX: RFC 8308 ext-info
         // (server-sig-algs -> RSA SHA-2 user auth) and OpenSSH strict KEX
@@ -10273,6 +10281,26 @@ mod ssh_config_tests {
         let gex = pos("diffie-hellman-group-exchange-sha256");
         assert!(pos("mlkem768x25519-sha256") < gex && pos("curve25519-sha256") < gex);
         assert!(gex < pos("diffie-hellman-group14-sha256"));
+        // The NIST curves after X25519, before the finite-field groups.
+        assert!(pos("curve25519-sha256@libssh.org") < pos("ecdh-sha2-nistp256"));
+        assert!(
+            pos("ecdh-sha2-nistp256") < pos("ecdh-sha2-nistp384")
+                && pos("ecdh-sha2-nistp384") < pos("ecdh-sha2-nistp521")
+        );
+        assert!(pos("ecdh-sha2-nistp521") < gex);
+        // SHA-1 only as a last resort, after every SHA-2 exchange. The
+        // extension pseudo-algorithms stay after them and are not real KEX.
+        let sha1 = [
+            "diffie-hellman-group14-sha1",
+            "diffie-hellman-group-exchange-sha1",
+            "diffie-hellman-group1-sha1",
+        ]
+        .map(pos);
+        assert!(sha1.windows(2).all(|w| w[0] < w[1]));
+        for (i, k) in kex.iter().enumerate() {
+            let real = ["diffie-hellman", "ecdh", "curve", "mlkem"].iter().any(|p| k.starts_with(p));
+            assert!(!real || k.ends_with("-sha1") || i < sha1[0], "{k} comes after a SHA-1 one");
+        }
         // Host keys: the pre-0.63 release order first, so already-pinned hosts
         // keep negotiating the key type whose fingerprint is on file.
         let keys: Vec<String> = p.key.iter().map(|a| a.to_string()).collect();
@@ -10354,6 +10382,37 @@ mod ssh_config_tests {
         assert_eq!(format!("{:?}", names.client_compression), "None");
         assert_eq!(format!("{:?}", names.server_compression), "None");
         assert_eq!(names.kex.as_ref(), "mlkem768x25519-sha256");
+    }
+
+    /// Servers whose only key exchange is one of the NIST curves, or the
+    /// old group exchange over SHA-1, connect and negotiate that one.
+    #[tokio::test]
+    async fn servers_with_only_a_nist_curve_or_sha1_group_exchange_connect() {
+        for only in [
+            russh::kex::ECDH_SHA2_NISTP256,
+            russh::kex::ECDH_SHA2_NISTP384,
+            russh::kex::ECDH_SHA2_NISTP521,
+            russh::kex::DH_GEX_SHA1,
+        ] {
+            let only_this = move |c: &mut russh::server::Config| {
+                c.preferred = russh::Preferred {
+                    kex: Cow::Owned(vec![only]),
+                    ..russh::Preferred::default()
+                };
+            };
+            let server = TestServer::with_gex_group(russh::kex::dh::groups::DH_GROUP14);
+            let client = TestClient::default();
+            let negotiated = Arc::clone(&client.negotiated);
+            tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                connect_with_client(server, only_this, build_ssh_client_config(), client),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{} handshake must finish", only.as_ref()))
+            .unwrap_or_else(|e| panic!("{} must be accepted: {e:?}", only.as_ref()));
+            let names = negotiated.lock().unwrap().clone().expect("kex done");
+            assert_eq!(names.kex.as_ref(), only.as_ref());
+        }
     }
 
     /// A server that ONLY does diffie-hellman-group-exchange-sha256 and
