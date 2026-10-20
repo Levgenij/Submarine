@@ -384,7 +384,8 @@ const MonitoringPanel = ({ servers, addLog }: Props) => {
   // ---- derived ----------------------------------------------------------------
 
   const availableToAdd = useMemo(
-    () => servers.filter((s: any) => s.protocol !== "rdp" && !rows.some((r) => r.node_id === s.id)),
+    // Only an SSH server has a shell to read numbers from (not RDP or telnet).
+    () => servers.filter((s: any) => (s.protocol ?? "ssh") === "ssh" && !rows.some((r) => r.node_id === s.id)),
     [servers, rows]
   );
   const anyRunning = rows.some((r) => !r.paused);
