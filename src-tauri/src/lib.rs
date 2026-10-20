@@ -7720,6 +7720,15 @@ async fn clone_server(state: tauri::State<'_, DbState>, id: i32) -> Result<i64, 
         "UPDATE servers SET position = COALESCE((SELECT MAX(position) FROM servers s2 WHERE s2.id != servers.id AND s2.folder_id IS servers.folder_id), -1) + 1 WHERE id = ?1",
         rusqlite::params![new_id],
     );
+    // What was held for this device's OK on the original (its on-connect
+    // command and its forwards) is held on the copy too. An already allowed
+    // one stays allowed. Neither is started here.
+    if let (Some(from), Some(to)) = (
+        approvals::server_uuid(conn, i64::from(id)),
+        approvals::server_uuid(conn, new_id),
+    ) {
+        let _ = approvals::copy_held(conn, &from, &to);
+    }
     drop(conn_guard);
     save_vault_internal(&state)?;
     Ok(new_id)
