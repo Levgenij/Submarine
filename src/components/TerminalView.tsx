@@ -66,20 +66,40 @@ const cycleMod = (s: "off" | "armed" | "locked"): "off" | "armed" | "locked" =>
 // given, so the same size isn't sent twice.
 const ptySizes = new Map<string, { cols: number; rows: number }>();
 const wallTiles = new Map<string, number>();
+// A Wall tile's latest measured size. The reopen resend uses it while the
+// tile is open, including while that size is still waiting to be sent.
+const wallSizes = new Map<string, { cols: number; rows: number }>();
 const sendPtySize = (terminalId: string, cols: number, rows: number) => {
   const last = ptySizes.get(terminalId);
   if (last && last.cols === cols && last.rows === rows) return;
   ptySizes.set(terminalId, { cols, rows });
   invoke('resize_terminal', { terminalId, cols, rows }).catch(() => {});
 };
+// How many views of this terminal are still waiting out a size. A Wall can
+// show the same terminal more than once; one tile finishing does not make
+// the resend skip the other tile's wait.
+const tileSettle = new Map<string, number>();
+const tabSettle = new Map<string, number>();
 // Once the PTY is (re)opened: the backend drops resizes while a shell is
 // starting, so the size is sent again, the open Wall tile's if there is one.
+// The remembered size is always dropped. If that view is still settling, the
+// wait sends the size that held; otherwise it is sent now.
 const resendPtySize = (terminalId: string, cols: number, rows: number) => {
-  const size = (wallTiles.get(terminalId) ?? 0) > 0 ? ptySizes.get(terminalId) ?? { cols, rows } : { cols, rows };
+  const tileOpen = (wallTiles.get(terminalId) ?? 0) > 0;
+  const size = tileOpen ? wallSizes.get(terminalId) ?? ptySizes.get(terminalId) ?? { cols, rows } : { cols, rows };
   ptySizes.delete(terminalId);
+  const pending = tileOpen ? tileSettle : tabSettle;
+  if ((pending.get(terminalId) ?? 0) > 0) return;
   sendPtySize(terminalId, size.cols, size.rows);
 };
 const WALL_TILE_CLOSED = 'submarine-wall-tile-closed';
+// How long a terminal's size must hold before its PTY gets it. A layout
+// change passes through sizes for a few frames: the narrow and the wide
+// layout swap at 640 px (the terminal is 2 columns wide for a frame) and
+// panels animate their width. The shell redraws its prompt for every size
+// it is given, so each of those left the screen garbled and the cursor out
+// of place.
+const PTY_SIZE_SETTLE_MS = 150;
 
 const TerminalView = ({
   sessionId,
@@ -576,12 +596,46 @@ const TerminalView = ({
     searchAddonRef.current = searchAddon;
     term.loadAddon(searchAddon);
     term.open(terminalRef.current);
-    
+
+    // The view that is allowed to send waits until the size has held.
+    // A Wall tile sends; the session tab sends nothing while one is mounted,
+    // including a resize that was already queued. A size replaced before the
+    // wait ends is not sent. Cleared on unmount so a disposed view cannot send.
+    let viewDisposed = false;
+    let sizeTimer = 0;
+    // This view has already been counted in tileSettle / tabSettle.
+    let holding = false;
+    const settle = attachOnly ? tileSettle : tabSettle;
+    const releaseSettle = () => {
+      if (!holding) return;
+      holding = false;
+      const left = (settle.get(terminalId) ?? 1) - 1;
+      if (left > 0) settle.set(terminalId, left);
+      else settle.delete(terminalId);
+    };
+    const queueSettledSize = () => {
+      if (viewDisposed) return;
+      if (attachOnly) wallSizes.set(terminalId, { cols: term.cols, rows: term.rows });
+      window.clearTimeout(sizeTimer);
+      if (!holding) {
+        holding = true;
+        settle.set(terminalId, (settle.get(terminalId) ?? 0) + 1);
+      }
+      sizeTimer = window.setTimeout(() => {
+        sizeTimer = 0;
+        releaseSettle();
+        if (viewDisposed) return;
+        if (!attachOnly && (wallTiles.get(terminalId) ?? 0) > 0) return;
+        sendPtySize(terminalId, term.cols, term.rows);
+      }, PTY_SIZE_SETTLE_MS);
+    };
+
     setTimeout(() => {
       fitAddon.fit();
       // A Wall tile sets the size while it's open, also when fit() kept
-      // xterm's default size and so fired no resize.
-      if (attachOnly && (wallTiles.get(terminalId) ?? 0) > 0) sendPtySize(terminalId, term.cols, term.rows);
+      // xterm's default size and so fired no resize. Same settle as onResize:
+      // the first fitted size is often a layout frame, not the one that holds.
+      if (attachOnly && (wallTiles.get(terminalId) ?? 0) > 0) queueSettledSize();
 
       // Start PTY Session with correct dimensions only ONCE. Attach-only
       // instances skip this entirely — they hitch onto an existing PTY
@@ -943,15 +997,18 @@ const TerminalView = ({
     window.addEventListener('blur', onWindowBlur);
     terminalRef.current.addEventListener('contextmenu', onContextMenu);
 
-    // Handle Resize
-    const onResizeDisposable = term.onResize(({ cols, rows }) => {
-      if (!attachOnly && (wallTiles.get(terminalId) ?? 0) > 0) return;
-      sendPtySize(terminalId, cols, rows);
+    // Handle Resize, once the size has settled (PTY_SIZE_SETTLE_MS).
+    const onResizeDisposable = term.onResize(() => {
+      queueSettledSize();
     });
-    // The session tab's view: the Wall tile that set the size has closed.
+    // The session tab: the last Wall tile closed. A resize that is already
+    // waiting finishes that wait and then sends the tab's size. A size that
+    // is not changing has already held, so it is sent now.
     const onWallTileClosed = (e: Event) => {
+      if (viewDisposed) return;
       if ((e as CustomEvent<string>).detail !== terminalId) return;
       if ((wallTiles.get(terminalId) ?? 0) > 0) return;
+      if (sizeTimer) return;
       sendPtySize(terminalId, term.cols, term.rows);
     };
     if (attachOnly) wallTiles.set(terminalId, (wallTiles.get(terminalId) ?? 0) + 1);
@@ -1093,12 +1150,16 @@ const TerminalView = ({
     window.visualViewport?.addEventListener('resize', onVvResize);
 
     return () => {
+      viewDisposed = true;
       fontDisposed = true;
       window.removeEventListener('submarine-settings-changed', handleSettingsChange);
       resizeObserver.disconnect();
       onDataDisposable.dispose();
       if (inputRef.current === handleData) inputRef.current = null;
       onResizeDisposable.dispose();
+      window.clearTimeout(sizeTimer);
+      sizeTimer = 0;
+      releaseSettle();
       if (container) {
         container.removeEventListener('mousedown', onMouseDown);
         container.removeEventListener('contextmenu', onContextMenu);
@@ -1121,7 +1182,10 @@ const TerminalView = ({
       } else {
         const left = (wallTiles.get(terminalId) ?? 1) - 1;
         if (left > 0) wallTiles.set(terminalId, left);
-        else wallTiles.delete(terminalId);
+        else {
+          wallTiles.delete(terminalId);
+          wallSizes.delete(terminalId);
+        }
         window.dispatchEvent(new CustomEvent(WALL_TILE_CLOSED, { detail: terminalId }));
       }
     };
