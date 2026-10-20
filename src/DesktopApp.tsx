@@ -29,6 +29,7 @@ import { USE_SSH_AGENT_KEY, readUseSshAgent } from "./util/sshAgent";
 import { USE_SSH_CONFIG_KEY, readUseSshConfig } from "./util/sshConfig";
 import { DEFAULT_RDP_OPTIONS, readRdpOptions, writeRdpOptions } from "./util/rdpOptions";
 import { useIsNarrow } from "./hooks/useViewport";
+import { IS_ANDROID } from "./util/platform";
 import { Sidebar } from "./components/Sidebar";
 import { NodeGrid } from "./components/NodeGrid";
 import { CommandScope, describeScope, parseCommandScope, scopeToJson } from "./util/commandScope";
@@ -1021,9 +1022,10 @@ function DesktopApp() {
         // expectations on Windows/macOS/KDE. Tauri's drag region itself
         // doesn't dispatch this for us, so we wire it explicitly. Skip
         // when the click landed on an interactive child (tabs, buttons)
-        // since those mark themselves with `no-drag`.
+        // since those mark themselves with `no-drag`. Android's window
+        // can't be maximized.
         const target = e.target as HTMLElement;
-        if (target.closest('.no-drag')) return;
+        if (IS_ANDROID || target.closest('.no-drag')) return;
         toggleMaximize();
       }}
       className="h-10 bg-[#0d0d10] border-b border-white/5 flex items-center justify-between px-3 select-none shrink-0 z-50 drag absolute top-0 left-0 right-0"
@@ -1558,27 +1560,31 @@ function DesktopApp() {
           )}
         </div>
       )}
-      {/* Window controls: desktop only. Android has its own gesture nav /
-          system back button, and the WebView window has no minimise or
-          maximise affordance to surface — so we hide the whole cluster on
-          phone and reclaim ~120 px of titlebar for the tab strip. */}
-      <div className="hidden sm:flex items-center h-full gap-1 no-drag">
-        <button
-          onClick={() => appWindow.minimize()}
-          title="Minimize"
-          className="w-10 h-full flex items-center justify-center hover:bg-white/5 transition-colors"
-        ><div className="w-3.5 h-[1.5px] bg-zinc-600" /></button>
-        <button
-          onClick={toggleMaximize}
-          title={isMaximized ? "Restore" : "Maximize"}
-          className="w-10 h-full flex items-center justify-center hover:bg-white/5 transition-colors group"
-        >
-          {isMaximized
-            ? <Copy size={12} className="text-zinc-600 group-hover:text-zinc-300 scale-x-[-1]" />
-            : <Square size={11} className="text-zinc-600 group-hover:text-zinc-300" />}
-        </button>
-        <button title="Close" aria-label="Close" onClick={() => appWindow.close()} className="w-10 h-full flex items-center justify-center hover:bg-red-500 group transition-all"><X size={14} className="text-zinc-600 group-hover:text-white" /></button>
-      </div>
+      {/* Window controls: desktop only, at any window width (the window has
+          no frame of its own, so a narrow one still needs them). Android has
+          its own gesture nav / system back button, and the WebView window has
+          no minimise or maximise affordance, so the phone never shows the
+          cluster, not even turned sideways, when it is as wide as a desktop
+          window. */}
+      {!IS_ANDROID && (
+        <div className="flex items-center h-full gap-1 no-drag">
+          <button
+            onClick={() => appWindow.minimize()}
+            title="Minimize"
+            className="w-10 h-full flex items-center justify-center hover:bg-white/5 transition-colors"
+          ><div className="w-3.5 h-[1.5px] bg-zinc-600" /></button>
+          <button
+            onClick={toggleMaximize}
+            title={isMaximized ? "Restore" : "Maximize"}
+            className="w-10 h-full flex items-center justify-center hover:bg-white/5 transition-colors group"
+          >
+            {isMaximized
+              ? <Copy size={12} className="text-zinc-600 group-hover:text-zinc-300 scale-x-[-1]" />
+              : <Square size={11} className="text-zinc-600 group-hover:text-zinc-300" />}
+          </button>
+          <button title="Close" aria-label="Close" onClick={() => appWindow.close()} className="w-10 h-full flex items-center justify-center hover:bg-red-500 group transition-all"><X size={14} className="text-zinc-600 group-hover:text-white" /></button>
+        </div>
+      )}
       {tabMenu && (() => {
         const targetId = tabMenu.sessionId;
         // Build the "Split view with" picker: every OTHER open session is
