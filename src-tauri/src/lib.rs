@@ -33,6 +33,7 @@ mod agent_auth;
 mod ssh_config;
 mod known_hosts;
 mod proxy_command;
+mod open_policy;
 mod rdp;
 mod rdp_client;
 mod telnet;
@@ -20117,6 +20118,12 @@ async fn sftp_open_remote_file(
     }
     let _in_flight = InFlightGuard { key: flight_key };
     let filename = safe_temp_leaf_name(&remote_path)?;
+    // Opening is what a double-click does: it would RUN a program or a script
+    // the server named (open_policy.rs). Decided before anything is fetched.
+    let opening = open_policy::decide(&filename);
+    if let open_policy::Opening::Refuse(why) = &opening {
+        return Err(why.clone());
+    }
 
     let event_name = format!("sftp-open-{}", session_id);
     // Also sent like a manual download, so the open shows (and can be
@@ -20155,7 +20162,7 @@ async fn sftp_open_remote_file(
     // Every exit after this point sends exactly one final status.
     emit_progress(0, 0, false);
     let result =
-        download_and_open(&app_handle, &state, &session_id, &remote_path, &filename, &cancel, &emit_progress).await;
+        download_and_open(&app_handle, &state, &session_id, &remote_path, &filename, opening, &cancel, &emit_progress).await;
     let (status, error) = open_final_status(&result);
     emit_status(last_bytes.load(Ordering::Relaxed), last_total.load(Ordering::Relaxed), status, error);
     result
@@ -20169,6 +20176,7 @@ async fn download_and_open(
     session_id: &str,
     remote_path: &str,
     filename: &str,
+    opening: open_policy::Opening,
     cancel: &std::sync::atomic::AtomicBool,
     emit_progress: &impl Fn(u64, u64, bool),
 ) -> Result<(), String> {
@@ -20203,6 +20211,7 @@ async fn download_and_open(
     // depend on. Refuse cleanly so the UI can surface a polite message.
     #[cfg(target_os = "android")]
     {
+        let _ = opening;
         return Err("Live edit in system editor is not available on Android.".into());
     }
     #[cfg(not(target_os = "android"))]
@@ -20275,7 +20284,11 @@ async fn download_and_open(
                 }
             }
         };
-        if let Err(e) = open::that(&temp_file_path) {
+        let open_res = match opening {
+            open_policy::Opening::Editor => open_policy::open_in_editor(&temp_file_path),
+            _ => open::that(&temp_file_path).map_err(|e| e.to_string()),
+        };
+        if let Err(e) = open_res {
             if !had_copy {
                 lock_live_edits().remove(&temp_file_path);
                 discard_open_staging(&temp_file_path);
