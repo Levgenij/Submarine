@@ -2,8 +2,8 @@ import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { Check, X, ShieldAlert, KeyRound } from "lucide-react";
 
 // The host-key and keyboard-interactive (2FA / password) prompts of a
-// connection, as an SSH tab, an RDP tab (its SSH server), and a telnet tab
-// show them.
+// connection, as an SSH tab, an RDP tab (its SSH server, or the RDP
+// server's certificate), and a telnet tab show them.
 // State and answers stay with the tab; this only draws them.
 export function AuthPrompts({
   fingerprintPrompt,
@@ -38,6 +38,9 @@ export function AuthPrompts({
                              the old fingerprints we used to trust */}
     {fingerprintPrompt && (() => {
       const isMismatch = !!fingerprintPrompt.mismatch;
+      // An RDP server proves itself with a certificate, an SSH server with a key.
+      const isCert = fingerprintPrompt.keyType === "RDP certificate";
+      const what = isCert ? "certificate" : "key";
       const tone = isMismatch
         ? "border-red-500/40 bg-red-500/10"
         : "border-amber-500/30 bg-amber-500/5";
@@ -51,11 +54,15 @@ export function AuthPrompts({
           <ShieldAlert className={`${accent} mt-1`} size={20} />
           <div>
             <h3 className={`text-sm font-bold ${accent} uppercase tracking-widest`}>
-              {isMismatch ? "Host key has CHANGED" : "Unknown host fingerprint"}
+              {isMismatch ? (isCert ? "Certificate has CHANGED" : "Host key has CHANGED") : "Unknown host fingerprint"}
             </h3>
             {isMismatch ? (
               <p className="text-zinc-300 mt-2 mb-4 leading-relaxed">
-                The host '{fingerprintPrompt.host}' is presenting a different key than the one you trusted before. This is what a man-in-the-middle attack looks like — but it can also mean the server admin rotated the key.<br/><br/>
+                {isCert ? (
+                  <>The host '{fingerprintPrompt.host}' is presenting a different certificate than the one you trusted before. This is what a man-in-the-middle attack looks like, but it can also mean the server admin renewed the certificate.</>
+                ) : (
+                  <>The host '{fingerprintPrompt.host}' is presenting a different key than the one you trusted before. This is what a man-in-the-middle attack looks like — but it can also mean the server admin rotated the key.</>
+                )}<br/><br/>
                 New {fingerprintPrompt.keyType} fingerprint: <span className="text-white font-bold break-all">{fingerprintPrompt.fingerprint}</span><br/>
                 {Array.isArray(fingerprintPrompt.priorFingerprints) && fingerprintPrompt.priorFingerprints.length > 0 && (
                   <span className="block mt-1 text-zinc-500 text-[11px]">
@@ -67,7 +74,7 @@ export function AuthPrompts({
             ) : (
               <p className="text-zinc-400 mt-2 mb-4 leading-relaxed">
                 The authenticity of host '{fingerprintPrompt.host}' can't be established.<br/>
-                {fingerprintPrompt.keyType} key fingerprint is <span className="text-white font-bold break-all">{fingerprintPrompt.fingerprint}</span>.<br/>
+                {fingerprintPrompt.keyType}{isCert ? "" : " key"} fingerprint is <span className="text-white font-bold break-all">{fingerprintPrompt.fingerprint}</span>.<br/>
                 Are you sure you want to continue connecting?
               </p>
             )}
@@ -76,7 +83,7 @@ export function AuthPrompts({
                 onClick={() => handleFingerprintResponse(true)}
                 className={`px-6 py-2 ${acceptBtn} font-bold text-xs uppercase tracking-wider rounded-lg transition-colors flex items-center gap-2`}
               >
-                <Check size={14} /> {isMismatch ? "Accept new key" : "Accept & save"}
+                <Check size={14} /> {isMismatch ? `Accept new ${what}` : "Accept & save"}
               </button>
               <button
                 onClick={() => handleFingerprintResponse(false)}
