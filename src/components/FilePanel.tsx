@@ -5,9 +5,10 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   Folder, File, ArrowUp, RefreshCw, Trash2, Edit3, Shield,
   X, ChevronUp, ChevronDown, Plus, MoreVertical, FolderSearch, FolderPlus,
-  Download, Upload, ExternalLink, Move, CheckSquare, MinusSquare, Square, Search, Link2, Copy, Bookmark,
-  Archive, PackageOpen,
+  Download, Upload, ExternalLink, Move, CheckSquare, MinusSquare, Square, Search, Link2, Copy,
+  Archive, PackageOpen, GripVertical,
 } from "lucide-react";
+import { BookmarkToggle, NEXT_BOOKMARK_STATE, type BookmarkState } from "./BookmarkToggle";
 import { FileEntry, FileProvider } from "../fs/types";
 import {
   ARCHIVE_FORMATS, ArchiveFormat, JOB_CANCELLED, archiveFileName, archiveKind, cancelArchiveJob,
@@ -18,7 +19,7 @@ import { COMPARE_LABEL, CompareMark, compareListings } from "../fs/compare";
 import { useConfirm, useOverwritePrompt, OverwriteChoice } from "../ui/confirm";
 import { IS_ANDROID } from "../util/platform";
 import { nameFilterMatcher } from "../util/nameFilter";
-import { BOOKMARKS_MAX, readBookmarks, writeBookmarks } from "../util/sftpBookmarks";
+import { BOOKMARKS_MAX, useBookmarks } from "../util/sftpBookmarks";
 
 // Batch overwrite state shared across items in a single download/upload run.
 // Once the user picks "Overwrite all" or "Skip all" the kind is sticky and we
@@ -67,6 +68,11 @@ async function transferWithOverwriteCheck(
 
 type SortColumn = "name" | "size" | "modified" | "permissions" | "owner";
 interface SortState { column: SortColumn; asc: boolean; }
+
+// The part of the Recent list a bookmark row is in: this server's, or the
+// global ones under them.
+type BookmarkSection = Exclude<BookmarkState, "none">;
+const BOOKMARK_SECTIONS: BookmarkSection[] = ["session", "global"];
 
 // The header's square icon buttons; a step smaller in the narrowest panes.
 const HEADER_BUTTON_BASE =
@@ -239,6 +245,8 @@ export interface FilePanelProps {
   rootMode?: boolean;
   /** Where this pane keeps its bookmarked folders (util/sftpBookmarks). None: no bookmarks (a server that isn't saved). */
   bookmarksKey?: string;
+  /** Where this pane keeps the bookmarks it shares with the same pane of every server. None with `bookmarksKey`. */
+  globalBookmarksKey?: string;
   /** Why archive and extract can't run in this pane right now (remote: sudo root mode). None: they can. */
   archiveOff?: string;
   /** Compare (#18): the other pane's listing, to mark this one's rows against (fs/compare). None: compare is off. */
@@ -288,6 +296,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   headerNote,
   rootMode = false,
   bookmarksKey,
+  globalBookmarksKey,
   archiveOff,
   compareWith = null,
   hideSame = false,
@@ -303,10 +312,24 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // when navigation succeeds.
   const [recentDirs, setRecentDirs] = useState<string[]>([]);
   const [recentOpen, setRecentOpen] = useState(false);
-  // Bookmarked folders: the star at the end of the path box, and their own
-  // part of the Recent list. Kept on this device (util/sftpBookmarks).
-  const [bookmarks, setBookmarks] = useState<string[]>(() => (bookmarksKey ? readBookmarks(bookmarksKey) : []));
-  useEffect(() => { setBookmarks(bookmarksKey ? readBookmarks(bookmarksKey) : []); }, [bookmarksKey]);
+  // Bookmarked folders: the icon at the end of the path box, and their own
+  // parts of the Recent list, this server's and the global ones under them.
+  // Kept on this device (util/sftpBookmarks).
+  const [bookmarks, saveBookmarks] = useBookmarks(bookmarksKey);
+  const [globalBookmarks, saveGlobalBookmarks] = useBookmarks(globalBookmarksKey);
+  const bookmarkLists: Record<BookmarkSection, { list: string[]; save: (next: string[]) => void }> = {
+    session: { list: bookmarks, save: saveBookmarks },
+    global: { list: globalBookmarks, save: saveGlobalBookmarks },
+  };
+  // The latest lists, for a drag that ends renders after it started.
+  const bookmarkListsRef = useRef(bookmarkLists);
+  bookmarkListsRef.current = bookmarkLists;
+  // The bookmark rows the open Recent list shows, by part: taken when it
+  // opens, plus a row bookmarked while it is open. A click on a row's icon
+  // recolors it in place, and the row moves to its new part the next time
+  // the list opens: the row under the pointer stays the same folder, and a
+  // removed one can be clicked back.
+  const [menuRows, setMenuRows] = useState<Record<BookmarkSection, string[]>>({ session: [], global: [] });
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
   // Multi-selection lives as a Set of paths (see onRowClick for the clicks).
@@ -483,16 +506,39 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     });
   };
 
-  const toggleBookmark = (path: string) => {
-    if (!bookmarksKey || !path) return;
-    const marked = bookmarks.includes(path);
-    if (!marked && bookmarks.length >= BOOKMARKS_MAX) {
-      notify(`Up to ${BOOKMARKS_MAX} bookmarks: remove one to add another`, "info");
+  const bookmarkState = (path: string): BookmarkState =>
+    globalBookmarks.includes(path) ? "global" : bookmarks.includes(path) ? "session" : "none";
+
+  // Moves a folder to the list of `to`: added there, dropped from every
+  // other, so a folder sits in one list at a time.
+  const setBookmarkState = (path: string, to: BookmarkState) => {
+    if (!bookmarksKey || !path || bookmarkState(path) === to) return;
+    if (to !== "none" && bookmarkLists[to].list.length >= BOOKMARKS_MAX) {
+      notify(`Up to ${BOOKMARKS_MAX} ${to === "global" ? "global " : ""}bookmarks: remove one to add another`, "info");
       return;
     }
-    const next = marked ? bookmarks.filter((p) => p !== path) : [...bookmarks, path];
-    setBookmarks(next);
-    writeBookmarks(bookmarksKey, next);
+    for (const section of BOOKMARK_SECTIONS) {
+      const { list, save } = bookmarkLists[section];
+      if (section === to && !list.includes(path)) save([...list, path]);
+      if (section !== to && list.includes(path)) save(list.filter((p) => p !== path));
+    }
+    if (recentOpen && to !== "none" && !menuRows.session.includes(path) && !menuRows.global.includes(path)) {
+      setMenuRows((rows) => ({ ...rows, [to]: [...rows[to], path] }));
+    }
+    // Said out loud: a touch screen never shows the guide that explains it.
+    if (to === "global") notify(`Global bookmark: listed in the ${provider.label} pane of every server`);
+  };
+  const bookmarkToggle = (path: string, extra: { placement?: "below" | "side"; idleClassName: string; className: string; disabled?: boolean }) => {
+    const state = bookmarkState(path);
+    return (
+      <BookmarkToggle
+        state={state}
+        onToggle={() => setBookmarkState(path, NEXT_BOOKMARK_STATE[state])}
+        onRemove={() => setBookmarkState(path, "none")}
+        pane={provider.label}
+        {...extra}
+      />
+    );
   };
 
   // A row to bring into view once the next listing is on screen (see the
@@ -1677,35 +1723,187 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
 
   const isRemote = provider.id === "remote";
 
-  // The Recent list, and a row of it: open the folder, or (the bookmark at
-  // its end) add or remove its bookmark. Mouse-down keeps the focus on the
-  // list's button, whose blur closes the list.
+  // The Recent list: the folders just left, this server's bookmarks, and the
+  // global ones. A global bookmark is listed once, in its own part.
   const recentShown = recentDirs.filter((p) => p !== currentPath);
-  const currentBookmarked = bookmarks.includes(currentPath);
-  const dirRow = (path: string, part: "recent" | "bookmark") => {
-    const marked = bookmarks.includes(path);
+  const savedRows: Record<BookmarkSection, string[]> = {
+    session: bookmarks.filter((p) => !globalBookmarks.includes(p)),
+    global: globalBookmarks,
+  };
+  // While the list is open its rows keep their parts (see menuRows); one
+  // saved from another session meanwhile is added at the end.
+  const rowsShown = (section: BookmarkSection) => recentOpen
+    ? [...menuRows[section], ...savedRows[section].filter((p) => !menuRows.session.includes(p) && !menuRows.global.includes(p))]
+    : savedRows[section];
+  const shownRows: Record<BookmarkSection, string[]> = { session: rowsShown("session"), global: rowsShown("global") };
+  const hasRecentList = recentShown.length > 0 || shownRows.session.length > 0 || shownRows.global.length > 0;
+  const recentListRef = useRef<HTMLDivElement>(null);
+  // The paths scroll sideways as one, by this many pixels, as far as the
+  // longest one goes; the bookmark icon at the end of a row stays put. Moved
+  // by a sideways wheel (shift+wheel, a trackpad) or a finger.
+  const [pathOffset, setPathOffset] = useState(0);
+  const toggleRecentList = () => {
+    if (!recentOpen) {
+      setMenuRows(savedRows);
+      setPathOffset(0);
+    }
+    setRecentOpen(!recentOpen);
+  };
+  const scrollPaths = (dx: number) => {
+    const paths = Array.from(recentListRef.current?.querySelectorAll<HTMLElement>("[data-dir-path]") ?? []);
+    const most = Math.max(0, ...paths.map((el) => el.scrollWidth - el.clientWidth));
+    setPathOffset((o) => Math.min(Math.max(0, o + dx), most));
+  };
+  const onPathsPointerDown = (e: React.PointerEvent) => {
+    if (e.pointerType !== "touch") return;
+    let x = e.clientX;
+    const move = (ev: PointerEvent) => { scrollPaths(x - ev.clientX); x = ev.clientX; };
+    const end = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+  };
+  const pathShift = { transform: `translateX(-${pathOffset}px)` };
+
+  // Saves a part's order as the list shows it. A row recolored while the
+  // list is open is saved in the other list and doesn't count here; a saved
+  // one not shown goes last. Read at the moment of saving, so a bookmark
+  // another session added during a drag is kept, not written over.
+  const saveBookmarkOrder = (section: BookmarkSection, shown: string[]) => {
+    const { list, save } = bookmarkListsRef.current[section];
+    const next = [...shown.filter((p) => list.includes(p)), ...list.filter((p) => !shown.includes(p))];
+    if (next.some((p, i) => p !== list[i])) save(next);
+  };
+  // The bookmark row being dragged by its grip to a new place in its part,
+  // and how to end that drag (true keeps the order). The list closing
+  // cancels it, before it can measure rows that are gone.
+  const [bookmarkDrag, setBookmarkDrag] = useState<{ section: BookmarkSection; path: string } | null>(null);
+  const bookmarkDragEndRef = useRef<((keep: boolean) => void) | null>(null);
+  useEffect(() => { if (!recentOpen) bookmarkDragEndRef.current?.(false); }, [recentOpen]);
+  useEffect(() => () => bookmarkDragEndRef.current?.(false), []);
+  // The rows move as the pointer does; the order is saved on release, and
+  // Escape puts them back. The grip covers the row's folder icon, so a press
+  // that never moves opens the folder, like the rest of the row. Pointer
+  // events, not HTML drag and drop, which the webview's file drop takes
+  // over. The pointerdown is not cancelled: the grip's mousedown is, and that
+  // is what keeps the focus on the list's button.
+  const startBookmarkDrag = (e: React.PointerEvent, section: BookmarkSection, path: string) => {
+    const list = recentListRef.current;
+    if (e.button !== 0 || bookmarkDragEndRef.current || !list) return;
+    e.stopPropagation();
+    const start = shownRows[section];
+    let order = start;
+    const show = (next: string[]) => {
+      order = next;
+      setMenuRows((rows) => ({ ...rows, [section]: next }));
+    };
+    const startY = e.clientY;
+    let moved = false;
+    const move = (ev: PointerEvent) => {
+      if (!moved && Math.abs(ev.clientY - startY) < 4) return;
+      moved = true;
+      const box = list.getBoundingClientRect();
+      // Near an edge of a list taller than its box, scroll it along.
+      if (ev.clientY < box.top + 24) list.scrollTop -= 8;
+      else if (ev.clientY > box.bottom - 24) list.scrollTop += 8;
+      // The dragged row goes after every other row of its part whose middle
+      // is above the pointer. A row another session added meanwhile is
+      // listed after these.
+      const above = Array.from(list.querySelectorAll<HTMLElement>(`[data-bookmark-section="${section}"]`))
+        .filter((row) => {
+          const p = row.dataset.bookmarkPath!;
+          if (p === path || !order.includes(p)) return false;
+          const r = row.getBoundingClientRect();
+          return r.top + r.height / 2 < ev.clientY;
+        }).length;
+      const rest = order.filter((p) => p !== path);
+      const next = [...rest.slice(0, above), path, ...rest.slice(above)];
+      if (next.some((p, i) => p !== order[i])) show(next);
+    };
+    const bodyCursor = document.body.style.cursor;
+    const end = (keep: boolean) => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      window.removeEventListener("keydown", onKey, true);
+      document.body.style.cursor = bodyCursor;
+      bookmarkDragEndRef.current = null;
+      setBookmarkDrag(null);
+      if (keep && !moved) { setRecentOpen(false); fetch(path); }
+      else if (keep) saveBookmarkOrder(section, order);
+      else show(start);
+    };
+    const onUp = () => end(true);
+    const onCancel = () => end(false);
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key !== "Escape") return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      end(false);
+    };
+    bookmarkDragEndRef.current = end;
+    document.body.style.cursor = "grabbing";
+    setBookmarkDrag({ section, path });
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    window.addEventListener("keydown", onKey, true);
+  };
+
+  // A row of the Recent list: open the folder, or (the bookmark at its end)
+  // move its bookmark on. Mouse-down keeps the focus on the list's button,
+  // whose blur closes the list. A bookmark row's folder icon turns into a
+  // grip on hover (always on touch), so the paths of every part line up.
+  const dirRow = (path: string, part: "recent" | BookmarkSection) => {
+    const section = part === "recent" ? undefined : part;
+    const isDragged = !!section && bookmarkDrag?.section === section && bookmarkDrag.path === path;
     return (
-      <div key={`${part}:${path}`} className="flex items-center rounded hover:bg-white/10">
+      <div
+        key={`${part}:${path}`}
+        data-bookmark-section={section}
+        data-bookmark-path={section && path}
+        // Clips the grip, which scrolls off with the folder icon it sits on.
+        className={`group relative flex items-center rounded overflow-hidden ${
+          isDragged ? "bg-indigo-500/15 ring-1 ring-indigo-400/40" : "hover:bg-white/10"
+        }`}
+      >
         <button
           onMouseDown={(e) => { e.preventDefault(); setRecentOpen(false); fetch(path); }}
-          className="flex-1 min-w-0 flex items-center gap-2 p-1.5 text-left hover:text-white"
+          className="flex-1 min-w-0 flex p-1.5 text-left hover:text-white"
           title={path}
         >
-          <Folder size={11} className="text-indigo-300 shrink-0" />
-          <span className="truncate">{path}</span>
+          {/* Measured against its content for how far the paths can go. */}
+          <span data-dir-path className="flex-1 min-w-0 overflow-hidden">
+            <span className="inline-flex items-center gap-2 whitespace-nowrap" style={pathShift}>
+              <Folder
+                size={11}
+                className={`text-indigo-300 shrink-0 ${section ? "group-hover:opacity-0 [@media(hover:none)]:opacity-0" : ""}`}
+              />
+              {path}
+            </span>
+          </span>
         </button>
-        {bookmarksKey && (
+        {section && (
           <button
+            type="button"
+            tabIndex={-1}
+            aria-hidden
+            onPointerDown={(e) => startBookmarkDrag(e, section, path)}
             onMouseDown={(e) => e.preventDefault()}
-            onClick={() => toggleBookmark(path)}
-            title={marked ? "Remove the bookmark" : "Bookmark this folder"}
-            aria-label={marked ? `Remove the bookmark for ${path}` : `Bookmark ${path}`}
-            aria-pressed={marked}
-            className={`p-1.5 shrink-0 ${marked ? "text-amber-300 hover:text-amber-200" : "text-zinc-500 hover:text-zinc-200"}`}
+            title="Drag to reorder"
+            style={{ touchAction: "none", ...pathShift }}
+            className={`absolute left-0 top-0 bottom-0 w-[23px] flex items-center justify-center text-zinc-400 hover:text-zinc-100 cursor-grab active:cursor-grabbing ${
+              isDragged ? "opacity-100" : "opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
+            }`}
           >
-            <Bookmark size={11} fill={marked ? "currentColor" : "none"} />
+            <GripVertical size={11} />
           </button>
         )}
+        {bookmarksKey && bookmarkToggle(path, { placement: "side", idleClassName: "text-zinc-500 hover:text-zinc-200", className: "p-1.5 shrink-0" })}
       </div>
     );
   };
@@ -1836,9 +2034,9 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
               <ArrowUp size={11} />
             </button>
             <button
-              onClick={() => setRecentOpen((p) => !p)}
+              onClick={toggleRecentList}
               onBlur={() => setTimeout(() => setRecentOpen(false), 200)}
-              disabled={recentShown.length === 0 && bookmarks.length === 0}
+              disabled={!hasRecentList}
               title="Recent and bookmarked folders"
               aria-label="Recent directories"
               className={`${headerBtn} text-zinc-200 disabled:opacity-30 disabled:cursor-not-allowed`}
@@ -1856,19 +2054,35 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           </button>
           {/* Both lists open under the buttons across the header's width, so
               neither is cut off by a narrow pane. */}
-          {recentOpen && (recentShown.length > 0 || bookmarks.length > 0) && (
-            <div className="absolute top-full mt-1 inset-x-0 z-50 max-h-[320px] overflow-y-auto bg-[#0c0c0e]/95 border border-white/10 rounded-lg shadow-2xl p-1 backdrop-blur-md font-mono text-[11px] text-zinc-200 no-scrollbar">
+          {recentOpen && hasRecentList && (
+            <div
+              ref={recentListRef}
+              // Up and down is the list's own scroll; sideways is the paths'.
+              style={{ touchAction: "pan-y" }}
+              onWheel={(e) => { const dx = e.deltaX || (e.shiftKey ? e.deltaY : 0); if (dx) scrollPaths(dx); }}
+              onPointerDown={onPathsPointerDown}
+              className="absolute top-full mt-1 inset-x-0 z-50 max-h-[320px] overflow-y-auto bg-[#0c0c0e]/95 border border-white/10 rounded-lg shadow-2xl p-1 backdrop-blur-md font-mono text-[11px] text-zinc-200 no-scrollbar select-none"
+            >
               {recentShown.length > 0 && (
                 <>
                   <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-zinc-500 font-bold">Recent</div>
                   {recentShown.map((p) => dirRow(p, "recent"))}
                 </>
               )}
-              {recentShown.length > 0 && bookmarks.length > 0 && <div className="my-1 h-px bg-white/10" />}
-              {bookmarks.length > 0 && (
+              {recentShown.length > 0 && shownRows.session.length > 0 && <div className="my-1 h-px bg-white/10" />}
+              {shownRows.session.length > 0 && (
                 <>
                   <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-zinc-500 font-bold">Bookmarks</div>
-                  {bookmarks.map((p) => dirRow(p, "bookmark"))}
+                  {shownRows.session.map((p) => dirRow(p, "session"))}
+                </>
+              )}
+              {(recentShown.length > 0 || shownRows.session.length > 0) && shownRows.global.length > 0 && (
+                <div className="my-1 h-px bg-white/10" />
+              )}
+              {shownRows.global.length > 0 && (
+                <>
+                  <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-emerald-500/80 font-bold">Global bookmarks</div>
+                  {shownRows.global.map((p) => dirRow(p, "global"))}
                 </>
               )}
             </div>
@@ -1992,18 +2206,11 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             </div>
           )}
           </div>
-          {bookmarksKey && (
-            <button
-              onClick={() => toggleBookmark(currentPath)}
-              disabled={!currentPath}
-              title={currentBookmarked ? "Remove this folder's bookmark" : "Bookmark this folder"}
-              aria-label="Bookmark this folder"
-              aria-pressed={currentBookmarked}
-              className={`${HEADER_BUTTON_BASE} h-6 w-6 disabled:opacity-30 ${currentBookmarked ? "text-amber-300" : "text-zinc-200"}`}
-            >
-              <Bookmark size={11} fill={currentBookmarked ? "currentColor" : "none"} />
-            </button>
-          )}
+          {bookmarksKey && bookmarkToggle(currentPath, {
+            disabled: !currentPath,
+            idleClassName: "text-zinc-200",
+            className: `${HEADER_BUTTON_BASE} h-6 w-6 disabled:opacity-30`,
+          })}
           <button
             onClick={() => (filterOpen ? closeFilter() : openFilter())}
             title={filterOpen ? "Close the name filter" : "Filter by name (Ctrl+F)"}

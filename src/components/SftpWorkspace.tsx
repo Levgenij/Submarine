@@ -10,7 +10,7 @@ import { createLocalProvider } from "../fs/localProvider";
 import { createRemoteProvider } from "../fs/remoteProvider";
 import { useTextPrompt } from "../ui/confirm";
 import { useIsNarrow } from "../hooks/useViewport";
-import { bookmarksKey } from "../util/sftpBookmarks";
+import { bookmarksKey, globalBookmarksKey } from "../util/sftpBookmarks";
 
 // Root (sudo) mode for the remote pane — see `sftp_set_elevated` in lib.rs.
 type ElevationStatus = { elevated: boolean; passwordless: boolean };
@@ -285,9 +285,12 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
     try { localStorage.setItem(storageKey, JSON.stringify(savedDirsRef.current)); }
     catch { /* quota or private-mode storage — ignore */ }
   };
-  // Where each pane keeps its bookmarks; none for a server that isn't saved.
+  // Where each pane keeps its bookmarks, and the ones it shares with that
+  // pane of every other server; none for a server that isn't saved.
   const bookmarkKeyFor = (side: "local" | "remote") =>
     profile && serverId > 0 ? bookmarksKey(profile, serverId, side) : undefined;
+  const globalBookmarkKeyFor = (side: "local" | "remote") =>
+    profile && serverId > 0 ? globalBookmarksKey(profile, side) : undefined;
 
   // Source of truth for the active drag. Updated SYNCHRONOUSLY from the
   // panel's onMove via the ref so the window mouseup handler (which runs in
@@ -517,6 +520,7 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
               getOppositeDir={() => remoteRef.current?.currentDir()}
               onTransferred={() => remoteRef.current?.refresh()}
               bookmarksKey={bookmarkKeyFor("local")}
+              globalBookmarksKey={globalBookmarkKeyFor("local")}
               onEntriesChange={setLocalEntries}
               compareWith={compareOn ? remoteEntries : null}
               hideSame={hideSame}
@@ -540,6 +544,7 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
               getOppositeDir={() => localRef.current?.currentDir()}
               onTransferred={() => localRef.current?.refresh()}
               bookmarksKey={bookmarkKeyFor("remote")}
+              globalBookmarksKey={globalBookmarkKeyFor("remote")}
               onEntriesChange={setRemoteEntries}
               compareWith={compareOn ? localEntries : null}
               hideSame={hideSame}
