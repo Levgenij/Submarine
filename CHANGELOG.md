@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.1
+
+### Terminal
+
+- The Library has a History tab next to Commands, Notes, and Node. It lists the commands typed in this app's terminals, newest first, this server's only unless This server only is turned off. A command just typed shows up while the tab is open. Search narrows the list.
+- A history row can be run, pasted without Enter, or saved as a command for this server or for every server. A command that is already saved shows a check instead. A right-click removes one row.
+- Clear removes this server's history, or all of it when This server only is off, after asking. It is off while a search is typed, since it would remove more than the matches. History stays on this device and is not synced.
+- The command history overlay opens on Ctrl+Shift+R, Cmd+Shift+R on a Mac. Plain Ctrl+R goes to the shell, so its own reverse search works. This server only now finds this server's older commands that a busy day on other servers had pushed out of the list.
+- Search in the terminal opens on Ctrl+Shift+F, Cmd+Shift+F on a Mac. Plain Ctrl+F goes to the shell, where less and vim page forward on it. On Windows and Linux, Ctrl+F had never opened the search.
+
+### Files
+
+- A bookmark has three states. A click on its icon moves it from off to this session (amber), to every session (green), and back to off. A right-click removes it. Hovering the icon says what the colours mean and what the next click does.
+- A global bookmark is listed in the same pane, Local or Remote, of every session of the profile, under that session's own bookmarks. A change made in one session shows in every open one.
+- The Recent / Bookmarks list floats over the window. It can be dragged wider than a narrow pane, grows to 560 px before it scrolls, and opens upward when there is no room below. Long paths scroll sideways together, and the bookmark icons stay put. Bookmarks are reordered by dragging their grip, and Escape puts them back.
+
+### App
+
+- F5, Ctrl+R, and Ctrl+Shift+R no longer reload the window, which used to drop every open session.
+
+Vault format is unchanged. Existing profiles open without a migration.
+
 ## 0.4.0
 
 ### Connect
