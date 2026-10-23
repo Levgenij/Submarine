@@ -291,6 +291,9 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
     catch { /* quota or private-mode storage — ignore */ }
   };
   const bookmarksKey = (side: FilesSide) => `${bookmarksKeyPrefix(profile)}${sessionId}:${side}`;
+  // Shared by every session of the profile. Session ids are "session-<n>",
+  // so "global" can't be one.
+  const globalBookmarksKey = (side: FilesSide) => `${bookmarksKeyPrefix(profile)}global:${side}`;
 
   // Source of truth for the active drag. Updated SYNCHRONOUSLY from the
   // panel's onMove via the ref so the window mouseup handler (which runs in
@@ -623,6 +626,7 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
             onPathChange={(p) => saveDir("local", p)}
             getOppositeDir={() => remoteRef.current?.currentDir()}
             bookmarksKey={bookmarksKey("local")}
+            globalBookmarksKey={globalBookmarksKey("local")}
             onEntriesChange={setLocalEntries}
             compareWith={compareOn ? remoteEntries : null}
             hideSame={hideSame}
@@ -647,6 +651,7 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
             terminalId={terminalId}
             onRevealTerminal={onRevealTerminal}
             bookmarksKey={bookmarksKey("remote")}
+            globalBookmarksKey={globalBookmarksKey("remote")}
             headerExtra={elevationControl}
             rootMode={elevation.elevated || rootByLogin}
             onEntriesChange={setRemoteEntries}

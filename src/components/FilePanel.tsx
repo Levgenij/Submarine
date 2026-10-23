@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useImperativeHandle, forwardRef } from "react";
+import React, { useState, useEffect, useLayoutEffect, useRef, useImperativeHandle, forwardRef } from "react";
 import { createPortal } from "react-dom";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
@@ -6,8 +6,9 @@ import {
   Folder, FolderUp, File, ArrowUp, RefreshCw, Trash2, Edit3, Shield,
   X, ChevronUp, ChevronDown, Plus, MoreVertical, FolderSearch,
   Download, Upload, ExternalLink, Move, CheckSquare, Square, Search,
-  Terminal, Link, FolderSymlink, FileSymlink, CornerDownRight, Archive, PackageOpen, Bookmark, Copy,
+  Terminal, Link, FolderSymlink, FileSymlink, CornerDownRight, Archive, PackageOpen, Copy, GripVertical,
 } from "lucide-react";
+import { BookmarkToggle, NEXT_BOOKMARK_STATE, type BookmarkState } from "./BookmarkToggle";
 import { FileEntry, FileProvider, LinkInfo } from "../fs/types";
 import { carryLinkState, mergePermissions, permissionOctal, safeLeafName, shellSingleQuote } from "../fs/dirContext";
 import { useConfirm, useOverwritePrompt, OverwriteChoice, OverwritePromptOptions } from "../ui/confirm";
@@ -21,10 +22,28 @@ import { COMPARE_LABEL, compareListings, type CompareMark } from "../fs/compare"
 import { pathCrumbs } from "../fs/pathCrumbs";
 import { canMoveInto, rulesFor, takenNames } from "../fs/moveRules";
 import { useElementWidth } from "../hooks/useViewport";
+import { readStoredJson, useStoredList, writeStoredJson } from "../util/storedJson";
 import {
   ARCHIVE_FORMATS, ArchiveFormat, JOB_CANCELLED, archiveFileName, archiveKind, cancelArchiveJob,
   extractFolderName, newArchiveJobId, suggestArchiveBase,
 } from "../fs/archive";
+
+// Sent when a bookmark list is saved, so a global bookmark made in one
+// session shows in every open one.
+const BOOKMARKS_CHANGED = "submarine-bookmarks-changed";
+// The dropdown section a bookmark row is listed in.
+type BookmarkSection = Exclude<BookmarkState, "none">;
+const BOOKMARK_SECTIONS: BookmarkSection[] = ["session", "global"];
+// The Recent / Bookmarks dropdown: its default and narrowest width, and the
+// tallest it grows before it scrolls.
+const DIR_DROPDOWN_WIDTH_KEY = "submarine-sftp-dir-menu-width";
+const DIR_DROPDOWN_WIDTH = 260;
+const DIR_DROPDOWN_MIN_WIDTH = 200;
+const DIR_DROPDOWN_MAX_HEIGHT = 560;
+const readDirDropdownWidth = () => {
+  const saved = readStoredJson(DIR_DROPDOWN_WIDTH_KEY);
+  return typeof saved === "number" && saved > 0 ? saved : DIR_DROPDOWN_WIDTH;
+};
 
 // Last format picked in the archive dialog. The remote side is remembered
 // per session (the same id the saved directories use): `zip` being installed
@@ -143,6 +162,8 @@ export interface FilePanelProps {
   onRevealTerminal?: () => void;
   /** localStorage key this panel's bookmarked directories persist under. */
   bookmarksKey: string;
+  /** localStorage key of the bookmarks every session's pane of this side shares. */
+  globalBookmarksKey: string;
   /** Extra controls rendered next to the pane label (remote: the root/sudo badge). */
   headerExtra?: React.ReactNode;
   /** File operations in this pane run as root - tint the header so it's unmistakable. */
@@ -188,6 +209,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   terminalId,
   onRevealTerminal,
   bookmarksKey,
+  globalBookmarksKey,
   headerExtra,
   rootMode = false,
   compareWith = null,
@@ -204,12 +226,26 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // when navigation succeeds.
   const [recentDirs, setRecentDirs] = useState<string[]>([]);
   const [recentOpen, setRecentOpen] = useState(false);
-  const [bookmarks, setBookmarks] = useState<string[]>(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(bookmarksKey) || "[]");
-      return Array.isArray(saved) ? saved.filter((p) => typeof p === "string") : [];
-    } catch { return []; }
-  });
+  // The bookmark rows the open dropdown lists, by section: taken when it
+  // opens, plus a row bookmarked while it is open. A click on a row's icon
+  // recolors it in place, and the row moves to its new section the next time
+  // the dropdown opens: the row under the pointer stays the same folder, and
+  // a removed one can be clicked back.
+  const [menuRows, setMenuRows] = useState<Record<BookmarkSection, string[]>>({ session: [], global: [] });
+  // The dropdown's width, dragged wider for long paths. Kept per device.
+  const [dirDropdownWidth, setDirDropdownWidth] = useState(readDirDropdownWidth);
+  // The toggle's box while the dropdown is open, to place it; null while closed.
+  const [dirDropdownAt, setDirDropdownAt] = useState<DOMRect | null>(null);
+  const [bookmarks, saveBookmarks] = useStoredList(bookmarksKey, BOOKMARKS_CHANGED);
+  const [globalBookmarks, saveGlobalBookmarks] = useStoredList(globalBookmarksKey, BOOKMARKS_CHANGED);
+  // Each saved list with its setter, by the dropdown section it fills.
+  const bookmarkLists: Record<BookmarkSection, { list: string[]; save: (next: string[]) => void }> = {
+    session: { list: bookmarks, save: saveBookmarks },
+    global: { list: globalBookmarks, save: saveGlobalBookmarks },
+  };
+  // The latest lists, for a drag that ends renders after it started.
+  const bookmarkListsRef = useRef(bookmarkLists);
+  bookmarkListsRef.current = bookmarkLists;
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
   // One list() at a time. A call that arrives mid-flight stores its path in
@@ -450,10 +486,35 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     });
   };
 
-  const toggleBookmark = (path: string) => {
-    const next = bookmarks.includes(path) ? bookmarks.filter((p) => p !== path) : [...bookmarks, path];
-    setBookmarks(next);
-    try { localStorage.setItem(bookmarksKey, JSON.stringify(next)); } catch { /* not remembered */ }
+  const bookmarkState = (path: string): BookmarkState =>
+    globalBookmarks.includes(path) ? "global" : bookmarks.includes(path) ? "session" : "none";
+
+  // A folder sits in one list at a time: it is added to the list of `to` and
+  // dropped from every other, so leaving global also drops a session copy.
+  const setBookmarkState = (path: string, to: BookmarkState) => {
+    if (bookmarkState(path) === to) return;
+    for (const section of BOOKMARK_SECTIONS) {
+      const { list, save } = bookmarkLists[section];
+      if (section === to && !list.includes(path)) save([...list, path]);
+      if (section !== to && list.includes(path)) save(list.filter((p) => p !== path));
+    }
+    if (recentOpen && to !== "none" && !menuRows.session.includes(path) && !menuRows.global.includes(path)) {
+      setMenuRows((rows) => ({ ...rows, [to]: [...rows[to], path] }));
+    }
+    // Said out loud: a touch screen never shows the guide that explains it.
+    if (to === "global") notify(`Global bookmark: listed in the ${provider.label} pane of every session`);
+  };
+  const bookmarkToggle = (path: string, extra: { placement?: "below" | "side"; idleClassName: string; className: string; disabled?: boolean }) => {
+    const state = bookmarkState(path);
+    return (
+      <BookmarkToggle
+        state={state}
+        onToggle={() => setBookmarkState(path, NEXT_BOOKMARK_STATE[state])}
+        onRemove={() => setBookmarkState(path, "none")}
+        pane={provider.label}
+        {...extra}
+      />
+    );
   };
 
   // A fresh answer about a link supersedes whatever was carried over.
@@ -2166,35 +2227,306 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   };
 
   const recentShown = recentDirs.filter((p) => p !== currentPath);
-  const hasDirMenu = recentShown.length > 0 || bookmarks.length > 0;
+  // A global bookmark is listed once, in its own section below this session's.
+  const savedRows: Record<BookmarkSection, string[]> = {
+    session: bookmarks.filter((p) => !globalBookmarks.includes(p)),
+    global: globalBookmarks,
+  };
+  // While the dropdown is open its rows keep their sections (see menuRows);
+  // one saved from another session meanwhile is added at the end.
+  const rowsShown = (section: BookmarkSection) => recentOpen
+    ? [...menuRows[section], ...savedRows[section].filter((p) => !menuRows.session.includes(p) && !menuRows.global.includes(p))]
+    : savedRows[section];
+  const shownRows: Record<BookmarkSection, string[]> = { session: rowsShown("session"), global: rowsShown("global") };
+  const hasDirMenu = recentShown.length > 0 || shownRows.session.length > 0 || shownRows.global.length > 0;
   useEffect(() => { if (!hasDirMenu) setRecentOpen(false); }, [hasDirMenu]);
-  const currentBookmarked = bookmarks.includes(currentPath);
-  // A row of the Recent / Bookmarks dropdown. Mouse-down handlers keep focus
-  // on the toggle button, whose blur closes the dropdown.
-  const dirRow = (p: string) => {
-    const bookmarked = bookmarks.includes(p);
+  const dirToggleRef = useRef<HTMLButtonElement>(null);
+  const dirDropdownRef = useRef<HTMLDivElement>(null);
+  const dirDropdownListRef = useRef<HTMLDivElement>(null);
+  const toggleDirDropdown = (button: HTMLElement) => {
+    if (!recentOpen) {
+      setMenuRows(savedRows);
+      setPathOffset(0);
+      setDirDropdownAt(button.getBoundingClientRect());
+      // Another pane may have resized it since this one last read it.
+      setDirDropdownWidth(readDirDropdownWidth());
+    }
+    setRecentOpen(!recentOpen);
+  };
+  // Closes like the context menu: a press, or keyboard focus, anywhere else,
+  // or the pane going away. Placed once, at the toggle: a resize would leave
+  // it elsewhere. Navigating closes it too (see fetch).
+  useEffect(() => {
+    if (!recentOpen) return;
+    const close = () => setRecentOpen(false);
+    if (disabled) { close(); return; }
+    const onOutside = (ev: Event) => {
+      const target = ev.target as Node | null;
+      if (target && (dirDropdownRef.current?.contains(target) || dirToggleRef.current?.contains(target))) return;
+      close();
+    };
+    window.addEventListener("mousedown", onOutside);
+    window.addEventListener("focusin", onOutside);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("mousedown", onOutside);
+      window.removeEventListener("focusin", onOutside);
+      window.removeEventListener("resize", close);
+    };
+  }, [recentOpen, disabled]);
+  // Wider than the pane is fine, the dropdown floats over the window; past
+  // the window's right edge it slides left instead.
+  const clampDirDropdownWidth = (w: number) =>
+    Math.round(Math.min(Math.max(w, DIR_DROPDOWN_MIN_WIDTH), Math.max(0, window.innerWidth - 16)));
+  const saveDirDropdownWidth = (w: number) => {
+    setDirDropdownWidth(w);
+    writeStoredJson(DIR_DROPDOWN_WIDTH_KEY, w);
+  };
+
+  // A drag inside the dropdown (a bookmark row, or its edge), while one is
+  // in progress: its end, true to keep the result. One at a time. The
+  // dropdown closing or the panel going away cancels it, before it can
+  // measure rows that are gone.
+  const dirGestureRef = useRef<((keep: boolean) => void) | null>(null);
+  useEffect(() => { if (!recentOpen) dirGestureRef.current?.(false); }, [recentOpen]);
+  useEffect(() => () => dirGestureRef.current?.(false), []);
+  // Follows the pointer from a pointerdown until it is released, cancelled,
+  // or Escape is pressed. Pointer events, not HTML drag and drop, which the
+  // webview's file drop takes over. Returns whether it started.
+  const startDirGesture = (
+    e: React.PointerEvent,
+    cursor: string,
+    move: (ev: PointerEvent) => void,
+    finish: (keep: boolean) => void,
+  ) => {
+    e.stopPropagation();
+    if (e.button !== 0 || dirGestureRef.current) return false;
+    const bodyCursor = document.body.style.cursor;
+    const end = (keep: boolean) => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      window.removeEventListener("keydown", onKey, true);
+      document.body.style.cursor = bodyCursor;
+      dirGestureRef.current = null;
+      finish(keep);
+    };
+    const onUp = () => end(true);
+    const onCancel = () => end(false);
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key !== "Escape") return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      end(false);
+    };
+    dirGestureRef.current = end;
+    document.body.style.cursor = cursor;
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    window.addEventListener("keydown", onKey, true);
+    return true;
+  };
+
+  // The dropdown's right edge: drag to resize.
+  const startDirDropdownResize = (e: React.PointerEvent) => {
+    const startX = e.clientX;
+    const startW = clampDirDropdownWidth(dirDropdownWidth);
+    let w = startW;
+    startDirGesture(e, "ew-resize",
+      (ev) => { w = clampDirDropdownWidth(startW + ev.clientX - startX); setDirDropdownWidth(w); },
+      (keep) => { if (keep) saveDirDropdownWidth(w); else setDirDropdownWidth(startW); });
+  };
+  // Saves a section's order as the dropdown shows it. A row recolored while
+  // the dropdown is open is saved in the other list and doesn't count here;
+  // a saved one not shown goes last. Read at the moment of saving, so a
+  // bookmark another session added during a drag is kept, not written over.
+  const saveBookmarkOrder = (section: BookmarkSection, shown: string[]) => {
+    const { list, save } = bookmarkListsRef.current[section];
+    const next = [...shown.filter((p) => list.includes(p)), ...list.filter((p) => !shown.includes(p))];
+    if (next.some((p, i) => p !== list[i])) save(next);
+  };
+  // The bookmark row being dragged by its grip to a new place in its section.
+  const [bookmarkDrag, setBookmarkDrag] = useState<{ section: BookmarkSection; path: string } | null>(null);
+  // The rows move as the pointer does; the order is saved on release.
+  // Escape puts them back. The grip covers the row's folder icon, so a press
+  // that never moves opens the folder, like the rest of the row.
+  const startBookmarkDrag = (e: React.PointerEvent, section: BookmarkSection, path: string) => {
+    const list = dirDropdownListRef.current;
+    if (!list) return;
+    const start = shownRows[section];
+    let order = start;
+    const show = (next: string[]) => {
+      order = next;
+      setMenuRows((rows) => ({ ...rows, [section]: next }));
+    };
+    const startY = e.clientY;
+    let moved = false;
+    const started = startDirGesture(e, "grabbing", (ev) => {
+      if (!moved && Math.abs(ev.clientY - startY) < 4) return;
+      moved = true;
+      const box = list.getBoundingClientRect();
+      // Near an edge of a list taller than the dropdown, scroll it along.
+      if (ev.clientY < box.top + 24) list.scrollTop -= 8;
+      else if (ev.clientY > box.bottom - 24) list.scrollTop += 8;
+      // The dragged row goes after every other row of its section whose
+      // middle is above the pointer. A row another session added meanwhile
+      // is listed after these.
+      const above = Array.from(list.querySelectorAll<HTMLElement>(`[data-bookmark-section="${section}"]`))
+        .filter((row) => {
+          const p = row.dataset.bookmarkPath!;
+          if (p === path || !order.includes(p)) return false;
+          const r = row.getBoundingClientRect();
+          return r.top + r.height / 2 < ev.clientY;
+        }).length;
+      const rest = order.filter((p) => p !== path);
+      const next = [...rest.slice(0, above), path, ...rest.slice(above)];
+      if (next.some((p, i) => p !== order[i])) show(next);
+    }, (keep) => {
+      setBookmarkDrag(null);
+      if (keep && !moved) fetch(path);
+      else if (keep) saveBookmarkOrder(section, order);
+      else show(start);
+    });
+    if (started) setBookmarkDrag({ section, path });
+  };
+
+  // The paths scroll sideways as one, by this many pixels, as far as the
+  // longest one goes; the bookmark icon at the end of a row stays put. Moved
+  // by a sideways wheel (shift+wheel, a trackpad) or a finger.
+  const [pathOffset, setPathOffset] = useState(0);
+  const scrollPaths = (dx: number) => {
+    const paths = Array.from(dirDropdownListRef.current?.querySelectorAll<HTMLElement>("[data-dir-path]") ?? []);
+    const most = Math.max(0, ...paths.map((el) => el.scrollWidth - el.clientWidth));
+    setPathOffset((o) => Math.min(Math.max(0, o + dx), most));
+  };
+  const onPathsPointerDown = (e: React.PointerEvent) => {
+    if (e.pointerType !== "touch") return;
+    let x = e.clientX;
+    const move = (ev: PointerEvent) => { scrollPaths(x - ev.clientX); x = ev.clientX; };
+    const end = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+  };
+  const pathShift = { transform: `translateX(-${pathOffset}px)` };
+
+  // A row of the Recent / Bookmarks dropdown. A bookmark row's folder icon
+  // turns into a grip on hover (always on touch), so the paths of every
+  // section still line up.
+  const dirRow = (p: string, section?: BookmarkSection) => {
+    const isDragged = !!section && bookmarkDrag?.section === section && bookmarkDrag.path === p;
     return (
-      <div key={p} className="flex items-center rounded hover:bg-white/10">
-        <button
-          onMouseDown={(e) => { e.preventDefault(); setRecentOpen(false); fetch(p); }}
-          className="flex-1 min-w-0 flex items-center gap-2 p-1.5 text-left hover:text-white"
-          title={p}
-        >
-          <Folder size={11} className="text-indigo-300 shrink-0" />
-          <span className="truncate">{p}</span>
+      <div
+        key={p}
+        data-bookmark-section={section}
+        data-bookmark-path={section && p}
+        // Clips the grip, which scrolls off with the folder icon it sits on.
+        className={`group relative flex items-center rounded overflow-hidden ${
+          isDragged ? "bg-indigo-500/15 ring-1 ring-indigo-400/40" : "hover:bg-white/10"
+        }`}
+      >
+        <button onClick={() => fetch(p)} className="flex-1 min-w-0 flex p-1.5 text-left hover:text-white" title={p}>
+          {/* Measured against its content for how far the paths can go. */}
+          <span data-dir-path className="flex-1 min-w-0 overflow-hidden">
+            <span className="inline-flex items-center gap-2 whitespace-nowrap" style={pathShift}>
+              <Folder
+                size={11}
+                className={`text-indigo-300 shrink-0 ${section ? "group-hover:opacity-0 [@media(hover:none)]:opacity-0" : ""}`}
+              />
+              {p}
+            </span>
+          </span>
         </button>
-        <button
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() => toggleBookmark(p)}
-          title={bookmarked ? "Remove bookmark" : "Bookmark"}
-          aria-pressed={bookmarked}
-          className={`p-1.5 shrink-0 ${bookmarked ? "text-amber-400 hover:text-amber-300" : "text-zinc-500 hover:text-zinc-200"}`}
-        >
-          <Bookmark size={11} fill={bookmarked ? "currentColor" : "none"} />
-        </button>
+        {section && (
+          <button
+            type="button"
+            tabIndex={-1}
+            aria-hidden
+            onPointerDown={(e) => startBookmarkDrag(e, section, p)}
+            title="Drag to reorder"
+            style={{ touchAction: "none", ...pathShift }}
+            className={`absolute left-0 top-0 bottom-0 w-[23px] flex items-center justify-center text-zinc-400 hover:text-zinc-100 cursor-grab active:cursor-grabbing ${
+              isDragged ? "opacity-100" : "opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
+            }`}
+          >
+            <GripVertical size={11} />
+          </button>
+        )}
+        {bookmarkToggle(p, { placement: "side", idleClassName: "text-zinc-500 hover:text-zinc-200", className: "p-1.5 shrink-0" })}
       </div>
     );
   };
+
+  // The Recent / Bookmarks dropdown. Through a portal: the pane clips
+  // overflow, and a long path needs it wider than a narrow pane. Below the
+  // toggle, or above it when the room below is short and there is more above
+  // (a pane at the bottom of a low window).
+  const dirDropdownWidthShown = clampDirDropdownWidth(dirDropdownWidth);
+  // A wider dropdown needs less of a shift, or none: measured again once
+  // the new width is laid out.
+  useLayoutEffect(() => { if (recentOpen) scrollPaths(0); }, [dirDropdownWidthShown]); // eslint-disable-line react-hooks/exhaustive-deps
+  const dirDropdownRoomBelow = dirDropdownAt ? window.innerHeight - dirDropdownAt.bottom - 12 : 0;
+  const dirDropdownRoomAbove = dirDropdownAt ? dirDropdownAt.top - 12 : 0;
+  const dirDropdownUp = dirDropdownRoomBelow < 240 && dirDropdownRoomAbove > dirDropdownRoomBelow;
+  const dirDropdown = recentOpen && hasDirMenu && dirDropdownAt && createPortal(
+    <div
+      ref={dirDropdownRef}
+      style={{
+        width: dirDropdownWidthShown,
+        ...(dirDropdownUp ? { bottom: window.innerHeight - dirDropdownAt.top + 4 } : { top: dirDropdownAt.bottom + 4 }),
+        left: Math.max(8, Math.min(dirDropdownAt.left, window.innerWidth - dirDropdownWidthShown - 8)),
+      }}
+      className="fixed z-[9000] bg-[#0c0c0e]/95 border border-white/10 rounded-lg shadow-2xl backdrop-blur-md font-mono text-[11px] text-zinc-200 select-none"
+    >
+      <div
+        ref={dirDropdownListRef}
+        style={{
+          maxHeight: Math.max(0, Math.min(DIR_DROPDOWN_MAX_HEIGHT, dirDropdownUp ? dirDropdownRoomAbove : dirDropdownRoomBelow)),
+          // Up and down is the list's own scroll; sideways is the paths'.
+          touchAction: "pan-y",
+        }}
+        onWheel={(e) => { const dx = e.deltaX || (e.shiftKey ? e.deltaY : 0); if (dx) scrollPaths(dx); }}
+        onPointerDown={onPathsPointerDown}
+        className="overflow-y-auto p-1 no-scrollbar"
+      >
+        {recentShown.length > 0 && (
+          <>
+            <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-zinc-500 font-bold">Recent</div>
+            {recentShown.map((p) => dirRow(p))}
+          </>
+        )}
+        {recentShown.length > 0 && shownRows.session.length > 0 && <div className="my-1 h-px bg-white/10" />}
+        {shownRows.session.length > 0 && (
+          <>
+            <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-zinc-500 font-bold">Bookmarks</div>
+            {shownRows.session.map((p) => dirRow(p, "session"))}
+          </>
+        )}
+        {(recentShown.length > 0 || shownRows.session.length > 0) && shownRows.global.length > 0 && (
+          <div className="my-1 h-px bg-white/10" />
+        )}
+        {shownRows.global.length > 0 && (
+          <>
+            <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-emerald-500/80 font-bold">Global bookmarks</div>
+            {shownRows.global.map((p) => dirRow(p, "global"))}
+          </>
+        )}
+      </div>
+      {/* Right edge: drag to widen for long paths. */}
+      <div
+        onPointerDown={startDirDropdownResize}
+        style={{ touchAction: "none" }}
+        title="Drag to resize"
+        className="absolute top-1 bottom-1 -right-[3px] w-1.5 rounded cursor-ew-resize hover:bg-indigo-400/40 active:bg-indigo-400/60"
+      />
+    </div>,
+    document.body,
+  );
 
   return (
     <div
@@ -2238,31 +2570,15 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             </button>
             <div className="shrink-0">
               <button
-                onClick={() => setRecentOpen((p) => !p)}
-                onBlur={() => setTimeout(() => setRecentOpen(false), 200)}
+                ref={dirToggleRef}
+                onClick={(e) => toggleDirDropdown(e.currentTarget)}
                 disabled={!hasDirMenu}
                 title="Recent and bookmarked directories"
                 className="p-1 rounded bg-white/[0.04] border border-white/10 text-zinc-200 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed flex items-center"
               >
                 <ChevronDown size={11} />
               </button>
-              {recentOpen && hasDirMenu && (
-                <div className="absolute top-full left-0 z-50 mt-1 w-[min(260px,100%)] max-h-[320px] overflow-y-auto bg-[#0c0c0e]/95 border border-white/10 rounded-lg shadow-2xl p-1 backdrop-blur-md font-mono text-[11px] text-zinc-200 no-scrollbar">
-                  {recentShown.length > 0 && (
-                    <>
-                      <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-zinc-500 font-bold">Recent</div>
-                      {recentShown.map(dirRow)}
-                    </>
-                  )}
-                  {recentShown.length > 0 && bookmarks.length > 0 && <div className="my-1 h-px bg-white/10" />}
-                  {bookmarks.length > 0 && (
-                    <>
-                      <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-zinc-500 font-bold">Bookmarks</div>
-                      {bookmarks.map(dirRow)}
-                    </>
-                  )}
-                </div>
-              )}
+              {dirDropdown}
             </div>
           </div>
           {/* Path bar. Stretches to the row height, which the icon buttons
@@ -2374,15 +2690,11 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             )}
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              onClick={() => toggleBookmark(currentPath)}
-              disabled={!currentPath}
-              title={currentBookmarked ? "Remove bookmark" : "Bookmark this directory"}
-              aria-pressed={currentBookmarked}
-              className={`p-1 rounded bg-white/[0.04] border border-white/10 hover:bg-white/10 shrink-0 disabled:opacity-30 disabled:cursor-not-allowed ${currentBookmarked ? "text-amber-400" : "text-zinc-200"}`}
-            >
-              <Bookmark size={11} fill={currentBookmarked ? "currentColor" : "none"} />
-            </button>
+            {bookmarkToggle(currentPath, {
+              disabled: !currentPath,
+              idleClassName: "text-zinc-200",
+              className: "p-1 rounded bg-white/[0.04] border border-white/10 hover:bg-white/10 shrink-0 disabled:opacity-30 disabled:cursor-not-allowed",
+            })}
             <button onClick={() => fetch(currentPath)} title="Refresh"
               className={`p-1 rounded bg-white/[0.04] border border-white/10 text-zinc-200 hover:bg-white/10 shrink-0 ${loading ? "animate-spin" : ""}`}>
               <RefreshCw size={11} />
