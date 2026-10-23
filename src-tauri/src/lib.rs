@@ -5625,7 +5625,7 @@ async fn setup_master_db_inner(
             "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
             [],
         ).map_err(|e| format!("[DATABASE] META_TABLE_FAILED: {}", e))?;
-        // v5 — command history table for the Ctrl+R overlay. Best-effort
+        // v5 — command history table for the Ctrl+Shift+R overlay. Best-effort
         // captured per-Enter by TerminalView; unencrypted-within-vault since
         // it's not a secret (the vault itself is encrypted at rest).
         conn.execute(
@@ -8450,7 +8450,9 @@ async fn get_commands(state: tauri::State<'_, DbState>) -> Result<Vec<serde_json
 // ───────────────────────── Command History ─────────────────────────
 // Ctrl+R-style rolling log of commands the user typed into any terminal.
 // Populated best-effort by TerminalView (buffered keystrokes → Enter →
-// insert). Read by HistorySearchOverlay through the three commands below.
+// insert). Read by HistorySearchOverlay (Ctrl+Shift+R) and the Library's
+// History tab (CmdsPanel), which also deletes and clears it, through the
+// commands below.
 // Capped at 1000 rows — dropping the oldest — so a chatty user can't blow
 // the vault size up over months of use.
 
@@ -8519,82 +8521,159 @@ async fn cmd_history_add(
     Ok(new_id)
 }
 
+// Newest first. `query`: a substring of the command, matched literally;
+// `server_id`: that server's rows only. The server filter sits in SQL, ahead
+// of LIMIT, so a busy day on other servers can't push this one's rows out.
+fn list_cmd_history(
+    conn: &rusqlite::Connection,
+    query: Option<&str>,
+    server_id: Option<i32>,
+    limit: i64,
+) -> rusqlite::Result<Vec<serde_json::Value>> {
+    // Escape LIKE metacharacters (%, _, backslash) so the user's raw
+    // input matches literally. Uses `\` as the escape character.
+    let like = query.map(str::trim).filter(|q| !q.is_empty()).map(|q| {
+        let escaped = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        format!("%{}%", escaped)
+    });
+    let mut stmt = conn.prepare(
+        "SELECT id, server_id, server_name, command, ts, exit_code
+         FROM cmd_history
+         WHERE (?1 IS NULL OR command LIKE ?1 ESCAPE '\\')
+           AND (?2 IS NULL OR server_id = ?2)
+         ORDER BY ts DESC LIMIT ?3"
+    )?;
+    let mapped = stmt.query_map(rusqlite::params![like, server_id, limit], |row| {
+        Ok(json!({
+            "id": row.get::<_, i64>(0)?,
+            "server_id": row.get::<_, Option<i32>>(1)?,
+            "server_name": row.get::<_, Option<String>>(2)?,
+            "command": row.get::<_, String>(3)?,
+            "ts": row.get::<_, i64>(4)?,
+            "exit_code": row.get::<_, Option<i32>>(5)?,
+        }))
+    })?;
+    mapped.collect()
+}
+
 #[tauri::command]
 async fn cmd_history_list(
     state: tauri::State<'_, DbState>,
     query: Option<String>,
+    server_id: Option<i32>,
     limit: Option<u32>,
 ) -> Result<Vec<serde_json::Value>, String> {
     let conn_guard = state.conn.lock().map_err(|_| "[STATE] LOCK_FAILED")?;
     let conn = conn_guard.as_ref().ok_or("[STATE] DATABASE_NOT_INITIALIZED")?;
-
     let lim = limit.unwrap_or(200).min(1000) as i64;
-    let q = query.unwrap_or_default();
-    let q_trimmed = q.trim();
+    list_cmd_history(conn, query.as_deref(), server_id, lim)
+        .map_err(|e| format!("[DATABASE] CMD_HISTORY_QUERY_FAILED: {}", e))
+}
 
-    let rows: Vec<serde_json::Value> = if q_trimmed.is_empty() {
-        let mut stmt = conn.prepare(
-            "SELECT id, server_id, server_name, command, ts, exit_code
-             FROM cmd_history
-             ORDER BY ts DESC LIMIT ?1"
-        ).map_err(|e| format!("[DATABASE] CMD_HISTORY_PREP_FAILED: {}", e))?;
-        let mapped = stmt.query_map(rusqlite::params![lim], |row| {
-            Ok(json!({
-                "id": row.get::<_, i64>(0)?,
-                "server_id": row.get::<_, Option<i32>>(1)?,
-                "server_name": row.get::<_, Option<String>>(2)?,
-                "command": row.get::<_, String>(3)?,
-                "ts": row.get::<_, i64>(4)?,
-                "exit_code": row.get::<_, Option<i32>>(5)?,
-            }))
-        }).map_err(|e| format!("[DATABASE] CMD_HISTORY_QUERY_FAILED: {}", e))?;
-        let mut out = Vec::new();
-        for r in mapped {
-            out.push(r.map_err(|e| format!("[DATABASE] CMD_HISTORY_ROW_FAILED: {}", e))?);
-        }
-        out
-    } else {
-        // Escape LIKE metacharacters (%, _, backslash) so the user's raw
-        // input matches literally. Uses `\` as the escape character.
-        let escaped = q_trimmed
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let like = format!("%{}%", escaped);
-        let mut stmt = conn.prepare(
-            "SELECT id, server_id, server_name, command, ts, exit_code
-             FROM cmd_history
-             WHERE command LIKE ?1 ESCAPE '\\'
-             ORDER BY ts DESC LIMIT ?2"
-        ).map_err(|e| format!("[DATABASE] CMD_HISTORY_PREP_FAILED: {}", e))?;
-        let mapped = stmt.query_map(rusqlite::params![like, lim], |row| {
-            Ok(json!({
-                "id": row.get::<_, i64>(0)?,
-                "server_id": row.get::<_, Option<i32>>(1)?,
-                "server_name": row.get::<_, Option<String>>(2)?,
-                "command": row.get::<_, String>(3)?,
-                "ts": row.get::<_, i64>(4)?,
-                "exit_code": row.get::<_, Option<i32>>(5)?,
-            }))
-        }).map_err(|e| format!("[DATABASE] CMD_HISTORY_QUERY_FAILED: {}", e))?;
-        let mut out = Vec::new();
-        for r in mapped {
-            out.push(r.map_err(|e| format!("[DATABASE] CMD_HISTORY_ROW_FAILED: {}", e))?);
-        }
-        out
-    };
-    Ok(rows)
+// One server's rows (the Library's History tab with "This server only"), or
+// every row when `server_id` is None. Rows typed in a quick-connect session
+// have no server, so only clearing everything removes them.
+fn clear_cmd_history(conn: &rusqlite::Connection, server_id: Option<i32>) -> rusqlite::Result<usize> {
+    match server_id {
+        Some(id) => conn.execute("DELETE FROM cmd_history WHERE server_id = ?1", rusqlite::params![id]),
+        None => conn.execute("DELETE FROM cmd_history", []),
+    }
 }
 
 #[tauri::command]
-async fn cmd_history_clear(state: tauri::State<'_, DbState>) -> Result<(), String> {
+async fn cmd_history_clear(state: tauri::State<'_, DbState>, server_id: Option<i32>) -> Result<(), String> {
     let conn_guard = state.conn.lock().map_err(|_| "[STATE] LOCK_FAILED")?;
     let conn = conn_guard.as_ref().ok_or("[STATE] DATABASE_NOT_INITIALIZED")?;
-    conn.execute("DELETE FROM cmd_history", [])
+    clear_cmd_history(conn, server_id)
         .map_err(|e| format!("[DATABASE] CMD_HISTORY_CLEAR_FAILED: {}", e))?;
     drop(conn_guard);
     save_vault_internal(&state)?;
     Ok(())
+}
+
+// One row, from the History tab's context menu.
+#[tauri::command]
+async fn cmd_history_delete(state: tauri::State<'_, DbState>, id: i64) -> Result<(), String> {
+    let conn_guard = state.conn.lock().map_err(|_| "[STATE] LOCK_FAILED")?;
+    let conn = conn_guard.as_ref().ok_or("[STATE] DATABASE_NOT_INITIALIZED")?;
+    conn.execute("DELETE FROM cmd_history WHERE id = ?1", rusqlite::params![id])
+        .map_err(|e| format!("[DATABASE] CMD_HISTORY_DELETE_FAILED: {}", e))?;
+    drop(conn_guard);
+    save_vault_internal(&state)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod cmd_history_tests {
+    use super::{clear_cmd_history, list_cmd_history};
+
+    fn db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE cmd_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                server_id INTEGER,
+                server_name TEXT,
+                command TEXT NOT NULL,
+                ts INTEGER NOT NULL,
+                exit_code INTEGER
+            );
+            INSERT INTO cmd_history (server_id, server_name, command, ts) VALUES
+                (1, 'web-1', 'ls', 1), (1, 'web-1', 'df -h', 2),
+                (2, 'db-1', 'top', 3), (NULL, '', 'uptime', 4);",
+        ).unwrap();
+        conn
+    }
+
+    fn commands(conn: &rusqlite::Connection) -> Vec<String> {
+        let mut stmt = conn.prepare("SELECT command FROM cmd_history ORDER BY ts").unwrap();
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    #[test]
+    fn one_server_leaves_the_others() {
+        let conn = db();
+        assert_eq!(clear_cmd_history(&conn, Some(1)).unwrap(), 2);
+        assert_eq!(commands(&conn), ["top", "uptime"]);
+    }
+
+    #[test]
+    fn none_clears_everything() {
+        let conn = db();
+        assert_eq!(clear_cmd_history(&conn, None).unwrap(), 4);
+        assert!(commands(&conn).is_empty());
+    }
+
+    fn listed(conn: &rusqlite::Connection, query: Option<&str>, server_id: Option<i32>, limit: i64) -> Vec<String> {
+        list_cmd_history(conn, query, server_id, limit).unwrap()
+            .iter().map(|r| r["command"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn lists_newest_first_and_by_server() {
+        let conn = db();
+        assert_eq!(listed(&conn, None, None, 10), ["uptime", "top", "df -h", "ls"]);
+        assert_eq!(listed(&conn, None, Some(1), 10), ["df -h", "ls"]);
+        assert_eq!(listed(&conn, Some("  "), Some(2), 10), ["top"]);
+    }
+
+    #[test]
+    fn the_limit_counts_only_this_servers_rows() {
+        let conn = db();
+        // Server 1's rows are the two oldest; a limit of 1 over the whole
+        // table would have returned "uptime" and filtered it away.
+        assert_eq!(listed(&conn, None, Some(1), 1), ["df -h"]);
+    }
+
+    #[test]
+    fn the_query_matches_literally() {
+        let conn = db();
+        conn.execute("INSERT INTO cmd_history (server_id, command, ts) VALUES (1, 'echo 100%_done', 5)", []).unwrap();
+        assert_eq!(listed(&conn, Some("d"), Some(1), 10), ["echo 100%_done", "df -h"]);
+        assert_eq!(listed(&conn, Some("%_"), None, 10), ["echo 100%_done"]);
+        assert!(listed(&conn, Some("_"), Some(2), 10).is_empty());
+    }
 }
 
 // ───────────────────────── Notes ─────────────────────────
@@ -23095,7 +23174,7 @@ pub fn run() {
             get_credentials, generate_ssh_key,
             add_folder, rename_folder, delete_folder, get_folders, move_folder, move_server_to_folder,
             add_command, edit_command, set_command_scope, delete_command, get_commands,
-            cmd_history_add, cmd_history_list, cmd_history_clear,
+            cmd_history_add, cmd_history_list, cmd_history_clear, cmd_history_delete,
             add_note, edit_note, delete_note, get_notes,
             mirror_dry_run, start_mirror, stop_mirror, list_mirrors, pick_local_directory,
             shell_sync_probe, shell_sync_preview, shell_sync_push,

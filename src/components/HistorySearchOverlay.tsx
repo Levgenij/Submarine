@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Search, X, History } from "lucide-react";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Command History Search — Ctrl+R (Cmd+R on macOS) overlay
+// Command History Search — Ctrl+Shift+R (Cmd+Shift+R on macOS) overlay
 //
 // Portaled modal that queries the encrypted profile vault's `cmd_history`
 // table via the tauri commands defined in lib.rs. Fuzzy-ish (LIKE-based)
@@ -18,6 +18,11 @@ import { Search, X, History } from "lucide-react";
 // Insert is done by the parent (TerminalView) via the `onInsert` callback
 // so we don't have to know about xterm / write_terminal_data plumbing here.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Fired on `window` once a typed command has been written to cmd_history,
+// so an open History tab (CmdsPanel) can show it. A CustomEvent whose
+// `detail` is the server it was typed on (null for a quick connect).
+export const CMD_HISTORY_CHANGED = 'submarine-cmd-history-changed';
 
 export interface CmdHistoryEntry {
   id: number;
@@ -38,7 +43,7 @@ interface Props {
   onInsert: (command: string, execute: boolean) => void;
 }
 
-const relTime = (ts: number): string => {
+export const relTime = (ts: number): string => {
   const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
   if (s < 60) return `${s}s`;
   if (s < 3600) return `${Math.floor(s / 60)}m`;
@@ -79,12 +84,10 @@ const HistorySearchOverlay = ({ isOpen, onClose, filterServerId, onInsert }: Pro
     const handle = setTimeout(() => {
       invoke<CmdHistoryEntry[]>("cmd_history_list", {
         query: query || null,
+        serverId: restrictToServer && filterServerId != null ? filterServerId : null,
         limit: 200,
       }).then((rows) => {
-        const filtered = restrictToServer && filterServerId != null
-          ? rows.filter(r => r.server_id === filterServerId)
-          : rows;
-        setEntries(filtered);
+        setEntries(rows);
         setSelectedIdx(0);
         setError(null);
       }).catch((e) => {
