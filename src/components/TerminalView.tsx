@@ -9,7 +9,7 @@ import { KeyRound } from 'lucide-react';
 import { useIsNarrow } from '../hooks/useViewport';
 import { MobileKeyBar, ModifiersState, ModKey, SpecialKey } from './MobileKeyBar';
 import { useBroadcast } from '../ui/broadcast';
-import HistorySearchOverlay from './HistorySearchOverlay';
+import HistorySearchOverlay, { CMD_HISTORY_CHANGED } from './HistorySearchOverlay';
 import { DEFAULT_FONT_STACK, fontFamilyCss, readFontFamily, readFontSize } from '../util/terminalFont';
 import { readScrollback } from '../util/terminalScrollback';
 import { withoutPasteControls } from '../util/pasteText';
@@ -901,7 +901,9 @@ const TerminalView = ({
               serverId: serverId > 0 ? serverId : null,
               serverName: serverName || "",
               command: line,
-            }).catch(() => { /* silent — history logging is best-effort */ });
+            })
+              .then(() => window.dispatchEvent(new CustomEvent(CMD_HISTORY_CHANGED, { detail: serverId > 0 ? serverId : null })))
+              .catch(() => { /* silent — history logging is best-effort */ });
           }
         } else if (ch === 0x7f /* DEL */ || ch === 0x08 /* BS */) {
           commandBufRef.current = commandBufRef.current.slice(0, -1);

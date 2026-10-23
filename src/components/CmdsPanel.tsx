@@ -1,7 +1,10 @@
-import { Fragment, useState, useEffect, useRef } from "react";
-import { parseCommandScope, scopeMatches, serverScopeIds } from "../util/commandScope";
+import { Fragment, useState, useEffect, useMemo, useRef, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { parseCommandScope, scopeMatches, scopeToJson, serverScopeIds } from "../util/commandScope";
 import { invoke } from "@tauri-apps/api/core";
-import { Play, RefreshCw, Search, X, Terminal, StickyNote, ClipboardCopy, ChevronDown, ChevronRight, Pencil, Check, Server } from "lucide-react";
+import { Play, RefreshCw, Search, X, Terminal, StickyNote, ClipboardCopy, ChevronDown, ChevronRight, Pencil, Check, Server, History, BookmarkPlus, Trash2 } from "lucide-react";
+import { CMD_HISTORY_CHANGED, relTime, type CmdHistoryEntry } from "./HistorySearchOverlay";
+import { useConfirm } from "../ui/confirm";
 
 // Side panel that opens from a terminal session and surfaces *both* the
 // user's saved Quick Commands and their Notes. Two patterns for editing:
@@ -20,11 +23,21 @@ import { Play, RefreshCw, Search, X, Terminal, StickyNote, ClipboardCopy, Chevro
 // Both kinds get Play (write + CR → execute), Paste (write without CR →
 // drop into the prompt for review), and Copy (clipboard) actions. Search
 // runs client-side over the active tab's title + body fields.
+//
+// A History tab lists the commands typed into the terminals (cmd_history,
+// the same rows Ctrl+R searches), this server's only by default. Each row
+// can be run, pasted, or saved as a command through a small inline form,
+// and removed from its right-click menu; Clear empties this server's
+// history, or all of it.
 
 // `scope`: which servers it's for (util/commandScope), as stored.
 interface CommandItem { id: number; title: string; content: string; scope?: string | null; }
 interface NoteItem { id: number; title: string; body: string; }
-type Tab = "commands" | "notes" | "node";
+type Tab = "commands" | "notes" | "history" | "node";
+
+// The history row being saved as a command. `scope`: for this server only,
+// or for every server.
+type AddTarget = { id: number; title: string; body: string; scope: "server" | "all" };
 
 // Single shared "what's being edited right now" slot. Only one row can be
 // editing at a time (notes expand-to-edit, commands toggle-to-edit), so a
@@ -57,6 +70,19 @@ export const CmdsPanel = ({ activeTab, onClose, headerActions, serverId, serverN
   const [nodeSaving, setNodeSaving] = useState(false);
   const nodeDraftRef = useRef<string>("");
   useEffect(() => { nodeDraftRef.current = nodeDraft; }, [nodeDraft]);
+
+  // History is read again each time the tab opens, so it shows what was
+  // just typed; the rest of the Library loads once per server.
+  const [history, setHistory] = useState<CmdHistoryEntry[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [onlyThisServer, setOnlyThisServer] = useState(true);
+  const [adding, setAdding] = useState<AddTarget | null>(null);
+  // Right-click menu on a history row, at the pointer.
+  const [historyMenu, setHistoryMenu] = useState<{ x: number; y: number; entry: CmdHistoryEntry } | null>(null);
+  const historyMenuRef = useRef<HTMLDivElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const confirm = useConfirm();
 
   const [edit, setEdit] = useState<EditTarget | null>(null);
   const [saving, setSaving] = useState(false);
@@ -119,6 +145,54 @@ export const CmdsPanel = ({ activeTab, onClose, headerActions, serverId, serverN
 
   useEffect(() => { fetchAll(); }, [serverId]);
 
+  // This server's rows, or all of them: the table is capped at 1000 rows
+  // (CMD_HISTORY_CAP in lib.rs), so search can stay client-side like the
+  // other tabs. Only the latest request lands: `historySeq` moves on with
+  // each one (and with a delete), so an older reply arriving late can't
+  // overwrite a newer list or bring back a deleted row. The list shows a
+  // spinner only until the first reply (`historyLoaded`); after that the
+  // rows already there stay up while they're re-read. `quiet` leaves the
+  // Refresh button still.
+  const historySeq = useRef(0);
+  const fetchHistory = async (quiet = false) => {
+    const seq = ++historySeq.current;
+    if (!quiet) setHistoryLoading(true);
+    try {
+      const rows = await invoke<CmdHistoryEntry[]>("cmd_history_list", {
+        query: null,
+        serverId: hasNode && onlyThisServer ? serverId : null,
+        limit: 1000,
+      });
+      if (seq === historySeq.current) setHistory(rows || []);
+    } catch (e) {
+      console.error("Failed to fetch command history:", e);
+    } finally {
+      if (seq === historySeq.current) {
+        setHistoryLoading(false);
+        setHistoryLoaded(true);
+      }
+    }
+  };
+
+  // Read on opening the tab and whenever what it lists changes; while it's
+  // open, a command just typed in any terminal shows up without a refresh.
+  useEffect(() => {
+    if (tab !== "history") return;
+    void fetchHistory();
+    // A command typed on another server can't change this server's list.
+    const onChanged = (e: Event) => {
+      const typedOn = (e as CustomEvent<number | null>).detail;
+      if (hasNode && onlyThisServer && typedOn !== serverId) return;
+      void fetchHistory(true);
+    };
+    window.addEventListener(CMD_HISTORY_CHANGED, onChanged);
+    return () => window.removeEventListener(CMD_HISTORY_CHANGED, onChanged);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, onlyThisServer, serverId]);
+
+  // The add form was opened for the server it was on.
+  useEffect(() => { setAdding(null); }, [serverId]);
+
   const isNodeDirty = nodeDraft !== nodeOriginal;
   const saveNodeNotes = async () => {
     if (!hasNode || nodeSaving || !isNodeDirty) return;
@@ -162,6 +236,8 @@ export const CmdsPanel = ({ activeTab, onClose, headerActions, serverId, serverN
     const snapshot = editRef.current;
     setSearchQuery("");
     setEdit(null);
+    setAdding(null);
+    setHistoryMenu(null);
     flushIfDirty(snapshot);
     if (hasNode && nodeDraftRef.current !== nodeOriginal) {
       void saveNodeNotes();
@@ -229,26 +305,144 @@ export const CmdsPanel = ({ activeTab, onClose, headerActions, serverId, serverN
     catch (e) { console.error("Clipboard write failed:", e); }
   };
 
+  // Saving a history row as a command. "This server" scopes it to the
+  // session's server by uuid (util/commandScope, the same shape the main
+  // app's command editor stores); a quick-connect session has none, so it
+  // can only be for every server.
+  const canScopeToServer = !!scopeIds?.server;
+  const beginAdd = (h: CmdHistoryEntry) => {
+    // By code point, so an emoji at the cut isn't split in half.
+    const chars = Array.from(h.command);
+    const title = chars.length > 40 ? `${chars.slice(0, 40).join("").trimEnd()}…` : h.command;
+    setAdding({ id: h.id, title, body: h.command, scope: canScopeToServer ? "server" : "all" });
+  };
+  const canSaveAdd = (a: AddTarget) => !!a.title.trim() && !!a.body.trim();
+  const saveAdd = async () => {
+    if (!adding || saving || !canSaveAdd(adding)) return;
+    setSaving(true);
+    try {
+      const scope = adding.scope === "server" && scopeIds?.server ? { servers: [scopeIds.server], folders: [] } : null;
+      await invoke("add_command", { title: adding.title.trim(), content: adding.body, scope: scopeToJson(scope) });
+      setAdding(null);
+      // Just the commands: fetchAll would also reset a Node draft whose
+      // save on leaving that tab hasn't landed (or failed).
+      setCommands((await invoke<CommandItem[]>("get_commands")) || []);
+    } catch (e) {
+      console.error("Failed to save command:", e);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const clearHistory = async (count: number) => {
+    const serverOnly = hasNode && onlyThisServer;
+    const ok = await confirm({
+      title: "Clear history?",
+      message: serverOnly
+        ? `${count} command${count === 1 ? "" : "s"} typed on ${serverName || `Node #${serverId}`} will be removed from this device.`
+        : `All ${count} command${count === 1 ? "" : "s"} in history will be removed from this device.`,
+      okLabel: "Clear",
+      destructive: true,
+    });
+    if (!ok) return;
+    try {
+      await invoke("cmd_history_clear", { serverId: serverOnly ? serverId : null });
+    } catch (e) {
+      console.error("Failed to clear command history:", e);
+    }
+    setAdding(null);
+    fetchHistory();
+  };
+
+  const openHistoryMenu = (e: React.MouseEvent, entry: CmdHistoryEntry) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const MENU_W = 160, MENU_H = 40;
+    const x = Math.min(e.clientX, window.innerWidth - MENU_W - 4);
+    const y = Math.min(e.clientY, window.innerHeight - MENU_H - 4);
+    setHistoryMenu({ x: Math.max(4, x), y: Math.max(4, y), entry });
+  };
+
+  // A click anywhere else, Esc, or scrolling the list closes the menu. Only
+  // this list's scroll: a terminal next to it scrolls on every line of
+  // output and would close the menu as soon as it opened.
+  useEffect(() => {
+    if (!historyMenu) return;
+    const close = () => setHistoryMenu(null);
+    const onMouseDown = (ev: MouseEvent) => {
+      if (historyMenuRef.current?.contains(ev.target as Node)) return;
+      close();
+    };
+    const onKeyDown = (ev: KeyboardEvent) => { if (ev.key === "Escape") close(); };
+    const list = listRef.current;
+    const timer = setTimeout(() => window.addEventListener("mousedown", onMouseDown), 50);
+    window.addEventListener("keydown", onKeyDown);
+    list?.addEventListener("scroll", close);
+    window.addEventListener("blur", close);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("keydown", onKeyDown);
+      list?.removeEventListener("scroll", close);
+      window.removeEventListener("blur", close);
+    };
+  }, [historyMenu]);
+
+  // Drops the row right away, then re-reads the list as stored, which also
+  // puts the row back if the delete failed. Moving `historySeq` on first
+  // discards a reply already in flight that still holds the row.
+  const deleteHistoryEntry = async (entry: CmdHistoryEntry) => {
+    setHistoryMenu(null);
+    if (adding?.id === entry.id) setAdding(null);
+    historySeq.current++;
+    setHistory((prev) => prev.filter((h) => h.id !== entry.id));
+    try {
+      await invoke("cmd_history_delete", { id: entry.id });
+    } catch (e) {
+      console.error("Failed to delete history entry:", e);
+    }
+    fetchHistory(true);
+  };
+
   const q = searchQuery.toLowerCase();
   // Commands for this server first (#22), then those for every server; the
   // ones for other servers aren't shown. A session that isn't a saved server
-  // (quick connect) shows those for every server.
-  const matching = commands.filter(
-    (c) => c.title.toLowerCase().includes(q) || c.content.toLowerCase().includes(q)
-  );
-  const forThisServer = matching.filter((c) => {
-    const s = parseCommandScope(c.scope);
-    return !!s && !!scopeIds && scopeMatches(s, scopeIds);
-  });
-  const filteredCommands = [...forThisServer, ...matching.filter((c) => !parseCommandScope(c.scope))];
+  // (quick connect) shows those for every server. The same split tells the
+  // History tab which commands are already saved here: one kept for other
+  // servers can still be saved for this one.
+  const { serverCommands, everyServerCommands, savedContents } = useMemo(() => {
+    const serverCommands: CommandItem[] = [];
+    const everyServerCommands: CommandItem[] = [];
+    for (const c of commands) {
+      const s = parseCommandScope(c.scope);
+      if (!s) everyServerCommands.push(c);
+      else if (scopeIds && scopeMatches(s, scopeIds)) serverCommands.push(c);
+    }
+    const savedContents = new Set([...serverCommands, ...everyServerCommands].map((c) => c.content.trim()));
+    return { serverCommands, everyServerCommands, savedContents };
+  }, [commands, scopeIds]);
+  const matches = (c: CommandItem) => c.title.toLowerCase().includes(q) || c.content.toLowerCase().includes(q);
+  const forThisServer = serverCommands.filter(matches);
+  const filteredCommands = [...forThisServer, ...everyServerCommands.filter(matches)];
   const headingAt = (i: number) =>
     forThisServer.length === 0 ? null : i === 0 ? "For this server" : i === forThisServer.length ? "All servers" : null;
   const filteredNotes = notes.filter(
     (n) => (n.title || "").toLowerCase().includes(q) || (n.body || "").toLowerCase().includes(q)
   );
+  const filteredHistory = history.filter((h) => h.command.toLowerCase().includes(q));
 
-  const tabLabel = tab === "commands" ? "Commands" : tab === "notes" ? "Notes" : "Node";
-  const TabIcon = tab === "commands" ? Terminal : tab === "notes" ? StickyNote : Server;
+  // The tab strip, in order. `badge`: the count, or the Node tab's unsaved dot.
+  const tabs: { id: Tab; icon: typeof Terminal; label: string; badge?: ReactNode }[] = [
+    { id: "commands", icon: Terminal, label: "Commands", badge: <span className="text-[9px] opacity-60 shrink-0">{commands.length}</span> },
+    { id: "notes", icon: StickyNote, label: "Notes", badge: <span className="text-[9px] opacity-60 shrink-0">{notes.length}</span> },
+    { id: "history", icon: History, label: "History" },
+    ...(hasNode ? [{ id: "node" as const, icon: Server, label: "Node", badge: isNodeDirty && <span className="text-[9px] text-amber-400 shrink-0">●</span> }] : []),
+  ];
+  const current = tabs.find((t) => t.id === tab) ?? tabs[0];
+  const tabLabel = current.label;
+  const TabIcon = current.icon;
+  const listLoading = tab === "history" ? !historyLoaded : loading;
+  const refreshing = tab === "history" ? historyLoading : loading;
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#09090b]">
@@ -262,12 +456,18 @@ export const CmdsPanel = ({ activeTab, onClose, headerActions, serverId, serverN
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <button
-            onClick={async () => { await flushIfDirty(editRef.current); fetchAll(); }}
-            disabled={loading}
+            onClick={async () => {
+              // History is its own list; re-reading the rest would only reset
+              // the Node draft under a save still on its way.
+              if (tab === "history") { fetchHistory(); return; }
+              await flushIfDirty(editRef.current);
+              fetchAll();
+            }}
+            disabled={refreshing}
             className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-white/5 transition-all disabled:opacity-50"
             title="Refresh list"
           >
-            <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
+            <RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />
           </button>
           {headerActions}
           <button
@@ -280,45 +480,24 @@ export const CmdsPanel = ({ activeTab, onClose, headerActions, serverId, serverN
         </div>
       </div>
 
-      {/* Tabs — three when a server is in scope (Commands / Notes / Node),
-          two otherwise (the Library is reachable from any context, not just
-          a connected session, so the Node tab is gated on the prop). */}
-      <div className={`grid ${hasNode ? "grid-cols-3" : "grid-cols-2"} shrink-0 border-b border-white/5 bg-black/20`}>
-        <button
-          onClick={() => setTab("commands")}
-          className={`h-9 flex items-center justify-center gap-1.5 text-[11px] font-bold uppercase tracking-wider transition-all ${
-            tab === "commands"
-              ? "text-primary bg-primary/5 border-b border-primary"
-              : "text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.03] border-b border-transparent"
-          }`}
-        >
-          <Terminal size={12} /> Commands
-          <span className="text-[9px] opacity-60">{commands.length}</span>
-        </button>
-        <button
-          onClick={() => setTab("notes")}
-          className={`h-9 flex items-center justify-center gap-1.5 text-[11px] font-bold uppercase tracking-wider transition-all ${
-            tab === "notes"
-              ? "text-primary bg-primary/5 border-b border-primary"
-              : "text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.03] border-b border-transparent"
-          }`}
-        >
-          <StickyNote size={12} /> Notes
-          <span className="text-[9px] opacity-60">{notes.length}</span>
-        </button>
-        {hasNode && (
+      {/* Tabs — four when a server is in scope (Commands / Notes / History /
+          Node), three otherwise (the Library is reachable from any context,
+          not just a connected session, so the Node tab is gated on the prop). */}
+      <div className={`grid ${hasNode ? "grid-cols-4" : "grid-cols-3"} shrink-0 border-b border-white/5 bg-black/20`}>
+        {tabs.map((t) => (
           <button
-            onClick={() => setTab("node")}
-            className={`h-9 flex items-center justify-center gap-1.5 text-[11px] font-bold uppercase tracking-wider transition-all ${
-              tab === "node"
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            className={`h-9 min-w-0 px-1 flex items-center justify-center gap-1.5 text-[11px] font-bold uppercase tracking-wider transition-all ${
+              tab === t.id
                 ? "text-primary bg-primary/5 border-b border-primary"
                 : "text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.03] border-b border-transparent"
             }`}
           >
-            <Server size={12} /> Node
-            {isNodeDirty && <span className="text-[9px] text-amber-400">●</span>}
+            <t.icon size={12} className="shrink-0" /><span className="truncate">{t.label}</span>
+            {t.badge}
           </button>
-        )}
+        ))}
       </div>
 
       {/* Search Input — only on list-shaped tabs; the Node tab is a single
@@ -329,18 +508,47 @@ export const CmdsPanel = ({ activeTab, onClose, headerActions, serverId, serverN
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
             <input
               type="text"
-              placeholder={tab === "commands" ? "Search commands (title + body)..." : "Search notes (title + body)..."}
+              placeholder={tab === "commands" ? "Search commands (title + body)..." : tab === "history" ? "Search history..." : "Search notes (title + body)..."}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="w-full h-8 pl-9 pr-3 bg-white/5 border border-white/5 rounded-lg text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-primary/50 focus:bg-white/10 transition-all"
             />
           </div>
+          {tab === "history" && (
+            <div className="mt-2 flex items-center gap-2">
+              {hasNode && (
+                <label className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-zinc-400 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    className="accent-primary"
+                    checked={onlyThisServer}
+                    onChange={(e) => setOnlyThisServer(e.target.checked)}
+                  />
+                  This server only
+                </label>
+              )}
+              <span className="text-[10px] text-zinc-500 font-bold">{history.length}</span>
+              <div className="flex-1" />
+              <button
+                onClick={() => void clearHistory(history.length)}
+                // Off while searching: it clears every row in scope, not
+                // just the matches on screen. And while the list is being
+                // re-read (just after "This server only" flips), when the
+                // count on screen is for the other scope.
+                disabled={history.length === 0 || !!searchQuery || historyLoading}
+                className="h-6 px-2 rounded-md bg-white/[0.03] border border-white/10 hover:bg-rose-500/15 hover:border-rose-500/40 text-zinc-400 hover:text-rose-300 flex items-center gap-1.5 text-[10px] font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white/[0.03] disabled:hover:border-white/10 disabled:hover:text-zinc-400"
+                title={searchQuery ? "Clear the search first: Clear removes all history, not just the matches" : hasNode && onlyThisServer ? "Clear this server's history" : "Clear all history"}
+              >
+                <Trash2 size={11} /> Clear
+              </button>
+            </div>
+          )}
         </div>
       )}
 
       {/* List */}
-      <div className="flex-1 overflow-y-auto p-3 space-y-2 no-scrollbar">
-        {loading ? (
+      <div ref={listRef} className="flex-1 overflow-y-auto p-3 space-y-2 no-scrollbar">
+        {listLoading ? (
           <div className="flex flex-col items-center justify-center py-12 text-zinc-500 gap-2">
             <RefreshCw size={24} className="animate-spin text-primary opacity-60" />
             <span className="text-[11px]">Loading {tabLabel.toLowerCase()}...</span>
@@ -389,6 +597,132 @@ export const CmdsPanel = ({ activeTab, onClose, headerActions, serverId, serverN
               </button>
             </div>
           </div>
+        ) : tab === "history" ? (
+          filteredHistory.length > 0 ? (
+            filteredHistory.map((h) => {
+              const form = adding?.id === h.id ? adding : null;
+              const saved = savedContents.has(h.command);
+              const menuOpen = historyMenu?.entry.id === h.id;
+              return (
+                <div
+                  key={h.id}
+                  onContextMenu={(e) => openHistoryMenu(e, h)}
+                  className={`group relative rounded-lg border transition-all ${
+                    menuOpen ? "bg-white/[0.06] border-white/15" : "border-white/5 bg-white/[0.02] hover:bg-white/[0.04] hover:border-white/10"
+                  }`}
+                >
+                  <div className="flex items-center gap-3 px-3 py-2">
+                    <div className="flex-1 min-w-0">
+                      <p className="font-mono text-[11px] text-zinc-200 truncate group-hover:text-primary transition-colors" title={h.command}>
+                        {h.command}
+                      </p>
+                      <p className="mt-0.5 flex items-center gap-1.5 text-[10px] text-zinc-500 min-w-0">
+                        <span className="shrink-0" title={new Date(h.ts).toLocaleString()}>{relTime(h.ts)} ago</span>
+                        {!(hasNode && onlyThisServer) && h.server_name && (
+                          <>
+                            <span className="text-zinc-700">·</span>
+                            <span className="truncate">{h.server_name}</span>
+                          </>
+                        )}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        onClick={() => writeToTerminal(h.command, true)}
+                        className="w-7 h-7 rounded-md bg-primary/15 text-primary border border-primary/40 hover:bg-primary hover:text-zinc-950 hover:border-primary flex items-center justify-center transition-all"
+                        title="Run in active terminal (writes + Enter)"
+                      >
+                        <Play size={12} fill="currentColor" />
+                      </button>
+                      <button
+                        onClick={() => writeToTerminal(h.command, false)}
+                        className="w-7 h-7 rounded-md bg-white/[0.03] border border-white/10 hover:bg-white/10 hover:border-white/20 text-zinc-300 hover:text-white flex items-center justify-center transition-all"
+                        title="Paste into active terminal (no Enter)"
+                      >
+                        <ClipboardCopy size={12} />
+                      </button>
+                      <button
+                        onClick={() => (form ? setAdding(null) : beginAdd(h))}
+                        disabled={saved}
+                        className="w-7 h-7 rounded-md bg-white/[0.03] border border-white/10 hover:bg-white/10 hover:border-white/20 text-zinc-300 hover:text-white flex items-center justify-center transition-all disabled:text-emerald-400 disabled:border-emerald-500/30 disabled:bg-emerald-500/10 disabled:cursor-default"
+                        title={saved ? "Already in Commands" : "Add to Commands"}
+                      >
+                        {saved ? <Check size={12} /> : <BookmarkPlus size={12} />}
+                      </button>
+                    </div>
+                  </div>
+                  {form && (
+                    <div className="px-3 pb-3 space-y-2">
+                      <input
+                        type="text"
+                        value={form.title}
+                        onChange={(e) => setAdding({ ...form, title: e.target.value })}
+                        onKeyDown={(e) => {
+                          if (e.key === "Escape") { e.preventDefault(); setAdding(null); }
+                          // Not the Enter that picks an IME candidate.
+                          if (e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); void saveAdd(); }
+                        }}
+                        placeholder="Title"
+                        className="w-full h-7 px-2 bg-black/40 border border-white/10 rounded text-[11px] text-white placeholder-zinc-600 focus:outline-none focus:border-primary/50"
+                        autoFocus
+                      />
+                      <textarea
+                        value={form.body}
+                        onChange={(e) => setAdding({ ...form, body: e.target.value })}
+                        onKeyDown={(e) => {
+                          if (e.key === "Escape") { e.preventDefault(); setAdding(null); }
+                          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); void saveAdd(); }
+                        }}
+                        placeholder="Command body — runnable in shell"
+                        rows={3}
+                        className="w-full p-2 bg-black/40 border border-white/10 rounded font-mono text-[11px] text-zinc-200 placeholder-zinc-600 leading-relaxed resize-y focus:outline-none focus:border-primary/50 custom-scrollbar"
+                      />
+                      {canScopeToServer && (
+                        <div className="grid grid-cols-2 gap-1 p-0.5 rounded-lg bg-black/40 border border-white/10">
+                          {(["server", "all"] as const).map((s) => (
+                            <button
+                              key={s}
+                              onClick={() => setAdding({ ...form, scope: s })}
+                              className={`h-6 rounded-md text-[10px] font-bold transition-all ${
+                                form.scope === s ? "bg-primary/15 text-primary" : "text-zinc-500 hover:text-zinc-200"
+                              }`}
+                            >
+                              {s === "server" ? "This server" : "All servers"}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <div className="flex gap-1.5">
+                        <button
+                          onClick={() => setAdding(null)}
+                          disabled={saving}
+                          className="flex-1 h-7 rounded-lg bg-white/[0.04] border border-white/10 hover:bg-white/10 hover:border-white/20 text-zinc-300 hover:text-white flex items-center justify-center gap-1.5 text-[10px] font-bold transition-all disabled:opacity-50"
+                        >
+                          <X size={11} /> Cancel
+                        </button>
+                        <button
+                          onClick={() => void saveAdd()}
+                          disabled={saving || !canSaveAdd(form)}
+                          className="flex-1 h-7 rounded-lg bg-primary/10 text-primary border border-primary/20 hover:bg-primary hover:text-zinc-950 hover:border-primary flex items-center justify-center gap-1.5 text-[10px] font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                          title="Save to Commands (Ctrl+Enter)"
+                        >
+                          {saving ? <RefreshCw size={11} className="animate-spin" /> : <Check size={11} />} Save
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          ) : (
+            <div className="flex flex-col items-center justify-center py-16 text-zinc-600 text-center px-4">
+              <History size={32} className="opacity-20 mb-2" />
+              <span className="text-xs font-bold text-zinc-500">{searchQuery ? "No History Found" : "No History Yet"}</span>
+              <p className="text-[10px] mt-1 text-zinc-600 max-w-[200px]">
+                {searchQuery ? "No matches for your search query." : "Commands you run in a terminal will appear here."}
+              </p>
+            </div>
+          )
         ) : tab === "commands" ? (
           filteredCommands.length > 0 ? (
             filteredCommands.map((c, i) => {
@@ -594,6 +928,23 @@ export const CmdsPanel = ({ activeTab, onClose, headerActions, serverId, serverN
           </div>
         )}
       </div>
+
+      {historyMenu && createPortal(
+        <div
+          ref={historyMenuRef}
+          style={{ top: historyMenu.y, left: historyMenu.x }}
+          onContextMenu={(e) => e.preventDefault()}
+          className="fixed z-[9999] min-w-[160px] bg-[#0c0c0e] border border-white/10 rounded-lg shadow-2xl p-1 backdrop-blur-md font-mono text-[11.5px] text-zinc-200"
+        >
+          <button
+            onClick={() => void deleteHistoryEntry(historyMenu.entry)}
+            className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-rose-950/20 text-left text-rose-400"
+          >
+            <Trash2 size={11} /><span>Delete</span>
+          </button>
+        </div>,
+        document.body
+      )}
     </div>
   );
 };

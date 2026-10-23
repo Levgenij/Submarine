@@ -19,6 +19,11 @@ import { Search, X, History } from "lucide-react";
 // so we don't have to know about xterm / write_terminal_data plumbing here.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Fired on `window` once a typed command has been written to cmd_history,
+// so an open History tab (CmdsPanel) can show it. A CustomEvent whose
+// `detail` is the server it was typed on (null for a quick connect).
+export const CMD_HISTORY_CHANGED = "submarine-cmd-history-changed";
+
 export interface CmdHistoryEntry {
   id: number;
   server_id: number | null;
@@ -38,7 +43,7 @@ interface Props {
   onInsert: (command: string, execute: boolean) => void;
 }
 
-const relTime = (ts: number): string => {
+export const relTime = (ts: number): string => {
   const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
   if (s < 60) return `${s}s`;
   if (s < 3600) return `${Math.floor(s / 60)}m`;
@@ -79,12 +84,10 @@ const HistorySearchOverlay = ({ isOpen, onClose, filterServerId, onInsert }: Pro
     const handle = setTimeout(() => {
       invoke<CmdHistoryEntry[]>("cmd_history_list", {
         query: query || null,
+        serverId: restrictToServer && filterServerId != null ? filterServerId : null,
         limit: 200,
       }).then((rows) => {
-        const filtered = restrictToServer && filterServerId != null
-          ? rows.filter(r => r.server_id === filterServerId)
-          : rows;
-        setEntries(filtered);
+        setEntries(rows);
         setSelectedIdx(0);
         setError(null);
       }).catch((e) => {
