@@ -9,7 +9,7 @@ import { KeyRound } from 'lucide-react';
 import { useIsNarrow } from '../hooks/useViewport';
 import { MobileKeyBar, ModifiersState, ModKey, SpecialKey } from './MobileKeyBar';
 import { useBroadcast } from '../ui/broadcast';
-import HistorySearchOverlay from './HistorySearchOverlay';
+import HistorySearchOverlay, { CMD_HISTORY_CHANGED } from './HistorySearchOverlay';
 import { bundledAlias, fontFamilyCss, readFontFamily, readFontSize } from '../util/terminalFont';
 import { readScrollback } from '../util/terminalScrollback';
 import { READABLE_CONTRAST, readBoldBright, readMinContrast, readScheme } from '../util/terminalTheme';
@@ -136,7 +136,7 @@ const TerminalView = ({
   /// value CHANGES after that.
   connectionEpoch?: number;
   /// Server id + name are used to stamp command-history rows so the
-  /// Ctrl+R overlay can show which server the command was run against.
+  /// Ctrl+Shift+R overlay can show which server the command was run against.
   /// Quick-connect sessions have serverId=0 and just record the display
   /// name — that's fine for search, since the row is orphaned from any
   /// saved node anyway.
@@ -198,7 +198,7 @@ const TerminalView = ({
   const [showSearch, setShowSearch] = useState(false);
   const [query, setQuery] = useState('');
 
-  // Command-history overlay (Ctrl+R / Cmd+R). Same document-level keydown
+  // Command-history overlay (Ctrl+Shift+R / Cmd+Shift+R). Same document-level keydown
   // gate as search: only pop it when the user is focused inside this
   // terminal's DOM subtree, so multi-tab windows don't fire N overlays.
   const [showHistory, setShowHistory] = useState(false);
@@ -438,9 +438,12 @@ const TerminalView = ({
   // Gate on `document.activeElement` so multiple terminals in tabs / split
   // panes don't all pop their search chip on a single Ctrl+F.
   //
-  // The same gate is reused for Ctrl+R / Cmd+R which opens the command
-  // history overlay. Browsers normally reload the page on Ctrl+R; inside
-  // the Tauri webview a document-level preventDefault stops that dead.
+  // The same gate is reused for Ctrl+Shift+R / Cmd+Shift+R which opens the
+  // command history overlay. Plain Ctrl+R stays the shell's own
+  // reverse-i-search: xterm sends it on and stops it from bubbling, so it
+  // never reaches here. Ctrl+Shift+R would go the same way, so the key
+  // handler on the terminal lets it through (see attachCustomKeyEventHandler).
+  // The webview's own reload on that combo is cancelled app-wide (main.tsx).
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return;
@@ -457,7 +460,7 @@ const TerminalView = ({
           searchInputRef.current?.focus();
           searchInputRef.current?.select();
         });
-      } else if (e.key === 'r' || e.key === 'R') {
+      } else if (e.shiftKey && e.keyCode === 82) {
         e.preventDefault();
         setShowHistory(true);
       }
@@ -735,7 +738,9 @@ const TerminalView = ({
               serverId: serverId > 0 ? serverId : null,
               serverName: serverName || "",
               command: line,
-            }).catch(() => { /* silent — history logging is best-effort */ });
+            })
+              .then(() => window.dispatchEvent(new CustomEvent(CMD_HISTORY_CHANGED, { detail: serverId > 0 ? serverId : null })))
+              .catch(() => { /* silent — history logging is best-effort */ });
           }
         } else if (ch === 0x7f /* DEL */ || ch === 0x08 /* BS */) {
           commandBufRef.current = commandBufRef.current.slice(0, -1);
@@ -919,6 +924,14 @@ const TerminalView = ({
       }
       if (noOtherMods && ev.code === 'KeyC') {
         if (ev.type === 'keydown' && !ev.repeat) void copySelectionIfAny();
+        ev.preventDefault();
+        return false;
+      }
+      // Ctrl+Shift+R opens the command history overlay. Not sent to the
+      // shell (it'd arrive as a plain Ctrl+R) and left to bubble up to the
+      // document-level listener that opens it. By keyCode, the layout's R
+      // key, which is also what xterm turns into Ctrl+R.
+      if (noOtherMods && ev.keyCode === 82) {
         ev.preventDefault();
         return false;
       }
