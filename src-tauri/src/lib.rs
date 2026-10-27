@@ -21814,6 +21814,18 @@ async fn local_create_dir(path: String) -> Result<(), String> {
     std::fs::create_dir_all(&safe).map_err(|e| format!("Failed to create directory: {}", e))
 }
 
+/// Empty regular file. `create_new` so an existing path is not truncated.
+#[tauri::command]
+async fn local_create_file(path: String) -> Result<(), String> {
+    let safe = guard_local_path(&path, true)?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&safe)
+        .map(|_| ())
+        .map_err(|e| format!("Failed to create file: {}", e))
+}
+
 /// Remove a symlink or Windows junction itself, never what it points to.
 /// A directory link uses `remove_dir`; every other link is unlinked.
 fn remove_link_itself(path: &std::path::Path, ft: &std::fs::FileType) -> std::io::Result<()> {
@@ -22072,6 +22084,20 @@ mod local_nofollow {
         local_rename(s(&a), s(&root.join("sub").join("moved.txt"))).await.unwrap();
         assert_eq!(std::fs::read(root.join("sub").join("moved.txt")).unwrap(), b"new");
         assert!(!a.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_new_file_is_empty_and_never_truncates_one_already_there() {
+        let root = scratch("newfile");
+        let (fresh, kept) = (root.join("notes.txt"), root.join("kept.txt"));
+        std::fs::write(&kept, b"keep me").unwrap();
+        let s = |p: &Path| p.to_string_lossy().to_string();
+
+        local_create_file(s(&fresh)).await.unwrap();
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"");
+        assert!(local_create_file(s(&kept)).await.is_err());
+        assert_eq!(std::fs::read(&kept).unwrap(), b"keep me");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -23207,7 +23233,7 @@ pub fn run() {
             docker::ssh_docker_prune,
             docker::open_container_terminal,
             select_local_folder, local_list_dir,
-            local_home_dir, local_desktop_dir, local_create_dir, local_remove, local_rename,
+            local_home_dir, local_desktop_dir, local_create_dir, local_create_file, local_remove, local_rename,
             android_quick_dirs, android_default_local_dir,
             parse_ssh_config,
             parse_client_import,

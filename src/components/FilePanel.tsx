@@ -59,7 +59,7 @@ const TOOLBAR_BUTTONS: { id: ToolbarButtonId; label: string; Icon: typeof File; 
   { id: "bookmark", label: "Bookmark", Icon: Bookmark, iconClass: "text-zinc-200" },
   { id: "refresh", label: "Refresh", Icon: RefreshCw, iconClass: "text-zinc-200" },
   { id: "browse", label: "Browse for folder", Icon: FolderSearch, iconClass: "text-emerald-300", only: "local" },
-  { id: "newfile", label: "New File", Icon: File, iconClass: "text-zinc-300", only: "remote" },
+  { id: "newfile", label: "New File", Icon: File, iconClass: "text-zinc-300" },
   { id: "mkdir", label: "New Folder", Icon: Folder, iconClass: "text-indigo-300" },
   { id: "terminal", label: "Open in Terminal", Icon: Terminal, iconClass: "text-emerald-300", only: "remote" },
   { id: "selectall", label: "Select all", Icon: CheckSquare, iconClass: "text-zinc-300" },
@@ -1448,9 +1448,10 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         await provider.mkdir(provider.joinPath(currentPath, name));
         selectAfterListRef.current = { dir: currentPath, name };
         notify(`Created ${name}`, "success");
-      } else if (type === "newfile" && v1 && sessionId) {
+      } else if (type === "newfile" && v1 && (sessionId || !isRemoteProvider)) {
         const name = safeLeafName(v1)!;
-        await invoke("sftp_create_file", { sessionId, path: provider.joinPath(currentPath, name) });
+        const path = provider.joinPath(currentPath, name);
+        await (isRemoteProvider ? invoke("sftp_create_file", { sessionId, path }) : invoke("local_create_file", { path }));
         notify(`Created ${name}`, "success");
       } else if (type === "symlink" && v1 && sessionId) {
         const name = safeLeafName(v1)!;
@@ -1935,10 +1936,10 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     }
   };
 
-  // Local: reveal in OS file manager.
-  const revealLocalEntry = async (entry: FileEntry) => {
+  // Local: reveal in OS file manager. A folder opens itself, a file its parent.
+  const revealLocal = async (path: string) => {
     try {
-      await invoke("local_open_in_explorer", { localPath: entry.path });
+      await invoke("local_open_in_explorer", { localPath: path });
     } catch (err: any) {
       notify(`Reveal failed: ${err}`, "error");
     }
@@ -2252,7 +2253,6 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       else e.preventDefault();
       return;
     }
-    if (!isRemote) return;
     e.preventDefault();
     e.stopPropagation();
     const menuW = 220;
@@ -3423,7 +3423,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           )}
 
           {!isRemote && !multi && !IS_ANDROID && (
-            <button onClick={() => { setContextMenu(null); revealLocalEntry(menuEntry); }}
+            <button onClick={() => { setContextMenu(null); revealLocal(menuEntry.path); }}
               className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
               <FolderSearch size={11} className="text-emerald-300" /><span>Reveal in Explorer</span>
             </button>
@@ -3531,6 +3531,19 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           >
             <Plus size={11} className="text-indigo-300" /><span>New Folder</span>
           </button>
+          {!isRemote && !IS_ANDROID && (
+            <>
+              <div className="h-px bg-white/5 my-1" />
+              <button
+                onClick={() => { setDirMenu(null); void revealLocal(currentPath); }}
+                className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white"
+              >
+                <FolderSearch size={11} className="text-emerald-300" /><span>Open in Explorer</span>
+              </button>
+            </>
+          )}
+          {isRemote && (
+          <>
           <button
             onClick={() => { setDirMenu(null); setModal({ type: "symlink", v1: "", v2: "" }); }}
             className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white"
@@ -3556,6 +3569,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           >
             <Shield size={11} /><span>Folder Properties</span>
           </button>
+          </>
+          )}
         </div>,
         document.body
       )}
