@@ -636,8 +636,11 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
     <div className="flex-1 flex flex-col h-full p-6 overflow-hidden bg-transparent">
       <div className="relative max-w-sm w-full mx-auto mb-6 shrink-0">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={14} />
+        {/* The grid mounts each time the Servers tab opens, so typing goes
+            straight to search. Not on a phone: it would pop the keyboard. */}
         <input
           type="text"
+          autoFocus={!isMobile}
           placeholder="Search servers…"
           className="w-full h-9 bg-[#1c1c21] border border-white/10 rounded-lg pl-9 pr-4 text-[13px] text-zinc-100 outline-none focus:border-primary/50 focus:bg-[#16161a] transition-all placeholder:text-zinc-600 shadow-inner"
           value={search}
