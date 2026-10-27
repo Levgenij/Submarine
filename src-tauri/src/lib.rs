@@ -17714,6 +17714,42 @@ async fn sftp_create_file(
     Ok(())
 }
 
+/// `cp -a` of `from` to `to` on the server. Same refusals as `local_duplicate`.
+/// shortcut: the "already there" check and `cp` are two steps, so a folder
+/// someone creates at `to` in between gets the copy inside it; fine for a
+/// duplicate a person starts by hand.
+/// One line: csh/tcsh login shells reject a newline inside quotes.
+fn duplicate_script(from: &str, to: &str) -> String {
+    format!(
+        "src={src}; dst={dst}; \
+         if [ \"$src\" -ef \"$dst\" ]; then echo 'The copy cannot replace the original'; exit 1; fi; \
+         if [ -e \"$dst\" ] || [ -L \"$dst\" ]; then echo \"$dst already exists\"; exit 1; fi; \
+         d=$(cd -P -- \"$(dirname -- \"$dst\")\" && pwd -P) || exit 1; \
+         if [ -d \"$src\" ] && [ ! -L \"$src\" ]; then \
+         s=$(cd -P -- \"$src\" && pwd -P) || exit 1; \
+         case \"$d/\" in \"$s/\"*) echo 'A folder cannot be copied into itself'; exit 1;; esac; \
+         fi; \
+         cp -a -- \"$src\" \"$dst\"",
+        src = archive::sh_quote(from),
+        dst = archive::sh_quote(to),
+    )
+}
+
+#[tauri::command]
+async fn sftp_duplicate(
+    state: tauri::State<'_, SshState>,
+    session_id: String,
+    from: String,
+    to: String,
+) -> Result<(), String> {
+    let raw = archive::run_remote_raw(&state, &session_id, &duplicate_script(&from, &to)).await?;
+    match parse_exit_marker(&raw) {
+        (0, _) => Ok(()),
+        (code, out) if out.trim().is_empty() => Err(format!("cp exited with code {}", code)),
+        (_, out) => Err(out.trim().to_string()),
+    }
+}
+
 /// OpenSSH reads the first SSH_FXP_SYMLINK string as the target and the
 /// second as the new link. russh writes the first argument first.
 fn openssh_symlink_args(link_path: String, target: String) -> (String, String) {
@@ -21826,6 +21862,70 @@ async fn local_create_file(path: String) -> Result<(), String> {
         .map_err(|e| format!("Failed to create file: {}", e))
 }
 
+/// Copies a file, a link, or a folder tree to `to`, which must not exist yet.
+/// Links are copied as links, never followed, so a link loop cannot recurse.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    let ft = std::fs::symlink_metadata(from)?.file_type();
+    if ft.is_symlink() {
+        let target = std::fs::read_link(from)?;
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&target, to);
+        #[cfg(windows)]
+        let made = if std::fs::metadata(from).map_or(false, |m| m.is_dir()) {
+            std::os::windows::fs::symlink_dir(&target, to)
+        } else {
+            std::os::windows::fs::symlink_file(&target, to)
+        };
+        return made;
+    }
+    if ft.is_dir() {
+        std::fs::create_dir(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        // Last, so a read-only folder is still filled first.
+        return std::fs::set_permissions(to, std::fs::metadata(from)?.permissions());
+    }
+    if !ft.is_file() {
+        // Opening a FIFO would block for good.
+        return Err(std::io::Error::other(format!("{} is not a regular file", from.display())));
+    }
+    let mut src = std::fs::File::open(from)?;
+    let mut dst = std::fs::OpenOptions::new().write(true).create_new(true).open(to)?;
+    std::io::copy(&mut src, &mut dst)?;
+    dst.set_permissions(src.metadata()?.permissions())
+}
+
+/// Duplicate of `from` at `to`. Nothing is overwritten: not the original,
+/// not anything else, and a folder is never copied into itself.
+#[tauri::command]
+async fn local_duplicate(from: String, to: String) -> Result<(), String> {
+    let src = guard_local_path_nofollow(&from, true)?;
+    let dst = guard_local_path(&to, true)?;
+    if dst == src {
+        return Err("The copy cannot replace the original".into());
+    }
+    if dst.starts_with(&src) {
+        return Err("A folder cannot be copied into itself".into());
+    }
+    if std::fs::symlink_metadata(&dst).is_ok() {
+        return Err(format!("{} already exists", to));
+    }
+    tokio::task::spawn_blocking(move || {
+        copy_tree(&src, &dst).map_err(|e| {
+            // Only what this call made is removed: something that appeared at
+            // `dst` meanwhile fails the first create with AlreadyExists.
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                let _ = if dst.is_dir() { std::fs::remove_dir_all(&dst) } else { std::fs::remove_file(&dst) };
+            }
+            format!("Failed to duplicate: {}", e)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Remove a symlink or Windows junction itself, never what it points to.
 /// A directory link uses `remove_dir`; every other link is unlinked.
 fn remove_link_itself(path: &std::path::Path, ft: &std::fs::FileType) -> std::io::Result<()> {
@@ -22098,6 +22198,32 @@ mod local_nofollow {
         assert_eq!(std::fs::read(&fresh).unwrap(), b"");
         assert!(local_create_file(s(&kept)).await.is_err());
         assert_eq!(std::fs::read(&kept).unwrap(), b"keep me");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_copies_the_tree_and_never_overwrites_or_nests_in_itself() {
+        let root = scratch("dup");
+        let docs = root.join("docs");
+        std::fs::create_dir_all(docs.join("sub")).unwrap();
+        std::fs::write(docs.join("a.txt"), b"a").unwrap();
+        std::fs::write(docs.join("sub").join("b.txt"), b"b").unwrap();
+        std::fs::write(root.join("taken.txt"), b"keep me").unwrap();
+        let s = |p: &Path| p.to_string_lossy().to_string();
+
+        let copy = root.join("docs copy");
+        local_duplicate(s(&docs), s(&copy)).await.unwrap();
+        assert_eq!(std::fs::read(copy.join("a.txt")).unwrap(), b"a");
+        assert_eq!(std::fs::read(copy.join("sub").join("b.txt")).unwrap(), b"b");
+
+        let e = local_duplicate(s(&docs), s(&docs)).await.unwrap_err();
+        assert!(e.contains("replace the original"), "{e}");
+        let e = local_duplicate(s(&docs), s(&docs.join("sub").join("again"))).await.unwrap_err();
+        assert!(e.contains("into itself"), "{e}");
+        assert!(!docs.join("sub").join("again").exists());
+        let e = local_duplicate(s(&docs.join("a.txt")), s(&root.join("taken.txt"))).await.unwrap_err();
+        assert!(e.contains("already exists"), "{e}");
+        assert_eq!(std::fs::read(root.join("taken.txt")).unwrap(), b"keep me");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -23233,11 +23359,11 @@ pub fn run() {
             docker::ssh_docker_prune,
             docker::open_container_terminal,
             select_local_folder, local_list_dir,
-            local_home_dir, local_desktop_dir, local_create_dir, local_create_file, local_remove, local_rename,
+            local_home_dir, local_desktop_dir, local_create_dir, local_create_file, local_duplicate, local_remove, local_rename,
             android_quick_dirs, android_default_local_dir,
             parse_ssh_config,
             parse_client_import,
-            sftp_list_dir, sftp_resolve_owners, sftp_create_dir, sftp_create_file, sftp_create_symlink, sftp_resolve_links, sftp_realpath, sftp_stat, sftp_remove_file, sftp_remove_dir,
+            sftp_list_dir, sftp_resolve_owners, sftp_create_dir, sftp_create_file, sftp_duplicate, sftp_create_symlink, sftp_resolve_links, sftp_realpath, sftp_stat, sftp_remove_file, sftp_remove_dir,
             sftp_rename, sftp_set_permissions, sftp_set_owner,
             sftp_download_file, sftp_download_dir, sftp_upload_file, sftp_upload_dir, sftp_cancel_transfer, sftp_open_remote_file,
             sftp_set_elevated, sftp_elevation_status, sftp_login_user,
@@ -23809,6 +23935,45 @@ mod tests {
         assert_eq!(super::link_stat_failure_state(&status(StatusCode::PermissionDenied)), "error");
         assert_eq!(super::link_stat_failure_state(&status(StatusCode::Failure)), "error");
         assert_eq!(super::link_stat_failure_state(&Error::Timeout), "error");
+    }
+
+    #[test]
+    fn duplicate_script_copies_but_never_overwrites_or_nests_in_itself() {
+        let script = |from: &str, to: &str| {
+            let s = super::duplicate_script(from, to);
+            assert!(!s.contains('\n'), "csh/tcsh reject a newline inside quotes");
+            s
+        };
+        let root = std::env::temp_dir().join(format!("submarine-dup-sh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("it's/sub")).unwrap();
+        std::fs::write(root.join("it's/a"), b"a").unwrap();
+        std::fs::write(root.join("taken"), b"keep me").unwrap();
+        let run = |script: &str| {
+            let out = std::process::Command::new("sh").arg("-c").arg(script).current_dir(&root).output().ok()?;
+            Some((out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned()))
+        };
+        if run("true").is_none() {
+            eprintln!("duplicate_script_copies_but_never_overwrites_or_nests_in_itself: SKIPPED, no sh");
+            return;
+        }
+
+        let (code, out) = run(&script("it's", "it's")).unwrap();
+        assert_eq!(code, Some(1));
+        assert!(out.contains("replace the original"), "{out}");
+        let (code, out) = run(&script("it's", "it's/sub/again")).unwrap();
+        assert_eq!(code, Some(1));
+        assert!(out.contains("into itself"), "{out}");
+        assert!(!root.join("it's/sub/again").exists());
+        let (code, out) = run(&script("it's/a", "taken")).unwrap();
+        assert_eq!(code, Some(1));
+        assert!(out.contains("already exists"), "{out}");
+        assert_eq!(std::fs::read(root.join("taken")).unwrap(), b"keep me");
+
+        assert_eq!(run(&script("it's", "it's copy")).unwrap().0, Some(0));
+        assert_eq!(std::fs::read(root.join("it's copy/a")).unwrap(), b"a");
+        assert!(root.join("it's copy/sub").is_dir());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

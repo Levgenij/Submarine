@@ -6,7 +6,7 @@ import {
   Folder, FolderUp, File, ArrowUp, RefreshCw, Trash2, Edit3, Shield,
   X, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Plus, Bookmark, TextCursorInput, MoreVertical, FolderSearch,
   Download, Upload, ExternalLink, Move, CheckSquare, Square, Search,
-  Terminal, Link, FolderSymlink, FileSymlink, CornerDownRight, Archive, PackageOpen, Copy, GripVertical,
+  Terminal, Link, FolderSymlink, FileSymlink, CornerDownRight, Archive, PackageOpen, Copy, CopyPlus, GripVertical,
 } from "lucide-react";
 import { BookmarkToggle, NEXT_BOOKMARK_STATE, type BookmarkState } from "./BookmarkToggle";
 import { FileEntry, FileProvider, LinkInfo } from "../fs/types";
@@ -20,7 +20,7 @@ import {
 import { parentPathOf } from "../fs/localProvider";
 import { COMPARE_LABEL, compareListings, type CompareMark } from "../fs/compare";
 import { pathCrumbs } from "../fs/pathCrumbs";
-import { canMoveInto, rulesFor, takenNames } from "../fs/moveRules";
+import { canMoveInto, duplicateName, pathKey, rulesFor, takenNames } from "../fs/moveRules";
 import { useElementWidth } from "../hooks/useViewport";
 import { readStoredJson, useStoredList, writeStoredJson } from "../util/storedJson";
 import {
@@ -354,8 +354,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   const [dirMenu, setDirMenu] = useState<{ x: number; y: number } | null>(null);
   const [toolbarMenu, setToolbarMenu] = useState<{ x: number; y: number } | null>(null);
   // "archive": v1 is the name without extension, v2 the format, `items` what
-  // was selected when the dialog opened.
-  const [modal, setModal] = useState<{ type: "rename" | "mkdir" | "newfile" | "symlink" | "properties" | "move" | "move-bulk" | "archive"; entry?: FileEntry; items?: FileEntry[]; v1?: string; v2?: string } | null>(null);
+  // was selected when the dialog opened. "duplicate": v1 the folder, v2 the name.
+  const [modal, setModal] = useState<{ type: "rename" | "mkdir" | "newfile" | "symlink" | "properties" | "move" | "move-bulk" | "archive" | "duplicate"; entry?: FileEntry; items?: FileEntry[]; v1?: string; v2?: string } | null>(null);
   const [notification, setNotification] = useState<{ msg: string; type: "info" | "success" | "error" } | null>(null);
   const notifyTimerRef = useRef<number | null>(null);
 
@@ -1389,6 +1389,18 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         return;
       }
     }
+    if (type === "duplicate" && entry) {
+      const name = safeLeafName(v2 || "");
+      if (!name || !(v1 || "").trim()) {
+        notify("Failed: Folder and name are required", "error");
+        return;
+      }
+      // The backend refuses this too; here the dialog stays open to fix it.
+      if (pathKey(provider.joinPath(v1!, name), moveRules()) === pathKey(entry.path, moveRules())) {
+        notify("Failed: The copy cannot replace the original", "error");
+        return;
+      }
+    }
     if (type === "properties") {
       if (!v1 || Number.isNaN(parseInt(v1, 8))) {
         notify("Failed: Invalid octal mode", "error");
@@ -1453,6 +1465,13 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         const path = provider.joinPath(currentPath, name);
         await (isRemoteProvider ? invoke("sftp_create_file", { sessionId, path }) : invoke("local_create_file", { path }));
         notify(`Created ${name}`, "success");
+      } else if (type === "duplicate" && entry && v1 && (sessionId || !isRemoteProvider)) {
+        const name = safeLeafName(v2 || "")!;
+        const to = provider.joinPath(v1, name);
+        const from = entry.path;
+        await (isRemoteProvider ? invoke("sftp_duplicate", { sessionId, from, to }) : invoke("local_duplicate", { from, to }));
+        if (pathKey(v1, moveRules()) === pathKey(currentPath, moveRules())) selectAfterListRef.current = { dir: currentPath, name };
+        notify(`Duplicated ${entry.name} → ${to}`, "success");
       } else if (type === "symlink" && v1 && sessionId) {
         const name = safeLeafName(v1)!;
         await invoke("sftp_create_symlink", {
@@ -3441,6 +3460,17 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
               <Edit3 size={11} /><span>Rename</span>
             </button>
           )}
+          {!multi && (
+            <button onClick={() => {
+                setContextMenu(null);
+                const { entry } = contextMenu;
+                const name = duplicateName(entry.name, entry.isDir, entries.map((e) => e.name), moveRules());
+                setModal({ type: "duplicate", entry, v1: currentPath, v2: name });
+              }}
+              className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
+              <CopyPlus size={11} /><span>Duplicate…</span>
+            </button>
+          )}
           <button onClick={() => {
               setContextMenu(null);
               // Both single and bulk move ask for a destination *directory*
@@ -3665,6 +3695,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                  modal.type === "newfile" ? "New File" :
                  modal.type === "symlink" ? "New Symbolic Link" :
                  modal.type === "move" ? "Move to…" :
+                 modal.type === "duplicate" ? "Duplicate" :
                  modal.type === "archive" ? ((modal.items?.length ?? 0) > 1 ? `Archive ${modal.items!.length} items` : "Add to archive") :
                  modal.type === "move-bulk" ? `Move ${dirStats.selectedCount} items to…` : "Properties"}
               </span>
@@ -3760,6 +3791,24 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                   <div>
                     <label className="text-[10px] text-zinc-400 block mb-1">Target</label>
                     <input type="text" value={modal.v2 || ""}
+                      onChange={(e) => setModal({ ...modal, v2: e.target.value })}
+                      onKeyDown={(e) => e.key === "Enter" && submitModal()}
+                      className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />
+                  </div>
+                </>
+              ) : modal.type === "duplicate" ? (
+                <>
+                  <div>
+                    <label className="text-[10px] text-zinc-400 block mb-1">Folder</label>
+                    <input type="text" value={modal.v1 || ""}
+                      onChange={(e) => setModal({ ...modal, v1: e.target.value })}
+                      onKeyDown={(e) => e.key === "Enter" && submitModal()}
+                      className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-zinc-400 block mb-1">Name</label>
+                    <input type="text" autoFocus value={modal.v2 || ""}
+                      onFocus={(e) => e.currentTarget.select()}
                       onChange={(e) => setModal({ ...modal, v2: e.target.value })}
                       onKeyDown={(e) => e.key === "Enter" && submitModal()}
                       className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />

@@ -50,6 +50,18 @@ export function canMoveInto(
   return !to.startsWith(from + rules.sep);
 }
 
+// A free name for a copy next to the original: "report copy.txt", then
+// "report copy 2.txt". A folder or a dot-file keeps its whole name as the stem.
+export function duplicateName(name: string, isDir: boolean, existing: string[], rules: PathRules): string {
+  const dot = isDir ? -1 : name.lastIndexOf(".");
+  const [stem, ext] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
+  const have = new Set(existing.map((n) => nameKey(n, rules)));
+  for (let n = 1; ; n++) {
+    const candidate = `${stem} copy${n > 1 ? ` ${n}` : ""}${ext}`;
+    if (!have.has(nameKey(candidate, rules))) return candidate;
+  }
+}
+
 // Names in `names` that the target folder already holds.
 export function takenNames(names: string[], existing: string[], rules: PathRules): Set<string> {
   const have = new Set(existing.map((n) => nameKey(n, rules)));
