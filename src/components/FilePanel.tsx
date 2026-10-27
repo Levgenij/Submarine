@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import {
   Folder, FolderUp, File, ArrowUp, RefreshCw, Trash2, Edit3, Shield,
-  X, ChevronUp, ChevronDown, Plus, MoreVertical, FolderSearch,
+  X, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Plus, Bookmark, TextCursorInput, MoreVertical, FolderSearch,
   Download, Upload, ExternalLink, Move, CheckSquare, Square, Search,
   Terminal, Link, FolderSymlink, FileSymlink, CornerDownRight, Archive, PackageOpen, Copy, GripVertical,
 } from "lucide-react";
@@ -44,6 +44,26 @@ const readDirDropdownWidth = () => {
   const saved = readStoredJson(DIR_DROPDOWN_WIDTH_KEY);
   return typeof saved === "number" && saved > 0 ? saved : DIR_DROPDOWN_WIDTH;
 };
+
+// The header's buttons and the address bar, in their default order: what
+// comes before the address bar sits left of it. Which are shown, and in what
+// order, is kept per provider kind (one list for every remote pane); `only`
+// names the one kind a button works for.
+type ToolbarButtonId =
+  | "up" | "recent" | "path" | "bookmark" | "refresh" | "browse" | "newfile" | "mkdir" | "terminal" | "selectall";
+const TOOLBAR_CHANGED = "submarine-sftp-toolbar-changed";
+const TOOLBAR_BUTTONS: { id: ToolbarButtonId; label: string; Icon: typeof File; iconClass: string; only?: string }[] = [
+  { id: "up", label: "Up", Icon: ArrowUp, iconClass: "text-zinc-200" },
+  { id: "recent", label: "Recent and bookmarks", Icon: ChevronDown, iconClass: "text-zinc-200" },
+  { id: "path", label: "Address bar", Icon: TextCursorInput, iconClass: "text-zinc-400" },
+  { id: "bookmark", label: "Bookmark", Icon: Bookmark, iconClass: "text-zinc-200" },
+  { id: "refresh", label: "Refresh", Icon: RefreshCw, iconClass: "text-zinc-200" },
+  { id: "browse", label: "Browse for folder", Icon: FolderSearch, iconClass: "text-emerald-300", only: "local" },
+  { id: "newfile", label: "New File", Icon: File, iconClass: "text-zinc-300", only: "remote" },
+  { id: "mkdir", label: "New Folder", Icon: Folder, iconClass: "text-indigo-300" },
+  { id: "terminal", label: "Open in Terminal", Icon: Terminal, iconClass: "text-emerald-300", only: "remote" },
+  { id: "selectall", label: "Select all", Icon: CheckSquare, iconClass: "text-zinc-300" },
+];
 
 // Last format picked in the archive dialog. The remote side is remembered
 // per session (the same id the saved directories use): `zip` being installed
@@ -238,6 +258,21 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   const [dirDropdownAt, setDirDropdownAt] = useState<DOMRect | null>(null);
   const [bookmarks, saveBookmarks] = useStoredList(bookmarksKey, BOOKMARKS_CHANGED);
   const [globalBookmarks, saveGlobalBookmarks] = useStoredList(globalBookmarksKey, BOOKMARKS_CHANGED);
+  const toolbarKey = `submarine-sftp-toolbar-${provider.id}`;
+  const [storedToolbar, saveToolbar] = useStoredList(toolbarKey, TOOLBAR_CHANGED);
+  const toolbarAvailable = TOOLBAR_BUTTONS.filter((b) => !b.only || b.only === provider.id);
+  // An empty saved list hides every button; no saved list shows them all.
+  const toolbarOrder = readStoredJson(toolbarKey) ? storedToolbar : toolbarAvailable.map((b) => b.id);
+  // The address bar cannot be hidden; a list without it puts it first.
+  const toolbarShown = (toolbarOrder.includes("path") ? toolbarOrder : ["path", ...toolbarOrder])
+    .filter((id): id is ToolbarButtonId => toolbarAvailable.some((b) => b.id === id));
+  const pathAt = toolbarShown.indexOf("path");
+  const [toolbarHover, setToolbarHover] = useState<ToolbarButtonId | null>(null);
+  const moveToolbarButton = (i: number, by: number) => {
+    const next = [...toolbarShown];
+    [next[i], next[i + by]] = [next[i + by], next[i]];
+    saveToolbar(next);
+  };
   // Each saved list with its setter, by the dropdown section it fills.
   const bookmarkLists: Record<BookmarkSection, { list: string[]; save: (next: string[]) => void }> = {
     session: { list: bookmarks, save: saveBookmarks },
@@ -317,6 +352,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; entry: FileEntry } | null>(null);
   const [dirMenu, setDirMenu] = useState<{ x: number; y: number } | null>(null);
+  const [toolbarMenu, setToolbarMenu] = useState<{ x: number; y: number } | null>(null);
   // "archive": v1 is the name without extension, v2 the format, `items` what
   // was selected when the dialog opened.
   const [modal, setModal] = useState<{ type: "rename" | "mkdir" | "newfile" | "symlink" | "properties" | "move" | "move-bulk" | "archive"; entry?: FileEntry; items?: FileEntry[]; v1?: string; v2?: string } | null>(null);
@@ -966,19 +1002,20 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // ---- context menu auto-close ------------------------------------------------
 
   useEffect(() => {
-    if (!contextMenu && !dirMenu) return;
+    if (!contextMenu && !dirMenu && !toolbarMenu) return;
     const onWindowMouseDown = (ev: MouseEvent) => {
       const target = ev.target as Node | null;
       if (target && menuRef.current?.contains(target)) return;
       setContextMenu(null);
       setDirMenu(null);
+      setToolbarMenu(null);
     };
     const timer = setTimeout(() => window.addEventListener("mousedown", onWindowMouseDown), 50);
     return () => {
       clearTimeout(timer);
       window.removeEventListener("mousedown", onWindowMouseDown);
     };
-  }, [contextMenu, dirMenu]);
+  }, [contextMenu, dirMenu, toolbarMenu]);
 
   const openMenu = (e: React.MouseEvent, entry: FileEntry) => {
     e.preventDefault();
@@ -2226,6 +2263,138 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     setDirMenu({ x: Math.max(4, x), y: Math.max(4, y) });
   };
 
+  // Right-click on the header picks and orders its buttons. The path
+  // input keeps its own menu for paste. A right-click in the bookmarks
+  // dropdown bubbles here through its portal, so that one is left out too.
+  const onHeaderMenu = (e: React.MouseEvent) => {
+    const target = e.target as HTMLElement;
+    if (!e.currentTarget.contains(target) || target.closest("input")) return;
+    e.preventDefault();
+    const x = Math.min(e.clientX, window.innerWidth - 304);
+    const y = Math.min(e.clientY, window.innerHeight - 380);
+    setToolbarMenu({ x: Math.max(4, x), y: Math.max(4, y) });
+  };
+
+  const toolbarButton = (id: ToolbarButtonId) => {
+    const plain = "p-1 rounded bg-white/[0.04] border border-white/10 hover:bg-white/10";
+    switch (id) {
+      case "up":
+        return (
+          <button key={id} onClick={goUp} title="Up" className={`${plain} text-zinc-200`}>
+            <ArrowUp size={11} />
+          </button>
+        );
+      case "recent":
+        return (
+          <React.Fragment key={id}>
+            <button
+              ref={dirToggleRef}
+              onClick={(e) => toggleDirDropdown(e.currentTarget)}
+              disabled={!hasDirMenu}
+              title="Recent and bookmarked directories"
+              className={`${plain} text-zinc-200 disabled:opacity-30 disabled:cursor-not-allowed flex items-center`}
+            >
+              <ChevronDown size={11} />
+            </button>
+            {dirDropdown}
+          </React.Fragment>
+        );
+      case "bookmark":
+        return (
+          <React.Fragment key={id}>
+            {bookmarkToggle(currentPath, {
+              disabled: !currentPath,
+              idleClassName: "text-zinc-200",
+              className: `${plain} disabled:opacity-30 disabled:cursor-not-allowed`,
+            })}
+          </React.Fragment>
+        );
+      case "refresh":
+        return (
+          <button key={id} onClick={() => fetch(currentPath)} title="Refresh"
+            className={`${plain} text-zinc-200 ${loading ? "animate-spin" : ""}`}>
+            <RefreshCw size={11} />
+          </button>
+        );
+      case "browse":
+        return (
+          <button
+            key={id}
+            onClick={async () => {
+              if (IS_ANDROID) {
+                // First open pulls the quick-dir list; subsequent opens
+                // reuse the cached list so scoped-storage probes don't
+                // rerun on every click.
+                if (!androidQuickDirs) {
+                  try {
+                    const dirs = await invoke<{ label: string; path: string }[]>("android_quick_dirs");
+                    setAndroidQuickDirs(dirs);
+                  } catch (err: any) {
+                    notify(`Browse failed: ${err}`, "error");
+                    return;
+                  }
+                }
+                setAndroidPickerOpen((v) => !v);
+                return;
+              }
+              try {
+                const picked = await invoke<string | null>("select_local_folder");
+                if (picked) await fetch(picked);
+              } catch (err: any) {
+                notify(`Browse failed: ${err}`, "error");
+              }
+            }}
+            title="Browse for folder"
+            className={`${plain} text-emerald-300`}
+          >
+            <FolderSearch size={11} />
+          </button>
+        );
+      case "newfile":
+        return (
+          <button key={id} onClick={() => setModal({ type: "newfile", v1: "" })} title="New File"
+            className={`${plain} text-zinc-300`}>
+            <File size={11} />
+          </button>
+        );
+      case "mkdir":
+        return (
+          <button key={id} onClick={() => setModal({ type: "mkdir", v1: "" })} title="New Folder"
+            className={`${plain} text-indigo-300`}>
+            <Folder size={11} />
+          </button>
+        );
+      case "terminal":
+        return (
+          <button
+            key={id}
+            onClick={() => void openDirInTerminal().catch((err) => notify(String(err), "error"))}
+            disabled={!terminalId || !currentPath}
+            title={terminalId ? "Open in Terminal" : "No terminal is open for this session"}
+            className={`${plain} text-emerald-300 disabled:opacity-30 disabled:cursor-not-allowed`}
+          >
+            <Terminal size={11} />
+          </button>
+        );
+      case "selectall":
+        return (
+          <button
+            key={id}
+            onClick={toggleSelectAll}
+            disabled={sortedEntries.length === 0}
+            title={allSelected ? "Deselect all (Ctrl+A)" : "Select all (Ctrl+A)"}
+            className={`p-1 rounded border border-white/10 hover:bg-white/10 disabled:opacity-30 ${
+              allSelected
+                ? "bg-indigo-500/20 text-indigo-200"
+                : "bg-white/[0.04] text-zinc-300"
+            }`}
+          >
+            {allSelected ? <CheckSquare size={11} /> : <Square size={11} />}
+          </button>
+        );
+    }
+  };
+
   const recentShown = recentDirs.filter((p) => p !== currentPath);
   // A global bookmark is listed once, in its own section below this session's.
   const savedRows: Record<BookmarkSection, string[]> = {
@@ -2546,7 +2715,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       {/* Header. The crumb path stays one scrolling row. Button clusters
           around it wrap onto the next line at the 240px pane floor so the
           trailing actions are not clipped. */}
-      <div className={`relative w-full flex flex-wrap items-center gap-x-1.5 gap-y-1 p-1.5 border rounded-lg shrink-0 shadow-lg ${
+      <div onContextMenu={onHeaderMenu} className={`relative w-full flex flex-wrap items-center gap-x-1.5 gap-y-1 p-1.5 border rounded-lg shrink-0 shadow-lg ${
         rootMode ? "bg-rose-950/30 border-rose-500/40" : "bg-[#121214] border-white/5"
       }`}>
         <span className="text-[10px] font-black uppercase tracking-widest text-zinc-300 px-1.5 shrink-0">
@@ -2564,29 +2733,16 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         {headerExtra}
         <div className="relative flex flex-1 flex-wrap items-center gap-1.5 min-w-[min(100%,9rem)] max-w-full">
           <div className="h-5 w-px bg-white/10 shrink-0" />
-          <div className="flex items-center gap-1.5 shrink-0">
-            <button onClick={goUp} title="Up" className="p-1 rounded bg-white/[0.04] border border-white/10 text-zinc-200 hover:bg-white/10 shrink-0">
-              <ArrowUp size={11} />
-            </button>
-            <div className="shrink-0">
-              <button
-                ref={dirToggleRef}
-                onClick={(e) => toggleDirDropdown(e.currentTarget)}
-                disabled={!hasDirMenu}
-                title="Recent and bookmarked directories"
-                className="p-1 rounded bg-white/[0.04] border border-white/10 text-zinc-200 hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed flex items-center"
-              >
-                <ChevronDown size={11} />
-              </button>
-              {dirDropdown}
-            </div>
-          </div>
+          {pathAt > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 max-w-full">{toolbarShown.slice(0, pathAt).map(toolbarButton)}</div>
+          )}
           {/* Path bar. Stretches to the row height, which the icon buttons
               set, so both are the same height. Shows clickable segments;
               a click on the free space switches to the text input. Both
               views fill this box absolutely, so the switch cannot resize
-              the header. */}
-          <div className="flex-1 min-w-0 relative self-stretch min-h-[22px]">
+              the header. Its least width sends a long button row past it
+              onto the next line instead of squeezing it away. */}
+          <div className="flex-1 min-w-[min(100%,8rem)] relative self-stretch min-h-[22px]">
             {!inputFocused ? (
               <div
                 ref={crumbsRef}
@@ -2689,55 +2845,11 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
               </div>
             )}
           </div>
-          <div className="flex items-center gap-1.5 shrink-0">
-            {bookmarkToggle(currentPath, {
-              disabled: !currentPath,
-              idleClassName: "text-zinc-200",
-              className: "p-1 rounded bg-white/[0.04] border border-white/10 hover:bg-white/10 shrink-0 disabled:opacity-30 disabled:cursor-not-allowed",
-            })}
-            <button onClick={() => fetch(currentPath)} title="Refresh"
-              className={`p-1 rounded bg-white/[0.04] border border-white/10 text-zinc-200 hover:bg-white/10 shrink-0 ${loading ? "animate-spin" : ""}`}>
-              <RefreshCw size={11} />
-            </button>
-          </div>
-        </div>
-        <div className="flex items-center gap-1.5 shrink-0">
-          <div className="h-5 w-px bg-white/10 shrink-0" />
-          <div className="flex items-center gap-1 relative">
-          {provider.id === "local" && (
-            <button
-              onClick={async () => {
-                if (IS_ANDROID) {
-                  // First open pulls the quick-dir list; subsequent opens
-                  // reuse the cached list so scoped-storage probes don't
-                  // rerun on every click.
-                  if (!androidQuickDirs) {
-                    try {
-                      const dirs = await invoke<{ label: string; path: string }[]>("android_quick_dirs");
-                      setAndroidQuickDirs(dirs);
-                    } catch (err: any) {
-                      notify(`Browse failed: ${err}`, "error");
-                      return;
-                    }
-                  }
-                  setAndroidPickerOpen((v) => !v);
-                  return;
-                }
-                try {
-                  const picked = await invoke<string | null>("select_local_folder");
-                  if (picked) await fetch(picked);
-                } catch (err: any) {
-                  notify(`Browse failed: ${err}`, "error");
-                }
-              }}
-              title="Browse for folder"
-              className="p-1 rounded bg-white/[0.04] border border-white/10 text-emerald-300 hover:bg-white/10"
-            >
-              <FolderSearch size={11} />
-            </button>
+          {pathAt < toolbarShown.length - 1 && (
+            <div className="flex flex-wrap items-center gap-1.5 max-w-full">{toolbarShown.slice(pathAt + 1).map(toolbarButton)}</div>
           )}
           {IS_ANDROID && androidPickerOpen && androidQuickDirs && (
-            <div className="absolute top-[24px] right-0 z-50 min-w-[180px] bg-[#0c0c0e]/95 border border-white/10 rounded-lg shadow-2xl p-1 backdrop-blur-md font-mono text-[11px]">
+            <div className="absolute top-full mt-1 right-0 z-50 min-w-[180px] bg-[#0c0c0e]/95 border border-white/10 rounded-lg shadow-2xl p-1 backdrop-blur-md font-mono text-[11px]">
               {androidQuickDirs.length === 0 ? (
                 <div className="p-2 text-zinc-400 text-[10.5px]">
                   No writable locations found. On Android 11+ shared storage
@@ -2759,23 +2871,6 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
               ))}
             </div>
           )}
-          <button onClick={() => setModal({ type: "mkdir", v1: "" })} title="New Folder"
-            className="p-1 rounded bg-white/[0.04] border border-white/10 text-indigo-300 hover:bg-white/10">
-            <Folder size={11} />
-          </button>
-          <button
-            onClick={toggleSelectAll}
-            disabled={sortedEntries.length === 0}
-            title={allSelected ? "Deselect all (Ctrl+A)" : "Select all (Ctrl+A)"}
-            className={`p-1 rounded border border-white/10 hover:bg-white/10 disabled:opacity-30 ${
-              allSelected
-                ? "bg-indigo-500/20 text-indigo-200"
-                : "bg-white/[0.04] text-zinc-300"
-            }`}
-          >
-            {allSelected ? <CheckSquare size={11} /> : <Square size={11} />}
-          </button>
-          </div>
         </div>
       </div>
 
@@ -3460,6 +3555,84 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white"
           >
             <Shield size={11} /><span>Folder Properties</span>
+          </button>
+        </div>,
+        document.body
+      )}
+
+      {/* Stays open on a click, so several buttons can be changed in a row.
+          The strip on top draws the header as it will look, with the row
+          under the pointer lit, so a move shows which side of the address
+          bar the button lands on. */}
+      {toolbarMenu && createPortal(
+        <div
+          ref={menuRef}
+          role="menu"
+          className="fixed z-[9999] w-[300px] bg-[#161619] border border-white/10 rounded-lg shadow-2xl p-1 font-mono text-[11px] text-zinc-200"
+          style={{ left: toolbarMenu.x, top: toolbarMenu.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <div className="px-1.5 py-1 text-[9.5px] font-bold uppercase tracking-wider text-zinc-500">Toolbar layout</div>
+          <div aria-hidden className="mx-1 mb-1 flex items-center gap-1 p-1 rounded bg-[#121214] border border-white/5">
+            {toolbarShown.map((id) => {
+              const { Icon, iconClass } = TOOLBAR_BUTTONS.find((b) => b.id === id)!;
+              const lit = toolbarHover === id ? "border-indigo-400 bg-indigo-500/25" : "border-white/10 bg-white/[0.04]";
+              return id === "path" ? (
+                <div key={id} className={`flex-1 min-w-[3rem] h-[18px] flex items-center px-1.5 rounded border text-[9.5px] text-zinc-500 truncate ${lit}`}>
+                  {currentPath || "Path…"}
+                </div>
+              ) : (
+                <span key={id} className={`shrink-0 p-[3px] rounded border ${lit}`}>
+                  <Icon size={10} className={iconClass} />
+                </span>
+              );
+            })}
+          </div>
+          {[...toolbarShown, ...toolbarAvailable.map((b) => b.id).filter((id) => !toolbarShown.includes(id))].map((id) => {
+            const { label, Icon, iconClass } = TOOLBAR_BUTTONS.find((b) => b.id === id)!;
+            const i = toolbarShown.indexOf(id);
+            const shown = i >= 0;
+            return (
+              <div
+                key={id}
+                onMouseEnter={() => setToolbarHover(id)}
+                onMouseLeave={() => setToolbarHover(null)}
+                onFocus={() => setToolbarHover(id)}
+                className={`flex items-center rounded hover:bg-white/10 ${id === "path" ? "bg-white/[0.04]" : ""}`}
+              >
+                <button
+                  role="menuitemcheckbox"
+                  aria-checked={shown}
+                  disabled={id === "path"}
+                  title={id === "path" ? "Always shown" : undefined}
+                  onClick={() => saveToolbar(shown ? toolbarShown.filter((x) => x !== id) : [...toolbarShown, id])}
+                  className={`flex-1 flex items-center gap-2 p-1.5 text-left enabled:hover:text-white ${shown ? "" : "text-zinc-500"}`}
+                >
+                  {shown ? <CheckSquare size={11} className={`shrink-0 ${id === "path" ? "opacity-30" : ""}`} /> : <Square size={11} className="shrink-0" />}
+                  <Icon size={11} className={`shrink-0 ${iconClass}`} />
+                  <span>{label}</span>
+                </button>
+                {shown && (
+                  <>
+                    <button onClick={() => moveToolbarButton(i, -1)} disabled={i === 0} aria-label={`Move ${label} left`}
+                      title="Move left" className="p-1.5 text-zinc-400 hover:text-white disabled:opacity-20">
+                      <ChevronLeft size={11} />
+                    </button>
+                    <button onClick={() => moveToolbarButton(i, 1)} disabled={i === toolbarShown.length - 1} aria-label={`Move ${label} right`}
+                      title="Move right" className="p-1.5 text-zinc-400 hover:text-white disabled:opacity-20">
+                      <ChevronRight size={11} />
+                    </button>
+                  </>
+                )}
+              </div>
+            );
+          })}
+          <div className="h-px bg-white/5 my-1" />
+          <button
+            onClick={() => saveToolbar(toolbarAvailable.map((b) => b.id))}
+            className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white"
+          >
+            <RefreshCw size={11} className="text-zinc-400" /><span>Reset to default</span>
           </button>
         </div>,
         document.body
