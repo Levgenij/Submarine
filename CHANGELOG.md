@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.2
+
+### Files
+
+- The pane header has New File and Open in Terminal buttons. Open in Terminal sends `cd` to the session's terminal, like the folder menu does, and is off while the session has no terminal. It is offered on the Remote side only.
+- A right-click on the pane header opens its layout menu. Every button, Up, Recent, Bookmark, and Reload included, can be shown or hidden and moved left or right of the address bar. A strip on top draws the header as it will look. The address bar cannot be hidden. The layout is kept on this device, one for the Local pane and one for every Remote pane. Reset to default puts it back.
+- A right-click on the empty part of the Local list opens a folder menu with New File, New Folder, and Open in Explorer. Android has no Open in Explorer. New File never replaces a file that is already there.
+- Duplicate… in the context menu copies one file or folder. It asks for a folder and a name and proposes a free one, "report copy.txt", then "report copy 2.txt". Nothing is overwritten: not the original, not anything else at that path. A folder is never copied into itself. The dialog stays open on those, so the name can be fixed. Links are copied as links. On a server the copy runs `cp -a`.
+
+### Servers
+
+- The search box has the focus when the Servers tab opens, so typing goes straight to the search. Not on a phone, where it would pop the keyboard over the list.
+
+Vault format is unchanged. Existing profiles open without a migration.
+
 ## 0.4.1
 
 ### Terminal
