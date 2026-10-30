@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 use ::vnc::{ClientKeyEvent, ClientMouseEvent, PixelFormat, Rect, VncConnector, VncEncoding, VncError, VncEvent, X11Event};
 use zeroize::Zeroizing;
 
-use crate::screen_link::{Counted, LinkStats, Meter, Probe, Traffic, LINK_EVERY, PROBE_SIDE};
+use crate::screen_link::{Copies, Counted, LinkStats, Meter, Probe, Traffic, LINK_EVERY, PROBE_SIDE};
 
 /// The port a VNC server listens on unless told otherwise (display :0).
 pub const DEFAULT_PORT: u16 = 5900;
@@ -154,30 +154,6 @@ impl Resizer {
 /// The most text that goes to the server's clipboard at once (the VNC
 /// library takes up to 1 MiB).
 pub const MAX_PASTE: usize = 1_000_000;
-
-/// The server's copies reach the tab at most this often, the latest one
-/// winning: a server that copies over and over (up to 1 MiB each time) can't
-/// keep the page busy.
-const COPY_EVERY: Duration = Duration::from_millis(250);
-
-/// The server's copy waiting for the tab, and when the last one went.
-#[derive(Default)]
-struct Copies {
-    due: Option<String>,
-    sent_at: Option<Instant>,
-}
-
-impl Copies {
-    /// The copy to hand on at `now`, if one is due and the last went long enough ago.
-    fn take(&mut self, now: Instant) -> Option<String> {
-        if self.sent_at.is_some_and(|at| now.saturating_duration_since(at) < COPY_EVERY) {
-            return None;
-        }
-        let text = self.due.take()?;
-        self.sent_at = Some(now);
-        Some(text)
-    }
-}
 
 /// Why `text` can't go to a VNC server's clipboard, if it can't. Classic VNC
 /// carries the clipboard as Latin-1 and the VNC library sends UTF-8 bytes as
@@ -1642,20 +1618,6 @@ mod tests {
         let (_, _, copies) = scripted_session(Options::default(), pixels, true, &[b"one", b"two", b"three"], &[]).await;
         assert_eq!(copies.last().map(String::as_str), Some("three"), "{copies:?}");
         assert!(copies.len() <= 2, "{copies:?}");
-    }
-
-    #[test]
-    fn the_servers_copies_reach_the_tab_at_most_every_quarter_second_the_latest_one() {
-        let t0 = Instant::now();
-        let mut c = Copies::default();
-        assert_eq!(c.take(t0), None, "nothing copied");
-        c.due = Some("one".into());
-        assert_eq!(c.take(t0).as_deref(), Some("one"));
-        c.due = Some("two".into());
-        c.due = Some("three".into());
-        assert_eq!(c.take(t0 + Duration::from_millis(100)), None, "too soon: it waits");
-        assert_eq!(c.take(t0 + COPY_EVERY).as_deref(), Some("three"), "the latest one");
-        assert_eq!(c.take(t0 + COPY_EVERY * 3), None, "nothing new");
     }
 
     #[test]

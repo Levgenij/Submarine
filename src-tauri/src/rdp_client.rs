@@ -52,7 +52,7 @@ use tokio::sync::mpsc;
 use tokio_rustls::rustls;
 use zeroize::Zeroizing;
 
-use crate::screen_link::{Counted, LinkStats, Meter, Probe, Traffic, LINK_EVERY, PROBE_SIDE};
+use crate::screen_link::{Copies, Counted, LinkStats, Meter, Probe, Traffic, COPY_EVERY, LINK_EVERY, PROBE_SIDE};
 
 /// How often the changed parts of the screen go to the page, at most.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -153,7 +153,9 @@ const DRIVE_POLL: Duration = Duration::from_millis(100);
 /// The most characters a copy on the server brings to this computer.
 const MAX_CLIP_CHARS: usize = 1_000_000;
 /// The most bytes such a copy can take (4 a character at most, and an end):
-/// a longer answer isn't copied out of the channel at all.
+/// a longer answer isn't copied out of the channel message. IronRDP has
+/// reassembled the whole message by then, so this limits what is copied out
+/// of it, not the memory it takes.
 const MAX_CLIP_BYTES: usize = MAX_CLIP_CHARS * 4 + 4;
 
 /// The keys that do the paste on the server, as operations on the session's
@@ -909,6 +911,10 @@ where
     // until the server has the text.
     let mut local_text: Option<Zeroizing<String>> = None;
     let mut asked_formats: VecDeque<ClipboardFormatId> = VecDeque::new();
+    // The server's copies wait here and go to the tab at most every COPY_EVERY.
+    let mut copies = Copies::default();
+    let mut copy_tick = tokio::time::interval(COPY_EVERY);
+    copy_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut held_paste: Option<(PasteKeys, tokio::time::Instant)> = None;
     // The link: a probe now and then, the bytes since the last look, and
     // whether the picture is paused (the tab isn't shown).
@@ -952,6 +958,8 @@ where
                         }
                         None => Vec::new(),
                     },
+                    // Too many answers are out already: the server's copy isn't asked for.
+                    ClipEvent::RemoteCopy(Some(_)) if asked_formats.len() >= 4 => Vec::new(),
                     ClipEvent::RemoteCopy(Some(format)) => match clip_step(&mut stage, |c| c.initiate_paste(format)) {
                         Ok(outputs) => {
                             asked_formats.push_back(format);
@@ -987,7 +995,7 @@ where
                     ClipEvent::RemoteText(Some(data)) => {
                         let format = asked_formats.pop_front().unwrap_or(ClipboardFormatId::CF_UNICODETEXT);
                         match decode_clip_text(format, &data) {
-                            Ok(text) if !text.is_empty() => remote_copy(text),
+                            Ok(text) if !text.is_empty() => copies.due = Some(text),
                             Ok(_) => {}
                             Err(e) => notice(&e),
                         }
@@ -1000,6 +1008,13 @@ where
                     notice(&e);
                     Vec::new()
                 }),
+                // A copy of the server's that waited: the latest one goes on now.
+                _ = copy_tick.tick(), if copies.due.is_some() => {
+                    if let Some(text) = copies.take(std::time::Instant::now()) {
+                        remote_copy(text);
+                    }
+                    Vec::new()
+                }
                 // How the link is doing, for the tab: the bytes since the last
                 // look, the round trip, and a new probe unless one is still out
                 // (a paused server draws nothing, so it isn't asked then).
