@@ -453,7 +453,7 @@ function DesktopApp() {
     if (n <= 0) return;
     addLog(
       `Sync removed ${n} item${n === 1 ? "" : "s"} from this profile (deleted elsewhere).` +
-        (report.backup ? ` The profile as it was is kept next to its file as ${report.backup}.` : ""),
+        (report.backup ? ` The profile as it was is kept next to its file as ${report.backup}. To restore it, turn off Auto-sync before opening the restored copy: the server still has those rows as deleted, so the next sync removes them again.` : ""),
       "info",
     );
   }, [addLog]);
@@ -2255,6 +2255,7 @@ function DesktopApp() {
                               onTerminalsChange={handleTerminalsChange}
                               chromeless={isVisible && isTiled && !isFocused}
                               isActiveView={isFocused}
+                              shown={isVisible && viewIsSession}
                               onPromptChange={handlePromptChange}
                             />
                             )}

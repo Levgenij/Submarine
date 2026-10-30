@@ -27,6 +27,30 @@ pub const PROBE_SIDE: u16 = 8;
 /// slow answer behind a big picture doesn't make the link look bad.
 pub const PROBE_SAMPLES: usize = 5;
 
+/// The server's copies reach the tab at most this often, the latest one
+/// winning: a server that copies over and over (up to 1 MiB each time) can't
+/// keep the page busy.
+pub const COPY_EVERY: Duration = Duration::from_millis(250);
+
+/// The server's copy waiting for the tab, and when the last one went.
+#[derive(Default)]
+pub struct Copies {
+    pub due: Option<String>,
+    sent_at: Option<std::time::Instant>,
+}
+
+impl Copies {
+    /// The copy to hand on at `now`, if one is due and the last went long enough ago.
+    pub fn take(&mut self, now: std::time::Instant) -> Option<String> {
+        if self.sent_at.is_some_and(|at| now.saturating_duration_since(at) < COPY_EVERY) {
+            return None;
+        }
+        let text = self.due.take()?;
+        self.sent_at = Some(now);
+        Some(text)
+    }
+}
+
 /// What the tab shows about the link to the server, every `LINK_EVERY`.
 #[derive(serde::Serialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -228,6 +252,20 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Counted<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_servers_copies_reach_the_tab_at_most_every_quarter_second_the_latest_one() {
+        let t0 = std::time::Instant::now();
+        let mut c = Copies::default();
+        assert_eq!(c.take(t0), None, "nothing copied");
+        c.due = Some("one".into());
+        assert_eq!(c.take(t0).as_deref(), Some("one"));
+        c.due = Some("two".into());
+        c.due = Some("three".into());
+        assert_eq!(c.take(t0 + Duration::from_millis(100)), None, "too soon: it waits");
+        assert_eq!(c.take(t0 + COPY_EVERY).as_deref(), Some("three"), "the latest one");
+        assert_eq!(c.take(t0 + COPY_EVERY * 3), None, "nothing new");
+    }
 
     #[test]
     fn the_delay_is_the_middle_of_the_last_answers() {

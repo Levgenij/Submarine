@@ -9,7 +9,8 @@
 //! rows first keeps the profile file as it stood: `<name>.submarine.bak-<unix
 //! time>`, next to it. The name doesn't end in `.submarine`, so the profile
 //! list doesn't show it; renaming it back (or importing it) gets the profile
-//! as it was.
+//! as it was. To restore, turn off Auto-sync before opening the restored copy:
+//! the server still has those rows as deleted, so the next sync removes them again.
 //!
 //! Best effort by design: a backup that can't be made never stops a sync.
 
@@ -48,13 +49,15 @@ fn existing(vault: &Path) -> Vec<(u64, PathBuf)> {
 
 /// Copies `vault` to a new backup, unless there is no file yet or the newest
 /// backup is younger than `MIN_GAP_SECS`; then removes all but the newest
-/// `KEEP`. Returns the new backup's file name when one was made.
+/// `KEEP`. A backup dated ahead of `now_unix` counts as the oldest, for both.
+/// Returns the new backup's file name when one was made.
 pub fn keep(vault: &Path, now_unix: u64) -> Result<Option<String>, String> {
     if !vault.is_file() {
         return Ok(None);
     }
     let have = existing(vault);
-    if have.last().is_some_and(|(when, _)| now_unix.saturating_sub(*when) < MIN_GAP_SECS) {
+    // Copies dated in the future (the clock went back) don't count: they must not block new ones.
+    if have.iter().rev().find(|(when, _)| *when <= now_unix).is_some_and(|(when, _)| now_unix - *when < MIN_GAP_SECS) {
         return Ok(None);
     }
     let name = format!("{}{now_unix:010}", stem(vault).ok_or("[BACKUP] NAME")?);
@@ -65,7 +68,10 @@ pub fn keep(vault: &Path, now_unix: u64) -> Result<Option<String>, String> {
         let _ = fs::remove_file(&tmp);
         return Err(format!("[BACKUP] COPY: {e}"));
     }
+    // A copy dated ahead of now was made before the clock went back: it is
+    // really older than any other, and the one just made is the newest.
     let mut all = existing(vault);
+    all.sort_by_key(|(when, _)| (*when <= now_unix, *when));
     while all.len() > KEEP {
         let (_, oldest) = all.remove(0);
         let _ = fs::remove_file(oldest);
@@ -73,11 +79,20 @@ pub fn keep(vault: &Path, now_unix: u64) -> Result<Option<String>, String> {
     Ok(Some(name))
 }
 
-/// Removes every backup of `vault`: a deleted profile leaves no copies behind.
-/// Best effort, like the rest.
+/// Removes every backup of `vault`, and half-written `.tmp` copies of one: a
+/// deleted profile leaves no copies behind. Best effort, like the rest.
 pub fn forget(vault: &Path) {
     for (_, path) in existing(vault) {
         let _ = fs::remove_file(path);
+    }
+    let (Some(dir), Some(stem)) = (vault.parent(), stem(vault)) else {
+        return;
+    };
+    for e in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with(&stem) && name.ends_with(".tmp") {
+            let _ = fs::remove_file(e.path());
+        }
     }
 }
 
@@ -151,6 +166,80 @@ mod tests {
         // The newest ones: versions 3 to 7.
         assert_eq!(fs::read(&have[0].1).unwrap(), b"version 3");
         assert_eq!(fs::read(&have[KEEP - 1].1).unwrap(), b"version 7");
+        assert_eq!(existing(&other).len(), 1, "another profile's backup is not touched");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_backup_from_the_future_doesnt_stop_a_new_one() {
+        let dir = temp_dir("future");
+        let vault = dir.join("p.submarine");
+        fs::write(&vault, b"p").unwrap();
+        assert!(keep(&vault, 5_000_000_000).unwrap().is_some());
+        // The clock went back a day: the newest copy is dated ahead of now.
+        assert!(keep(&vault, 5_000_000_000 - 86_400).unwrap().is_some());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_copy_just_made_is_not_the_one_pruned() {
+        let dir = temp_dir("future-full");
+        let vault = dir.join("p.submarine");
+        fs::write(&vault, b"p").unwrap();
+        let now = 7_000_000_000u64;
+        for i in 0..KEEP as u64 {
+            fs::write(dir.join(format!("p.submarine.bak-{:010}", now + 1000 + i)), b"old").unwrap();
+        }
+        let name = keep(&vault, now).unwrap().expect("a backup is made");
+        assert!(dir.join(&name).exists(), "the new copy survives");
+        assert_eq!(existing(&vault).len(), KEEP);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copies_dated_ahead_go_before_real_ones() {
+        let dir = temp_dir("future-prune");
+        let vault = dir.join("p.submarine");
+        fs::write(&vault, b"p").unwrap();
+        let now = 9_000_000_000u64;
+        for i in 0..KEEP as u64 {
+            fs::write(dir.join(format!("p.submarine.bak-{:010}", now + 100_000 + i)), b"old").unwrap();
+        }
+        let first = keep(&vault, now).unwrap().expect("a backup is made");
+        let second = keep(&vault, now + MIN_GAP_SECS).unwrap().expect("a backup is made");
+        assert!(dir.join(&first).exists(), "the earlier real copy stays");
+        assert!(dir.join(&second).exists(), "the new copy stays");
+        assert_eq!(existing(&vault).len(), KEEP);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_future_backup_doesnt_switch_off_the_gap() {
+        let dir = temp_dir("future-gap");
+        let vault = dir.join("p.submarine");
+        fs::write(&vault, b"p").unwrap();
+        let now = 8_000_000_000u64;
+        fs::write(dir.join(format!("p.submarine.bak-{:010}", now + 1000)), b"future").unwrap();
+        fs::write(dir.join(format!("p.submarine.bak-{:010}", now - 60)), b"recent").unwrap();
+        assert_eq!(keep(&vault, now).unwrap(), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forgetting_a_profile_removes_its_half_written_copy_too() {
+        let dir = temp_dir("forget-tmp");
+        let vault = dir.join("p.submarine");
+        let other = dir.join("p2.submarine");
+        fs::write(&vault, b"p").unwrap();
+        fs::write(&other, b"p2").unwrap();
+        keep(&other, 6_000_000_000).unwrap();
+        let leftover = dir.join("p.submarine.bak-6000000000.tmp");
+        let others_tmp = dir.join("p2.submarine.bak-6000000000.tmp");
+        fs::write(&leftover, b"half").unwrap();
+        fs::write(&others_tmp, b"half").unwrap();
+        forget(&vault);
+        assert!(!leftover.exists());
+        assert!(others_tmp.exists(), "another profile's leftover is not touched");
         assert_eq!(existing(&other).len(), 1, "another profile's backup is not touched");
         let _ = fs::remove_dir_all(&dir);
     }

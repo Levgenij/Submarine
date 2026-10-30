@@ -5196,12 +5196,9 @@ async fn close_profile(
     // disconnect path for each one. This frees tunnel listener sockets,
     // SFTP channels, and the SSH handle in the right order.
     let session_ids: Vec<String> = ssh.connections.lock().await.keys().cloned().collect();
-    // Build every temp path first. A refused id fails the close before any
-    // folder is deleted.
-    let mut session_dirs = Vec::with_capacity(session_ids.len());
-    for sid in &session_ids {
-        session_dirs.push((session_sftp_dir(sid)?, session_drag_dir(sid)?));
-    }
+    // A refused id's folders are left alone (no path is built for it), but it
+    // never stops the lock: its connection still closes below.
+    let session_dirs: Vec<_> = session_ids.iter().map(|sid| (session_sftp_dir(sid).ok(), session_drag_dir(sid).ok())).collect();
     for (sid, (temp, drag)) in session_ids.iter().zip(session_dirs) {
         tunnel::stop_all_for_session(&ssh.tunnels, sid).await;
         ssh.forwarded_targets.lock().await.remove(sid);
@@ -5209,11 +5206,8 @@ async fn close_profile(
         ssh.sftp_elevation.lock().await.remove(sid);
         ssh.sftp_shell.lock().await.remove(sid);
         ssh.connections.lock().await.remove(sid);
-        if temp.exists() {
-            let _ = std::fs::remove_dir_all(&temp);
-        }
-        if drag.exists() {
-            let _ = std::fs::remove_dir_all(&drag);
+        for dir in [temp, drag].into_iter().flatten().filter(|d| d.exists()) {
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 
@@ -9934,7 +9928,8 @@ async fn authenticate_password_prompting<H: russh::client::Handler>(
                         }
                     }
                 }
-                if source != SecretSource::Given {
+                // Not kept once the attempt is over: the tab's cache was cleared then.
+                if source != SecretSource::Given && ctx.attempt.is_current_now() {
                     cache_store_secret(ctx.cache, ctx.base, slot, password).await;
                 }
                 return Ok(true);
@@ -9959,7 +9954,7 @@ async fn authenticate_password_prompting<H: russh::client::Handler>(
                             }
                         }
                     }
-                    if source != SecretSource::Given {
+                    if source != SecretSource::Given && ctx.attempt.is_current_now() {
                         cache_store_secret(ctx.cache, ctx.base, slot, password).await;
                     }
                     return Ok(false);
@@ -13311,7 +13306,7 @@ async fn initiate_connection(
                     }
                     // Kept for the tab once it worked, like a password typed
                     // for the password method: a terminal's own login uses it.
-                    if let (Some(typed), Ok(true)) = (typed_password, &auth_res) {
+                    if let (Some(typed), Ok(true), true) = (typed_password, &auth_res, attempt.is_current_now()) {
                         cache_store_secret(&prompted_secrets_clone, &base_id, SecretSlot::Password, typed).await;
                     }
                 }
@@ -15317,7 +15312,14 @@ async fn rdp_open_again(
     };
     let generation = state.session_generation.lock().await.get(&session_id).copied().unwrap_or(0);
     let attempt = ssh_manager::ConnectAttempt::new(std::sync::Arc::clone(&state.session_generation), session_id.clone(), generation);
-    launch_rdp_app(&app, &attempt, &session_id, &launcher, windows)?;
+    if let Err(e) = launch_rdp_app(&app, &attempt, &session_id, &launcher, windows) {
+        // The password file isn't left for a launch that never started. The
+        // tab's own close ignores a file already gone, so session.file stays.
+        if let (true, Some(file)) = (launcher.secret, &launcher.file) {
+            let _ = std::fs::remove_file(file);
+        }
+        return Err(e);
+    }
     Ok(serde_json::json!({"app": launcher.name, "tracked": launcher.tracked, "password": launcher.secret}))
 }
 
@@ -21012,13 +21014,21 @@ fn session_drag_dir(session_id: &str) -> Result<std::path::PathBuf, String> {
 
 /// A session's part of its temp dirs' names. The frontend makes
 /// `session-<digits>` and `session-quick-<digits>` (at most 128 characters),
-/// plus `::sftp` / `::fwd` for the dedicated connections. `::` is spelled `__`
+/// plus `::sftp` / `::fwd` / `::term-<id>` for the dedicated connections. `::` is spelled `__`
 /// because `:` cannot be in a Windows file name. Any other id is refused: it
 /// comes over IPC, and a separator or `..` in it would put the directory, and
 /// the cleanup that deletes it whole, outside the app's temp root.
 fn session_temp_name(session_id: &str) -> Result<String, String> {
     let (base, suffix) = match session_id.split_once("::") {
         Some((base, suffix @ ("sftp" | "fwd"))) => (base, Some(suffix)),
+        // A terminal's own login: `term-<terminal id>`, safe characters only.
+        Some((base, suffix))
+            if suffix.strip_prefix("term-").is_some_and(|t| {
+                !t.is_empty() && t.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            }) =>
+        {
+            (base, Some(suffix))
+        }
         Some(_) => return Err("[SESSION] BAD_ID".into()),
         None => (session_id, None),
     };
@@ -21051,7 +21061,15 @@ mod ipc_path_tests {
         assert_eq!(session_temp_name("session-quick-1700000000000").unwrap(), "session-quick-1700000000000");
         assert_eq!(session_temp_name("session-5::sftp").unwrap(), "session-5__sftp");
         assert_eq!(session_temp_name("session-5::fwd").unwrap(), "session-5__fwd");
-        for bad in ["", "..", "../x", "a/b", "a\\b", "C:", "a b", "x::other", "x::sftp::sftp", "x\0"] {
+        assert_eq!(
+            session_temp_name("session-5::term-session-5-term-1729000000000").unwrap(),
+            "session-5__term-session-5-term-1729000000000"
+        );
+        for bad in [
+            "", "..", "../x", "a/b", "a\\b", "C:", "a b", "x::other", "x::sftp::sftp", "x\0",
+            "x::term-../a", "session-5::term-", "session-5::term-a/b", "session-5::term-a b",
+            "session-5::term-a\\b", "session-5::other",
+        ] {
             assert!(session_temp_name(bad).is_err(), "{bad:?}");
         }
         assert!(session_drag_dir("../../outside").is_err());
