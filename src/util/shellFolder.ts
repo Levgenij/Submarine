@@ -40,10 +40,12 @@ const hostOf = (h: string) => {
 };
 
 // The state after a report, or null when nothing changed (a shell reports at
-// every prompt). A report without a host counts as home.
+// every prompt). A report without a host counts as home, except while away: it
+// could come from either host, so only a report that names home brings it back.
 export function nextShellFolder(prev: ShellFolderState | undefined, path: string, host: string): ShellFolderState | null {
   const h = hostOf(host);
   if (!prev) return { home: h, path, away: null };
+  if (!h && prev.away) return null;
   if (!h || !prev.home || h === prev.home) {
     if (prev.path === path && prev.away === null && (prev.home || !h)) return null;
     return { home: prev.home || h, path, away: null };
