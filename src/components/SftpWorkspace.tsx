@@ -13,6 +13,7 @@ import { createRemoteProvider } from "../fs/remoteProvider";
 import { dropQueued, useQueuedTransfers } from "../fs/transferQueue";
 import { useElementWidth, useIsNarrow } from "../hooks/useViewport";
 import { onRovingKeyDown } from "../ui/rovingKeys";
+import { FOLLOW_SETUP, type ShellFolderState } from "../util/shellFolder";
 
 // Root (sudo) mode for the remote pane. See `sftp_set_elevated` in lib.rs.
 type ElevationStatus = { elevated: boolean; passwordless: boolean };
@@ -56,6 +57,14 @@ interface SftpWorkspaceProps {
   onRevealTerminal?: () => void;
   /** Unlocked profile. Server ids restart in every profile's DB, so per-server storage keys need it. */
   profile: string;
+  /**
+   * Follow: the folder the active terminal's shell reported, where the remote
+   * pane goes. Null while the shell hasn't said (the pane shows how to make
+   * it); undefined while Follow is off.
+   */
+  follow?: ShellFolderState | null;
+  /** The remote pane's Follow button. */
+  onFollowToggle?: () => void;
 }
 
 // Profile names hold only [A-Za-z0-9_-], so ":" keeps the parts apart.
@@ -106,7 +115,43 @@ const DragGhost = forwardRef<DragGhostHandle>((_props, ref) => {
 });
 DragGhost.displayName = "DragGhost";
 
-const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfig = [], terminalId, onRevealTerminal, profile }: SftpWorkspaceProps) => {
+// Follow is on but the terminal's shell hasn't said which folder it is in:
+// the one line that makes it, for the shell picked.
+function FollowSetup({ onCopy }: { onCopy: (line: string) => void }) {
+  const [picked, setPicked] = useState(0);
+  const setup = FOLLOW_SETUP[picked];
+  return (
+    <div className="flex flex-col gap-1 text-[10px] leading-snug text-zinc-400">
+      <span>
+        The terminal hasn't said which folder it is in. Add this line to {setup.file}, then open a new terminal.
+        {setup.note ? ` ${setup.note}` : ""}
+      </span>
+      <div className="flex items-center gap-1">
+        {FOLLOW_SETUP.map((s, i) => (
+          <button
+            key={s.shell}
+            type="button"
+            aria-pressed={i === picked}
+            onClick={() => setPicked(i)}
+            className={`h-5 px-1.5 rounded border ${i === picked ? "text-indigo-200 bg-indigo-500/20 border-indigo-400/40" : "text-zinc-400 border-white/10 hover:text-white"}`}
+          >
+            {s.shell}
+          </button>
+        ))}
+        <button
+          type="button"
+          onClick={() => onCopy(setup.line)}
+          className="ml-auto h-5 px-1.5 rounded border border-white/10 text-zinc-300 hover:text-white hover:bg-white/5"
+        >
+          Copy
+        </button>
+      </div>
+      <code className="block px-1.5 py-1 rounded bg-black/30 font-mono text-zinc-300 break-all select-text">{setup.line}</code>
+    </div>
+  );
+}
+
+const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfig = [], terminalId, onRevealTerminal, profile, follow, onFollowToggle }: SftpWorkspaceProps) => {
   // Active sub-tab. Files is the default (the common workflow); Mirror is
   // for the per-server one-way replication setup.
   const [view, setView] = useState<SftpView>("files");
@@ -238,6 +283,40 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
       setElevBusy(false);
     }
   };
+
+  // Follow: the remote pane goes where the active terminal's shell says it is,
+  // whenever that changes (and when Follow is turned on). A folder it can't
+  // list (no rights, gone) leaves it where it is, and so does a terminal that
+  // is on another host now (an ssh onward); the note over the pane says which.
+  const [followMiss, setFollowMiss] = useState<string | null>(null);
+  const followPath = follow && !follow.away ? follow.path : null;
+  useEffect(() => {
+    setFollowMiss(null);
+    const pane = remoteRef.current;
+    if (!followPath || disabled || !pane || pane.currentDir() === followPath) return;
+    let current = true;
+    pane.goTo(followPath).then((ok) => { if (current && !ok) setFollowMiss(followPath); });
+    return () => { current = false; };
+  }, [followPath, disabled]);
+  const copyLine = async (line: string) => {
+    try {
+      await navigator.clipboard.writeText(line);
+      remoteRef.current?.notify("Copied", "success");
+    } catch {
+      remoteRef.current?.notify("Couldn't copy it: select the line and copy it from there.", "error");
+    }
+  };
+  const followNote = follow === undefined ? null
+    : follow === null ? <FollowSetup onCopy={copyLine} />
+    : follow.away ? (
+      <div className="text-[10px] leading-snug text-amber-300 break-words">
+        The terminal is on {follow.away} now; the files stay on this server.
+      </div>
+    ) : followMiss ? (
+      <div role="alert" className="text-[10px] leading-snug text-amber-300 break-words">
+        Can't open {followMiss}, the terminal's folder.
+      </div>
+    ) : null;
 
   const rootByLogin = !elevation.elevated && loginUser === "root";
   const rootBadgeClass =
@@ -634,11 +713,14 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
         </div>
         <div className={
           shownLayout === "split"
-            ? "flex-1 min-h-0"
+            ? "flex-1 min-h-0 flex flex-col"
             : shownLayout === "side"
-              ? "flex-1 min-w-0 min-h-0"
-              : activeSide === "remote" ? "flex-1 min-h-0" : "hidden"
+              ? "flex-1 min-w-0 min-h-0 flex flex-col"
+              : activeSide === "remote" ? "flex-1 min-h-0 flex flex-col" : "hidden"
         }>
+          {followNote && (
+            <div className="shrink-0 px-2.5 py-1.5 border-b border-white/5 bg-black/20">{followNote}</div>
+          )}
           <FilePanel
             ref={remoteRef}
             provider={remoteProvider}
@@ -650,6 +732,8 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
             getOppositeDir={() => localRef.current?.currentDir()}
             terminalId={terminalId}
             onRevealTerminal={onRevealTerminal}
+            followOn={follow !== undefined}
+            onFollowToggle={onFollowToggle}
             bookmarksKey={bookmarksKey("remote")}
             globalBookmarksKey={globalBookmarksKey("remote")}
             headerExtra={elevationControl}

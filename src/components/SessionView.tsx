@@ -7,6 +7,7 @@ import { TerminalSquare, Folder, Network, AlertTriangle, Check, X, Play, Library
 import TerminalView from "./TerminalView";
 import { AuthPrompts } from "./AuthPrompts";
 import SftpWorkspace from "./SftpWorkspace";
+import { nextShellFolder, type ShellFolderState } from "../util/shellFolder";
 import TunnelsPanel from "./TunnelsPanel";
 import InfoPanel from "./InfoPanel";
 import { CmdsPanel } from "./CmdsPanel";
@@ -304,6 +305,27 @@ function writeOwnLogin(uuid: string, on: boolean) {
   } catch {
     // Best-effort, like the other per-device choices.
   }
+}
+
+// The SFTP remote pane's Follow: it goes to the folder the active terminal's
+// shell reports. Off until turned on; this device's choice, for every server
+// tab, which hear of a change through FOLLOW_EVENT.
+const FOLLOW_KEY = "submarine-sftp-follow-terminal";
+const FOLLOW_EVENT = "submarine-sftp-follow-changed";
+function readFollow(): boolean {
+  try {
+    return localStorage.getItem(FOLLOW_KEY) === "on";
+  } catch {
+    return false;
+  }
+}
+function writeFollow(on: boolean) {
+  try {
+    localStorage.setItem(FOLLOW_KEY, on ? "on" : "off");
+  } catch {
+    // Best-effort: the open tabs still hear of it.
+  }
+  window.dispatchEvent(new CustomEvent<boolean>(FOLLOW_EVENT, { detail: on }));
 }
 
 const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, chromeless = false, onTerminalsChange, isActiveView = false, onPromptChange }: any) => {
@@ -630,6 +652,27 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
   const [activeTab, setActiveTab] = useState<string>(() => `${session.id}-term-${session.initialActiveIndex ?? 0}`);
   // New terminals of this server log in on their own (its choice on this device).
   const [ownLoginDefault, setOwnLoginDefault] = useState(() => readOwnLogin(session.serverUuid));
+  // SFTP's Follow, and the folder each terminal's shell last reported (a
+  // container's terminal reports none: its folders aren't the server's).
+  const [follow, setFollow] = useState(readFollow);
+  const followRef = useRef(follow);
+  followRef.current = follow;
+  useEffect(() => {
+    const sync = (e: Event) => setFollow(!!(e as CustomEvent<boolean>).detail);
+    window.addEventListener(FOLLOW_EVENT, sync);
+    return () => window.removeEventListener(FOLLOW_EVENT, sync);
+  }, []);
+  const termFoldersRef = useRef(new Map<string, ShellFolderState>());
+  const [, setFolderTick] = useState(0);
+  const onTerminalFolder = useCallback((terminalId: string, path: string, host: string) => {
+    const next = nextShellFolder(termFoldersRef.current.get(terminalId), path, host);
+    if (!next) return;
+    termFoldersRef.current.set(terminalId, next);
+    if (followRef.current) setFolderTick((n) => n + 1);
+  }, []);
+  // What the remote pane follows: the active terminal's folder, null while its
+  // shell hasn't said, undefined while Follow is off.
+  const followFolder = follow ? (termFoldersRef.current.get(activeTab) ?? null) : undefined;
   // Bubble our terminals + active-tab up to the parent (App) whenever
   // they change so the Wall pinboard and any other App-level consumers
   // don't have to duplicate the per-session terminal book-keeping.
@@ -2244,6 +2287,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                       serverName={session.serverName}
                       ownLogin={t.ownLogin}
                       quickAuth={session.quickAuth}
+                      onFolder={t.container ? undefined : onTerminalFolder}
                     />
                     {/* Per-pane detach affordance — pulls the pane out of
                         the split without killing the underlying terminal.
@@ -2351,6 +2395,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                     serverName={session.serverName}
                     ownLogin={t.ownLogin}
                     quickAuth={session.quickAuth}
+                    onFolder={t.container ? undefined : onTerminalFolder}
                   />
                 ))}
               </div>
@@ -2373,6 +2418,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   serverName={session.serverName}
                   ownLogin={t.ownLogin}
                   quickAuth={session.quickAuth}
+                  onFolder={t.container ? undefined : onTerminalFolder}
                 />
               </div>
             ))
@@ -2432,6 +2478,8 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                     else setToolFullPersisted(false);
                   } : undefined}
                   profile={profile}
+                  follow={followFolder}
+                  onFollowToggle={() => writeFollow(!follow)}
                 />
               </div>
             </div>
