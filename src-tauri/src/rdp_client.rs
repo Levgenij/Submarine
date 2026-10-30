@@ -157,6 +157,8 @@ const MAX_CLIP_CHARS: usize = 1_000_000;
 /// reassembled the whole message by then, so this limits what is copied out
 /// of it, not the memory it takes.
 const MAX_CLIP_BYTES: usize = MAX_CLIP_CHARS * 4 + 4;
+/// The most of the server's copies asked for and not answered yet.
+const MAX_COPY_ASKS: usize = 4;
 
 /// The keys that do the paste on the server, as operations on the session's
 /// keyboard (`Database`; `held` says what is down there now). The modifier
@@ -911,6 +913,8 @@ where
     // until the server has the text.
     let mut local_text: Option<Zeroizing<String>> = None;
     let mut asked_formats: VecDeque<ClipboardFormatId> = VecDeque::new();
+    // The server's latest copy, until it can be asked for; a newer one replaces it.
+    let mut waiting_copy: Option<ClipboardFormatId> = None;
     // The server's copies wait here and go to the tab at most every COPY_EVERY.
     let mut copies = Copies::default();
     let mut copy_tick = tokio::time::interval(COPY_EVERY);
@@ -958,19 +962,10 @@ where
                         }
                         None => Vec::new(),
                     },
-                    // Too many answers are out already: the server's copy isn't asked for.
-                    ClipEvent::RemoteCopy(Some(_)) if asked_formats.len() >= 4 => Vec::new(),
-                    ClipEvent::RemoteCopy(Some(format)) => match clip_step(&mut stage, |c| c.initiate_paste(format)) {
-                        Ok(outputs) => {
-                            asked_formats.push_back(format);
-                            outputs
-                        }
-                        Err(e) => {
-                            notice(&e);
-                            Vec::new()
-                        }
-                    },
-                    ClipEvent::RemoteCopy(None) => Vec::new(),
+                    ClipEvent::RemoteCopy(format) => {
+                        waiting_copy = format;
+                        Vec::new()
+                    }
                     ClipEvent::RemoteText(None) => {
                         asked_formats.pop_front();
                         Vec::new()
@@ -1008,6 +1003,20 @@ where
                     notice(&e);
                     Vec::new()
                 }),
+                // The server's latest copy is asked for once there is room.
+                Some(format) = std::future::ready(waiting_copy), if asked_formats.len() < MAX_COPY_ASKS => {
+                    waiting_copy = None;
+                    match clip_step(&mut stage, |c| c.initiate_paste(format)) {
+                        Ok(outputs) => {
+                            asked_formats.push_back(format);
+                            outputs
+                        }
+                        Err(e) => {
+                            notice(&e);
+                            Vec::new()
+                        }
+                    }
+                }
                 // A copy of the server's that waited: the latest one goes on now.
                 _ = copy_tick.tick(), if copies.due.is_some() => {
                     if let Some(text) = copies.take(std::time::Instant::now()) {
