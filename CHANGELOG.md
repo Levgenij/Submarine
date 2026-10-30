@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.1
+
+### Servers
+
+- Deleting an RDP or VNC server, or the folder it is in, also removes the options this device kept for it, a shared folder's path among them.
+- Closing a connected tab asks about "the connection", not "the SSH connection", on RDP, VNC and telnet tabs too.
+
+### Terminal
+
+- After a reconnect, the terminal takes the keys again without a click. Telnet tabs do the same. A tab behind others, a field in use or an open dialog keeps the focus where it is.
+
+### Files
+
+- On a server without SFTP, reads past a file's end no longer start commands on the server, so an upload alongside a download no longer runs out of time on a busy server.
+
+Vault format is unchanged. Existing profiles open without a migration.
+
 ## 0.5.0
 
 ### Servers
