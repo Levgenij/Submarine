@@ -6,7 +6,7 @@ import {
   Folder, FolderUp, File, ArrowUp, RefreshCw, Trash2, Edit3, Shield,
   X, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Plus, Bookmark, TextCursorInput, MoreVertical, FolderSearch,
   Download, Upload, ExternalLink, Move, CheckSquare, Square, Search,
-  Terminal, Link, FolderSymlink, FileSymlink, CornerDownRight, Archive, PackageOpen, Copy, CopyPlus, GripVertical,
+  Terminal, Link, FolderSymlink, FileSymlink, CornerDownRight, Archive, PackageOpen, Copy, CopyPlus, GripVertical, FolderSync,
 } from "lucide-react";
 import { BookmarkToggle, NEXT_BOOKMARK_STATE, type BookmarkState } from "./BookmarkToggle";
 import { FileEntry, FileProvider, LinkInfo } from "../fs/types";
@@ -50,7 +50,7 @@ const readDirDropdownWidth = () => {
 // order, is kept per provider kind (one list for every remote pane); `only`
 // names the one kind a button works for.
 type ToolbarButtonId =
-  | "up" | "recent" | "path" | "bookmark" | "refresh" | "browse" | "newfile" | "mkdir" | "terminal" | "selectall";
+  | "up" | "recent" | "path" | "bookmark" | "refresh" | "browse" | "newfile" | "mkdir" | "terminal" | "follow" | "selectall";
 const TOOLBAR_CHANGED = "submarine-sftp-toolbar-changed";
 const TOOLBAR_BUTTONS: { id: ToolbarButtonId; label: string; Icon: typeof File; iconClass: string; only?: string }[] = [
   { id: "up", label: "Up", Icon: ArrowUp, iconClass: "text-zinc-200" },
@@ -62,6 +62,7 @@ const TOOLBAR_BUTTONS: { id: ToolbarButtonId; label: string; Icon: typeof File; 
   { id: "newfile", label: "New File", Icon: File, iconClass: "text-zinc-300" },
   { id: "mkdir", label: "New Folder", Icon: Folder, iconClass: "text-indigo-300" },
   { id: "terminal", label: "Open in Terminal", Icon: Terminal, iconClass: "text-emerald-300", only: "remote" },
+  { id: "follow", label: "Follow the terminal's folder", Icon: FolderSync, iconClass: "text-emerald-300", only: "remote" },
   { id: "selectall", label: "Select all", Icon: CheckSquare, iconClass: "text-zinc-300" },
 ];
 
@@ -180,6 +181,9 @@ export interface FilePanelProps {
   terminalId?: string;
   /** Compact layout: close the SFTP pane so the terminal that just received `cd` is visible. */
   onRevealTerminal?: () => void;
+  /** Follow (remote pane): whether it is on, and its toolbar button's toggle. None: the button is off and does nothing. */
+  followOn?: boolean;
+  onFollowToggle?: () => void;
   /** localStorage key this panel's bookmarked directories persist under. */
   bookmarksKey: string;
   /** localStorage key of the bookmarks every session's pane of this side shares. */
@@ -216,6 +220,8 @@ export interface FilePanelHandle {
    * the local panel, download from the remote one) as one queued batch.
    */
   sendItems: (items: FileEntry[], destDir: string) => Promise<void>;
+  /** Go to `path` without a message when it can't be listed: false then (the pane stays where it was). */
+  goTo: (path: string) => Promise<boolean>;
 }
 
 const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
@@ -228,6 +234,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   getOppositeDir,
   terminalId,
   onRevealTerminal,
+  followOn = false,
+  onFollowToggle,
   bookmarksKey,
   globalBookmarksKey,
   headerExtra,
@@ -725,11 +733,16 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider]);
 
+  // `goTo` through a ref that every render points at its own `fetch`: the
+  // handle is made once.
+  const fetchRef = useRef(fetch);
+  fetchRef.current = fetch;
   useImperativeHandle(ref, () => ({
     refresh: async () => { await fetch(currentPathRef.current); },
     currentDir: () => currentPathRef.current,
     notify: (msg, type) => notify(msg, type),
     sendItems: (items, destDir) => sendItemsRef.current(items, destDir),
+    goTo: (path) => fetchRef.current(path, true),
   }), []);
 
   const cameViaLink = linkBack !== null && linkBack.dir === currentPath;
@@ -2393,6 +2406,23 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             className={`${plain} text-emerald-300 disabled:opacity-30 disabled:cursor-not-allowed`}
           >
             <Terminal size={11} />
+          </button>
+        );
+      case "follow":
+        return (
+          <button
+            key={id}
+            onClick={onFollowToggle}
+            disabled={!onFollowToggle}
+            aria-pressed={followOn}
+            title={followOn
+              ? "Following the terminal: this pane goes to the folder the terminal is in. Click to stop."
+              : "Follow the terminal: this pane goes to the folder the terminal is in"}
+            className={`p-1 rounded border hover:bg-white/10 disabled:opacity-30 disabled:cursor-not-allowed ${
+              followOn ? "bg-indigo-500/20 border-indigo-400/40 text-indigo-200" : "bg-white/[0.04] border-white/10 text-emerald-300"
+            }`}
+          >
+            <FolderSync size={11} />
           </button>
         );
       case "selectall":
