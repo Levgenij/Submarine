@@ -722,6 +722,13 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
     if (isActiveView && !was) requestTerminalFocus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isActiveView]);
+  // Connected again: the terminal refused the focus while it was down, and
+  // the Reconnect button that had it is gone. The terminal keeps its guards:
+  // a tab behind others, or a field in use, keeps the focus where it is.
+  useEffect(() => {
+    if (status === 'connected') requestTerminalFocus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status]);
 
   const [activeTool, setActiveTool] = useState<ToolId | null>(null);
 
