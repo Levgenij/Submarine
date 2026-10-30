@@ -6,14 +6,29 @@
 
 - Deleting an RDP or VNC server, or the folder it is in, also removes the options this device kept for it, a shared folder's path among them.
 - Closing a connected tab asks about "the connection", not "the SSH connection", on RDP, VNC and telnet tabs too.
+- A key pressed in the phone's key box of an RDP or VNC tab is always released, so it no longer stays held on the server.
+- When the server copies again and again in the built-in RDP client, its text reaches this device at most every quarter second. The newest copy is the one that arrives.
+- Open again in this computer's RDP app leaves no password file behind when the app fails to start.
+- The RDP form says that the NLA switch is for Submarine's tab, and that on Windows Remote Desktop Connection gets the saved password and logs in by its own rules.
 
 ### Terminal
 
 - After a reconnect, the terminal takes the keys again without a click. Telnet tabs do the same. A tab behind others, a field in use or an open dialog keeps the focus where it is.
+- A terminal with its own login can be closed like any other, and locking the profile with one open no longer stops halfway.
+- After a flood of output, the note about skipped output and the prompt draw as normal text, not in a leftover character set or colour.
 
 ### Files
 
 - On a server without SFTP, reads past a file's end no longer start commands on the server, so an upload alongside a download no longer runs out of time on a busy server.
+- Follow keeps the remote pane where it is while the terminal is on another host.
+
+### Sessions
+
+- Info keeps refreshing Processes in every session on screen, not only the focused one.
+
+### Sharing and sync
+
+- The copies a sync keeps of a profile survive a clock that went back: a copy dated ahead is removed first, and new copies are still made. A half-written copy is never taken for a backup, and deleting a profile removes it too. The sync log says to turn off Auto-sync before opening a restored copy.
 
 Vault format is unchanged. Existing profiles open without a migration.
 
