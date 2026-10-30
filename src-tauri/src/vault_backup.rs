@@ -49,7 +49,8 @@ fn existing(vault: &Path) -> Vec<(u64, PathBuf)> {
 
 /// Copies `vault` to a new backup, unless there is no file yet or the newest
 /// backup is younger than `MIN_GAP_SECS`; then removes all but the newest
-/// `KEEP`. Returns the new backup's file name when one was made.
+/// `KEEP`. A backup dated ahead of `now_unix` counts as the oldest, for both.
+/// Returns the new backup's file name when one was made.
 pub fn keep(vault: &Path, now_unix: u64) -> Result<Option<String>, String> {
     if !vault.is_file() {
         return Ok(None);
@@ -67,11 +68,12 @@ pub fn keep(vault: &Path, now_unix: u64) -> Result<Option<String>, String> {
         let _ = fs::remove_file(&tmp);
         return Err(format!("[BACKUP] COPY: {e}"));
     }
-    // The copy just made is never the one pruned, even when older ones are dated ahead of it.
-    let mut others = existing(vault);
-    others.retain(|(_, p)| *p != dst);
-    while others.len() >= KEEP {
-        let (_, oldest) = others.remove(0);
+    // A copy dated ahead of now was made before the clock went back: it is
+    // really older than any other, and the one just made is the newest.
+    let mut all = existing(vault);
+    all.sort_by_key(|(when, _)| (*when <= now_unix, *when));
+    while all.len() > KEEP {
+        let (_, oldest) = all.remove(0);
         let _ = fs::remove_file(oldest);
     }
     Ok(Some(name))
@@ -190,6 +192,23 @@ mod tests {
         }
         let name = keep(&vault, now).unwrap().expect("a backup is made");
         assert!(dir.join(&name).exists(), "the new copy survives");
+        assert_eq!(existing(&vault).len(), KEEP);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copies_dated_ahead_go_before_real_ones() {
+        let dir = temp_dir("future-prune");
+        let vault = dir.join("p.submarine");
+        fs::write(&vault, b"p").unwrap();
+        let now = 9_000_000_000u64;
+        for i in 0..KEEP as u64 {
+            fs::write(dir.join(format!("p.submarine.bak-{:010}", now + 100_000 + i)), b"old").unwrap();
+        }
+        let first = keep(&vault, now).unwrap().expect("a backup is made");
+        let second = keep(&vault, now + MIN_GAP_SECS).unwrap().expect("a backup is made");
+        assert!(dir.join(&first).exists(), "the earlier real copy stays");
+        assert!(dir.join(&second).exists(), "the new copy stays");
         assert_eq!(existing(&vault).len(), KEEP);
         let _ = fs::remove_dir_all(&dir);
     }
