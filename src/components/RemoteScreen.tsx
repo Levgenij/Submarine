@@ -417,6 +417,7 @@ const RemoteScreen = forwardRef<RemoteScreenHandle, Props>(
     // The box starts with one character, so a delete always has something to
     // remove, and starts over after a line or when it gets long.
     const imeSent = useRef(" ");
+    const imeDown = useRef(new Set<number>());
     // A new connection's box is a new one, holding its one character.
     useEffect(() => { imeSent.current = " "; }, [connected]);
     const tap = (key: "Backspace" | "Enter") => {
@@ -464,9 +465,13 @@ const RemoteScreen = forwardRef<RemoteScreenHandle, Props>(
       if (e.key === "Backspace" || e.key === "Enter" || e.key === "Shift" || e.key === "CapsLock") return;
       const named = e.key.length > 1;
       const held = (e.ctrlKey || e.altKey || e.metaKey) && !e.getModifierState("AltGraph");
-      if (!named && !held) return;
       const code = scancodeFor(e.code || codeForKey(e.key));
       if (code === null) return;
+      // A key sent down is sent up, even if Ctrl was let go first (else it sticks on the server).
+      if (down) {
+        if (!named && !held) return;
+        imeDown.current.add(code);
+      } else if (!imeDown.current.delete(code)) return;
       send({ t: "key", code, key: e.key, down });
       e.preventDefault();
     };
@@ -516,7 +521,7 @@ const RemoteScreen = forwardRef<RemoteScreenHandle, Props>(
                 const end = e.currentTarget.value.length;
                 e.currentTarget.setSelectionRange(end, end);
               }}
-              onBlur={() => { typing.current = false; send({ t: "releaseall" }); }}
+              onBlur={() => { typing.current = false; imeDown.current.clear(); send({ t: "releaseall" }); }}
               className="absolute opacity-0 w-px h-px -left-10 top-0"
             />
             <button
