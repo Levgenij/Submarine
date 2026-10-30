@@ -5196,12 +5196,9 @@ async fn close_profile(
     // disconnect path for each one. This frees tunnel listener sockets,
     // SFTP channels, and the SSH handle in the right order.
     let session_ids: Vec<String> = ssh.connections.lock().await.keys().cloned().collect();
-    // Build every temp path first. A refused id fails the close before any
-    // folder is deleted.
-    let mut session_dirs = Vec::with_capacity(session_ids.len());
-    for sid in &session_ids {
-        session_dirs.push((session_sftp_dir(sid)?, session_drag_dir(sid)?));
-    }
+    // A refused id's folders are left alone (no path is built for it), but it
+    // never stops the lock: its connection still closes below.
+    let session_dirs: Vec<_> = session_ids.iter().map(|sid| (session_sftp_dir(sid).ok(), session_drag_dir(sid).ok())).collect();
     for (sid, (temp, drag)) in session_ids.iter().zip(session_dirs) {
         tunnel::stop_all_for_session(&ssh.tunnels, sid).await;
         ssh.forwarded_targets.lock().await.remove(sid);
@@ -5209,11 +5206,8 @@ async fn close_profile(
         ssh.sftp_elevation.lock().await.remove(sid);
         ssh.sftp_shell.lock().await.remove(sid);
         ssh.connections.lock().await.remove(sid);
-        if temp.exists() {
-            let _ = std::fs::remove_dir_all(&temp);
-        }
-        if drag.exists() {
-            let _ = std::fs::remove_dir_all(&drag);
+        for dir in [temp, drag].into_iter().flatten().filter(|d| d.exists()) {
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 
