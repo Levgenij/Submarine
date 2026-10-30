@@ -30,6 +30,7 @@ import { USE_SSH_CONFIG_KEY, readUseSshConfig } from "./util/sshConfig";
 import { DEFAULT_RDP_OPTIONS, readRdpOptions, writeRdpOptions } from "./util/rdpOptions";
 import { useIsNarrow } from "./hooks/useViewport";
 import { IS_ANDROID } from "./util/platform";
+import { DEFAULT_VNC_OPTIONS, readVncOptions, writeVncOptions } from "./util/vncOptions";
 import { Sidebar } from "./components/Sidebar";
 import { NodeGrid } from "./components/NodeGrid";
 import { CommandScope, describeScope, parseCommandScope, scopeToJson } from "./util/commandScope";
@@ -280,6 +281,8 @@ function DesktopApp() {
     protocol: "ssh" as "ssh" | "rdp" | "telnet" | "vnc",
     // An RDP server's window and sharing on this device (util/rdpOptions).
     rdpOptions: { ...DEFAULT_RDP_OPTIONS },
+    // A VNC server's speed and quality on this device (util/vncOptions).
+    vncOptions: { ...DEFAULT_VNC_OPTIONS },
     name: "", host: "", port: 22, username: "", password: "",
     // "custom_pass" picked as default because most users adding a new
     // server have a password in hand; the vault option is mainly useful
@@ -1022,6 +1025,7 @@ function DesktopApp() {
       id: server.id,
       protocol: server.protocol === "rdp" || server.protocol === "telnet" || server.protocol === "vnc" ? server.protocol : "ssh",
       rdpOptions: readRdpOptions(server.uuid),
+      vncOptions: readVncOptions(server.uuid),
       name: server.name || "",
       host: server.host || "",
       port: server.port || 22,
@@ -2876,6 +2880,15 @@ function DesktopApp() {
                 if (uuid) writeRdpOptions(uuid, newNode.rdpOptions || DEFAULT_RDP_OPTIONS);
               } catch (e) {
                 addLog(`SAVE_RDP_OPTIONS_FAILED: ${e}`, "error");
+              }
+            }
+            // A VNC server's speed and quality: the same, this device's own.
+            if (isVnc) {
+              try {
+                const uuid = (await invoke<any[]>("get_servers")).find((s) => s.id === savedId)?.uuid;
+                if (uuid) writeVncOptions(uuid, newNode.vncOptions || DEFAULT_VNC_OPTIONS);
+              } catch (e) {
+                addLog(`SAVE_VNC_OPTIONS_FAILED: ${e}`, "error");
               }
             }
             setIsPanelOpen(false);
