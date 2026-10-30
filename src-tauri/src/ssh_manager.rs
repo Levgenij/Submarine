@@ -659,7 +659,11 @@ impl Outflow {
             return;
         }
         let cut = waiting.len() - keep;
-        let cut = waiting[cut..].iter().position(|&b| b == b'\n').map_or(cut, |i| cut + i + 1);
+        // No line start in the window: at least begin on a character, not mid-UTF-8.
+        let cut = waiting[cut..].iter().position(|&b| b == b'\n').map_or_else(
+            || cut + waiting[cut..].iter().take_while(|&&b| b & 0xC0 == 0x80).count(),
+            |i| cut + i + 1,
+        );
         self.from += cut;
         self.skipped += cut as u64;
         self.compact();
@@ -702,7 +706,8 @@ fn skipped_note(bytes: u64) -> String {
     } else {
         format!("{} KB", (bytes >> 10).max(1))
     };
-    format!("\x1b[0m\r\n\x1b[2m[{size} of output skipped: it came faster than the terminal could show it]\x1b[0m\r\n")
+    // G0 to ASCII, shift in, SGR reset: a cut can leave a charset or colour set.
+    format!("\x1b(B\x0f\x1b[0m\r\n\x1b[2m[{size} of output skipped: it came faster than the terminal could show it]\x1b[0m\r\n")
 }
 
 /// Drive an interactive PTY channel - an SSH shell (`open_terminal`) or a
@@ -1856,7 +1861,7 @@ mod tests {
         assert!(flow.send(&mut Vec::new(), &page, &mut sink(&got)));
         let got = String::from_utf8(got.take()).unwrap();
         let (note, kept) = got.split_once("]\x1b[0m\r\n").unwrap();
-        assert!(note.starts_with("\x1b[0m\r\n\x1b[2m["), "{note:?}");
+        assert!(note.starts_with("\x1b(B\x0f\x1b[0m\r\n\x1b[2m["), "{note:?}");
         assert!(note.contains(&format!("[{} KB of output skipped", (lines.len() - kept.len()) >> 10)), "{note:?}");
         assert!(kept.len() <= AFTER_INTERRUPT_KEEP && kept.len() > AFTER_INTERRUPT_KEEP - 11, "{}", kept.len());
         assert!(kept.starts_with("line ") && kept.ends_with("line 19999\n"), "the newest, from a line start");
@@ -1977,6 +1982,21 @@ mod tests {
         assert!(skipped_note(300).contains("[1 KB of output skipped"));
         assert!(skipped_note(200 << 20).contains("[200 MB of output skipped"));
         assert!(skipped_note(3 << 30).contains("[3.0 GB of output skipped"));
+    }
+
+    #[test]
+    fn the_skipped_note_resets_charset_and_colour_first() {
+        assert!(skipped_note(300).starts_with("\x1b(B\x0f\x1b[0m"));
+    }
+
+    #[test]
+    fn a_cut_without_a_line_start_begins_on_a_character() {
+        let mut flow = Outflow::default();
+        flow.held = "é".repeat(100).into_bytes();
+        flow.trim(51); // would cut at byte 149: inside a character
+        let kept = &flow.held[flow.from..];
+        assert!(std::str::from_utf8(kept).is_ok(), "starts on a character boundary");
+        assert_eq!(flow.skipped as usize, 200 - kept.len());
     }
 
     #[test]
