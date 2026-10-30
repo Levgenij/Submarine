@@ -821,42 +821,18 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                         {RDP_BUILTIN_EXPERIMENTAL} The desktop opens in the server's tab, sized to it; the saved password is used, or asked for there.
                       </span>
                     </div>
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="text-[11px] font-bold text-zinc-300">Allow servers without NLA</div>
-                        <div className="text-[10.5px] text-zinc-500 leading-snug">
-                          NLA makes the server prove it knows the password before it is sent. Off, a server without it is refused and nothing is sent; on, the password goes inside TLS only.
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => set({ allowNoNla: !o.allowNoNla })}
-                        role="switch"
-                        aria-label="Allow servers without NLA"
-                        aria-checked={!!o.allowNoNla}
-                        className={`relative shrink-0 w-11 h-6 rounded-full transition-colors ${o.allowNoNla ? "bg-primary" : "bg-white/10"}`}
-                      >
-                        <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-zinc-100 rounded-full shadow transition-transform ${o.allowNoNla ? "translate-x-5" : "translate-x-0"}`} />
-                      </button>
-                    </div>
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="text-[11px] font-bold text-zinc-300">Share the clipboard</div>
-                        <div className="text-[10.5px] text-zinc-500 leading-snug">
-                          Text you copy on the server comes to this device. This device's text goes to the server only when you paste it there (a paste key in the tab, or its Paste button).
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => set({ clipboard: !o.clipboard })}
-                        role="switch"
-                        aria-label="Share the clipboard"
-                        aria-checked={o.clipboard}
-                        className={`relative shrink-0 w-11 h-6 rounded-full transition-colors ${o.clipboard ? "bg-primary" : "bg-white/10"}`}
-                      >
-                        <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-zinc-100 rounded-full shadow transition-transform ${o.clipboard ? "translate-x-5" : "translate-x-0"}`} />
-                      </button>
-                    </div>
+                    <SwitchRow
+                      label="Allow servers without NLA"
+                      hint="NLA makes the server prove it knows the password before it is sent. Off, a server without it is refused and nothing is sent; on, the password goes inside TLS only. This is for Submarine's tab; this computer's RDP app does its own checks."
+                      checked={!!o.allowNoNla}
+                      onChange={(v) => set({ allowNoNla: v })}
+                    />
+                    <SwitchRow
+                      label="Share the clipboard"
+                      hint="Text you copy on the server comes to this device. This device's text goes to the server only when you paste it there (a paste key in the tab, or its Paste button)."
+                      checked={o.clipboard}
+                      onChange={(v) => set({ clipboard: v })}
+                    />
                     {/* Files: a folder or a whole drive of this computer (rdp_share.rs). */}
                     {!IS_ANDROID && <RdpShareFields o={o} set={set} drives={localDrives} />}
                     <div className="pt-1 space-y-2.5">

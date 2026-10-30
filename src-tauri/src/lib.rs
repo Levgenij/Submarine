@@ -15318,7 +15318,14 @@ async fn rdp_open_again(
     };
     let generation = state.session_generation.lock().await.get(&session_id).copied().unwrap_or(0);
     let attempt = ssh_manager::ConnectAttempt::new(std::sync::Arc::clone(&state.session_generation), session_id.clone(), generation);
-    launch_rdp_app(&app, &attempt, &session_id, &launcher, windows)?;
+    if let Err(e) = launch_rdp_app(&app, &attempt, &session_id, &launcher, windows) {
+        // The password file isn't left for a launch that never started. The
+        // tab's own close ignores a file already gone, so session.file stays.
+        if let (true, Some(file)) = (launcher.secret, &launcher.file) {
+            let _ = std::fs::remove_file(file);
+        }
+        return Err(e);
+    }
     Ok(serde_json::json!({"app": launcher.name, "tracked": launcher.tracked, "password": launcher.secret}))
 }
 
