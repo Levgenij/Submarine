@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
-import { TerminalSquare, Folder, Network, AlertTriangle, Check, X, Play, Library, Info, Container, Plus, SplitSquareHorizontal, Columns, Rows, RotateCw, CloudUpload, Loader2, Maximize2, Minimize2, PanelRight, PanelLeft, PanelBottom, PanelTop } from "lucide-react";
+import { TerminalSquare, Folder, Network, AlertTriangle, Check, X, Play, Library, Info, Container, Plus, SplitSquareHorizontal, Columns, Rows, RotateCw, CloudUpload, Loader2, Maximize2, Minimize2, PanelRight, PanelLeft, PanelBottom, PanelTop, LogIn } from "lucide-react";
 import TerminalView from "./TerminalView";
 import { AuthPrompts } from "./AuthPrompts";
 import SftpWorkspace from "./SftpWorkspace";
@@ -272,6 +272,28 @@ function nextTerminalNumber(terminals: { title: string; container?: unknown }[])
   let n = 1;
   while (used.has(n)) n++;
   return `${n}`;
+}
+
+// Servers whose new terminals log in on their own (issue #230): this device's
+// choice, by the server's sync id, never synced.
+const OWN_LOGIN_KEY = "submarine-terminal-own-login";
+function readOwnLogin(uuid?: string | null): boolean {
+  if (!uuid) return false;
+  try {
+    return JSON.parse(localStorage.getItem(OWN_LOGIN_KEY) || "{}")[uuid] === true;
+  } catch {
+    return false;
+  }
+}
+function writeOwnLogin(uuid: string, on: boolean) {
+  try {
+    const all = JSON.parse(localStorage.getItem(OWN_LOGIN_KEY) || "{}");
+    if (on) all[uuid] = true;
+    else delete all[uuid];
+    localStorage.setItem(OWN_LOGIN_KEY, JSON.stringify(all));
+  } catch {
+    // Best-effort, like the other per-device choices.
+  }
 }
 
 const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, chromeless = false, onTerminalsChange, isActiveView = false, onPromptChange }: any) => {
@@ -570,8 +592,9 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
   // panel). Container slots stay otherwise identical — same xterm, same
   // events — they just point the backend at `open_container_terminal`.
   // A session reopened from the snapshot seeds its tabs from
-  // `initialTerminals`, already validated by parseSnapshot.
-  const [terminals, setTerminals] = useState<{id: string, title: string, container?: { name: string; useSudo: boolean }}[]>(() => {
+  // `initialTerminals`, already validated by parseSnapshot. `ownLogin`: the
+  // terminal logs in on a connection of its own (TerminalView), not on the tab's.
+  const [terminals, setTerminals] = useState<{id: string, title: string, container?: { name: string; useSudo: boolean }, ownLogin?: boolean}[]>(() => {
     const seeds: { title: string; container?: { name: string; useSudo: boolean } }[] | undefined = session.initialTerminals;
     return seeds?.length
       ? seeds.map((t, i) => ({ ...t, id: `${session.id}-term-${i}` }))
@@ -595,6 +618,8 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
   };
 
   const [activeTab, setActiveTab] = useState<string>(() => `${session.id}-term-${session.initialActiveIndex ?? 0}`);
+  // New terminals of this server log in on their own (its choice on this device).
+  const [ownLoginDefault, setOwnLoginDefault] = useState(() => readOwnLogin(session.serverUuid));
   // Bubble our terminals + active-tab up to the parent (App) whenever
   // they change so the Wall pinboard and any other App-level consumers
   // don't have to duplicate the per-session terminal book-keeping.
@@ -1723,7 +1748,8 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
           {/* Single "+" affordance for all terminal-creation flavours.
               Click adds a plain tab (the 90% case). The right-click menu
               — also reachable via long-press on touch — surfaces the
-              advanced modes: split-with-new-pane and un-split. That
+              advanced modes: split-with-new-pane, un-split, and a terminal
+              with its own login (once, or always for this server). That
               keeps the tab strip visually calm (one small button, no
               badges, no orientation glyphs stealing attention) while
               still exposing the power features via a discoverable
@@ -1731,7 +1757,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
           <button
             onClick={() => {
               const newId = `${session.id}-term-${Date.now()}`;
-              setTerminals(prev => [...prev, { id: newId, title: nextTerminalNumber(prev) }]);
+              setTerminals(prev => [...prev, { id: newId, title: nextTerminalNumber(prev), ownLogin: ownLoginDefault }]);
               setActiveTab(newId);
             }}
             onContextMenu={(e) => {
@@ -1740,7 +1766,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
               setPlusMenu({ x: rect.left, y: rect.bottom + 4 });
             }}
             className="h-10 w-10 sm:h-8 sm:w-8 ml-1 shrink-0 rounded-lg flex items-center justify-center text-zinc-500 hover:bg-white/10 hover:text-white transition-all border border-dashed border-white/10 relative"
-            title="New terminal · right-click for split view"
+            title="New terminal · right-click for more options"
           >
             <Plus size={14} />
             {splitTerminals.length >= 2 && (
@@ -1855,7 +1881,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   onClick={() => {
                     setPlusMenu(null);
                     const newId = `${session.id}-term-${Date.now()}`;
-                    setTerminals(prev => [...prev, { id: newId, title: nextTerminalNumber(prev) }]);
+                    setTerminals(prev => [...prev, { id: newId, title: nextTerminalNumber(prev), ownLogin: ownLoginDefault }]);
                     if (splitTerminals.length >= 2) {
                       setSplitTerminals(prev => [...prev, newId]);
                       setSplitRatios(prev => [...prev, 1]);
@@ -1895,6 +1921,40 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                 )}
               </>
             )}
+            {/* A terminal that logs in on its own, as a new connection to
+                the server would (issue #230): once, or always for this
+                server on this device. */}
+            <>
+                <button
+                  onClick={() => {
+                    setPlusMenu(null);
+                    const newId = `${session.id}-term-${Date.now()}`;
+                    setTerminals(prev => [...prev, { id: newId, title: nextTerminalNumber(prev), ownLogin: true }]);
+                    setActiveTab(newId);
+                  }}
+                  className="w-full flex items-center gap-2.5 px-3 py-1.5 hover:bg-white/[0.06] text-zinc-200 hover:text-white text-left"
+                >
+                  <LogIn size={13} className="text-primary/70" />
+                  <span className="flex-1">New terminal with its own login</span>
+                </button>
+                {session.serverUuid && (
+                  <button
+                    role="menuitemcheckbox"
+                    aria-checked={ownLoginDefault}
+                    onClick={() => {
+                      const on = !ownLoginDefault;
+                      writeOwnLogin(session.serverUuid, on);
+                      setOwnLoginDefault(on);
+                      setPlusMenu(null);
+                    }}
+                    title="Each new terminal logs in to the server again, as a new connection would, instead of sharing this tab's connection. For servers that tie rights to the login (CA Access Control, for one). Kept on this device."
+                    className="w-full flex items-center gap-2.5 px-3 py-1.5 hover:bg-white/[0.06] text-zinc-300 hover:text-white text-left"
+                  >
+                    {ownLoginDefault ? <Check size={13} className="text-primary" /> : <span className="w-[13px] shrink-0" />}
+                    <span className="flex-1">Always for this server</span>
+                  </button>
+                )}
+            </>
             {/* Splitting THIS session's view with another server's tab
                 lives on the session tab strip (right-click the tab).
                 That way the picker is anchored to the tab it operates
@@ -2084,6 +2144,8 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                       connectionEpoch={connectionEpoch}
                       serverId={session.serverId}
                       serverName={session.serverName}
+                      ownLogin={t.ownLogin}
+                      quickAuth={session.quickAuth}
                     />
                     {/* Per-pane detach affordance — pulls the pane out of
                         the split without killing the underlying terminal.
@@ -2189,6 +2251,8 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                     connectionEpoch={connectionEpoch}
                     serverId={session.serverId}
                     serverName={session.serverName}
+                    ownLogin={t.ownLogin}
+                    quickAuth={session.quickAuth}
                   />
                 ))}
               </div>
@@ -2209,6 +2273,8 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   connectionEpoch={connectionEpoch}
                   serverId={session.serverId}
                   serverName={session.serverName}
+                  ownLogin={t.ownLogin}
+                  quickAuth={session.quickAuth}
                 />
               </div>
             ))
