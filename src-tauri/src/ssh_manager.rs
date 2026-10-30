@@ -504,6 +504,11 @@ pub struct SshState {
     /// Tabs whose cached SFTP session is file access over shell commands (the
     /// server has no SFTP, see `shell_sftp`): the pane says so.
     pub sftp_shell: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// The "Save password" tick of a password prompt that offered one, by the
+    /// prompt's nonce: the page records it (`kbi_save_choice`) just before it
+    /// answers, and the prompt takes it with the answer. The password is saved
+    /// only once the login with it worked.
+    pub kbi_save: Arc<Mutex<HashMap<String, bool>>>,
 }
 
 /// How an elevated SFTP channel is started. The sudo password (if any) lives
@@ -620,6 +625,7 @@ impl SshState {
             prompted_secrets: Arc::new(Mutex::new(HashMap::new())),
             sftp_elevation: Arc::new(Mutex::new(HashMap::new())),
             sftp_shell: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            kbi_save: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
