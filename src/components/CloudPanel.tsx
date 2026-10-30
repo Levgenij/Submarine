@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   X, AlertTriangle, CheckCircle2, Cloud, ArrowRight, ArrowLeft,
-  LogOut, Mail, KeyRound, UserPlus, LogIn, Wand2,
+  LogOut, Mail, KeyRound, UserPlus, LogIn, Wand2, Trash2,
 } from "lucide-react";
 import InvitesSection from "./InvitesSection";
 import SyncServerSetting, { CloudConfigView, hostOf } from "./SyncServerSetting";
@@ -52,10 +52,15 @@ const CloudPanel = ({ isOpen, onClose, onLocalProfilesChanged }: Props) => {
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
+  // Deleting the account: the confirmation (with the password box) is open.
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deletePw, setDeletePw] = useState("");
+
   const resetForms = () => {
     setEmail(""); setPassword(""); setConfirmPw("");
     setVerifyToken(""); setClaimToken(null);
     setResetToken(""); setLoginLinkToken("");
+    setConfirmDelete(false); setDeletePw("");
     setError(null); setInfo(null);
   };
 
@@ -79,6 +84,8 @@ const CloudPanel = ({ isOpen, onClose, onLocalProfilesChanged }: Props) => {
 
   useEffect(() => {
     if (!isOpen) return;
+    // A password typed into the deletion box doesn't wait for the next opening.
+    setConfirmDelete(false); setDeletePw("");
     refreshStatus();
     invoke<CloudConfigView>("cloud_get_config").then(setServerView).catch((e) => setError(String(e)));
   }, [isOpen, refreshStatus]);
@@ -255,6 +262,26 @@ const CloudPanel = ({ isOpen, onClose, onLocalProfilesChanged }: Props) => {
       setStage("chooser");
       setSignedInEmail(null);
       resetForms();
+    } catch (e: any) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Deletes the account and what the server holds for it (asked for the
+  // password again: a sign-in alone can't). The profiles on this device stay.
+  const handleDeleteAccount = async () => {
+    setError(null);
+    if (!deletePw) { setError("Enter the account password to confirm"); return; }
+    setBusy(true);
+    try {
+      await invoke("cloud_delete_account", { password: deletePw });
+      resetForms();
+      setStage("chooser");
+      setSignedInEmail(null);
+      setInfo("Your account and everything the server held for it were deleted. The profiles on this device are untouched.");
+      onLocalProfilesChanged();
     } catch (e: any) {
       setError(String(e));
     } finally {
@@ -651,6 +678,55 @@ const CloudPanel = ({ isOpen, onClose, onLocalProfilesChanged }: Props) => {
                 >
                   <LogOut size={11} /> Sign out
                 </button>
+              </div>
+
+              {/* Deleting the account (the app stores ask for this inside the app). */}
+              <div className="border-t border-white/5 pt-3">
+                {!confirmDelete ? (
+                  <button
+                    onClick={() => { setConfirmDelete(true); setError(null); }}
+                    className="text-[11.5px] text-zinc-500 hover:text-rose-300 underline underline-offset-2 flex items-center gap-1.5"
+                  >
+                    <Trash2 size={11} /> Delete account…
+                  </button>
+                ) : (
+                  <div role="group" aria-label="Delete this account" className="rounded-lg border border-rose-500/30 bg-rose-500/5 p-3 space-y-2.5">
+                    <div className="text-[12px] font-bold text-rose-200">Delete this account?</div>
+                    <p className="text-[11.5px] text-zinc-300 leading-relaxed">
+                      This deletes <span className="font-mono">{signedInEmail}</span>
+                      {serverView ? <> on <span className="font-mono">{hostOf(serverView.server)}</span></> : null} and
+                      everything stored for it there: the cloud copies of your profiles, your sharing key, and every
+                      profile you shared (the people you shared it with lose access). The profiles on your devices are
+                      not touched. This can't be undone.
+                    </p>
+                    <input
+                      type="password"
+                      value={deletePw}
+                      onChange={(e) => setDeletePw(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && handleDeleteAccount()}
+                      placeholder="Account password"
+                      aria-label="Account password, to confirm the deletion"
+                      autoComplete="current-password"
+                      className={inputBase}
+                    />
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        onClick={() => { setConfirmDelete(false); setDeletePw(""); setError(null); }}
+                        disabled={busy}
+                        className="h-8 px-3 rounded text-[11.5px] font-bold uppercase tracking-wider bg-white/5 border border-white/10 text-zinc-300 hover:bg-white/10 disabled:opacity-50"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleDeleteAccount}
+                        disabled={busy || !deletePw}
+                        className="h-8 px-3 rounded text-[11.5px] font-bold uppercase tracking-wider bg-rose-500 text-white hover:bg-rose-400 disabled:opacity-40 flex items-center gap-1.5"
+                      >
+                        <Trash2 size={11} /> {busy ? "Deleting…" : "Delete account"}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
