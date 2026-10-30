@@ -14777,6 +14777,9 @@ async fn rdp_builtin_open(
     use_ssh_agent: Option<bool>,
     width: u16,
     height: u16,
+    // This server may be logged in to without NLA (the tab's per-server
+    // option, off unless the user turned it on for the server).
+    allow_no_nla: Option<bool>,
     frames: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
 ) -> Result<(), String> {
     use tauri::Emitter;
@@ -15056,7 +15059,7 @@ async fn rdp_builtin_open(
         };
 
         let (login_user, domain) = rdp_client::split_domain(&user);
-        let login = rdp_client::Login { host: host.clone(), username: login_user, domain, password, width, height };
+        let login = rdp_client::Login { host: host.clone(), username: login_user, domain, password, width, height, allow_no_nla: allow_no_nla.unwrap_or(false) };
         let was_connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let connected = {
             let (app, attempt, sid, target, flag) = (app.clone(), attempt.clone(), session_id.clone(), target.clone(), Arc::clone(&was_connected));
@@ -15070,8 +15073,17 @@ async fn rdp_builtin_open(
         };
         let flow = screens.start(&session_id, generation);
         let frame = screen_frame_sender(frames, Arc::clone(&flow));
+        // What the client wants the tab's log to say along the way.
+        let notice = {
+            let (app, attempt, sid) = (app.clone(), attempt.clone(), session_id.clone());
+            move |msg: &str| {
+                if attempt.is_current_now() {
+                    let _ = app.emit(&format!("session-log-{sid}"), serde_json::json!({"msg": msg, "type": "warning"}));
+                }
+            }
+        };
         // A decoder that panics on a bad screen update ends this tab only.
-        let run = tauri::async_runtime::spawn(rdp_client::run(stream, client_addr, login, verify, connected, frame, flow, rx));
+        let run = tauri::async_runtime::spawn(rdp_client::run(stream, client_addr, login, verify, connected, notice, frame, flow, rx));
         let outcome = match run.await {
             Ok(r) => r,
             Err(_) => Err("The RDP session stopped on bad data from the server".into()),
