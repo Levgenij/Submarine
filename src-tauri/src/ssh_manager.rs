@@ -3,7 +3,7 @@ use russh::keys::{HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKey, PublicK
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
 /// Host-key fingerprint in the format every `known_hosts` row was written
 /// with: un-padded base64 of SHA-256 over the key blob, WITHOUT the
@@ -453,7 +453,11 @@ pub struct SshState {
     /// never overlap in time (host-key check runs during the handshake,
     /// keyboard-interactive runs during auth) but carry different value types.
     pub kbi_txs: Arc<Mutex<HashMap<String, oneshot::Sender<Option<Vec<String>>>>>>,
-    pub connections: Arc<Mutex<HashMap<String, Arc<Mutex<client::Handle<ClientHandler>>>>>>,
+    /// The logged-in connections, by session id. A handle is only ever
+    /// read-locked: after login every russh call takes `&self` and each channel
+    /// open waits on its own reply, so channels open side by side, and a slow
+    /// one (a tunnel's target that never answers) holds no one else up.
+    pub connections: Arc<Mutex<HashMap<String, Arc<RwLock<client::Handle<ClientHandler>>>>>>,
     /// Jump-host handles for one target session, keyed by the TARGET
     /// session_id. Every hop of the route is kept so the direct-tcpip channel
     /// on the last hop (which carries the target's transport) stays open for
@@ -585,7 +589,7 @@ impl SshState {
         self.resize_txs.lock().await.insert(terminal_id.to_string(), resize_tx);
 
         let opened = async {
-            let channel = session_arc.lock().await.channel_open_session().await?;
+            let channel = session_arc.read().await.channel_open_session().await?;
             let size = *resizes.borrow_and_update();
             channel.request_pty(false, "xterm-256color", size.cols, size.rows, 0, 0, &[]).await?;
             match &program {

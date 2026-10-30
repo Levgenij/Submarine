@@ -87,7 +87,7 @@ async fn run_capture(
             .ok_or_else(|| "Session not connected".to_string())?
     };
     let channel = {
-        let session = session_arc.lock().await;
+        let session = session_arc.read().await;
         session
             .channel_open_session()
             .await
@@ -531,7 +531,7 @@ pub async fn ssh_docker_logs_start(
             .ok_or_else(|| "Session not connected".to_string())?
     };
     let channel = {
-        let session = session_arc.lock().await;
+        let session = session_arc.read().await;
         session
             .channel_open_session()
             .await

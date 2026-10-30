@@ -13325,7 +13325,7 @@ async fn initiate_connection(
 
                 match auth_res {
                     Ok(true) => {
-                        let session_arc = Arc::new(Mutex::new(session));
+                        let session_arc = Arc::new(tokio::sync::RwLock::new(session));
                         // "Still wanted?" registration guard. The handshake can
                         // take up to ~15s (longer via proxy/jump). If, meanwhile,
                         // a reconnect for this key bumped the generation or a
@@ -13640,30 +13640,28 @@ async fn initiate_connection(
                                 };
 
                                 let is_closed = {
-                                    let h = handle_arc.lock().await;
+                                    let h = handle_arc.read().await;
                                     h.is_closed()
                                 };
 
                                 let mut dead = is_closed;
 
                                 if !dead && tick.is_multiple_of(probe_every) {
-                                    // Active probe: hold the handle lock only
-                                    // for one round trip, the same way a
-                                    // channel open does. send_ping borrows the
-                                    // handle until it finishes, so the lock
-                                    // covers that await and nothing past it.
-                                    // 10s timeout: generous enough that a
-                                    // congested-but-alive link doesn't strike
-                                    // out spuriously.
+                                    // Active probe: a round trip on the
+                                    // shared handle (read-locked), so commands
+                                    // and tunnels open their own channels
+                                    // meanwhile. 10s timeout: generous enough
+                                    // that a congested-but-alive link doesn't
+                                    // strike out spuriously.
                                     let alive = if ping_unanswered {
-                                        let h = handle_arc.lock().await;
+                                        let h = handle_arc.read().await;
                                         !matches!(
                                             probe_with_channel(&h, &last_heard_w).await,
                                             ChannelProbe::Dead
                                         )
                                     } else {
                                         let ping_alive = {
-                                            let h = handle_arc.lock().await;
+                                            let h = handle_arc.read().await;
                                             match tokio::time::timeout(
                                                 Duration::from_secs(10),
                                                 h.send_ping(),
@@ -13691,7 +13689,7 @@ async fn initiate_connection(
                                         match ping_alive {
                                             Some(up) => up,
                                             None => {
-                                                let h = handle_arc.lock().await;
+                                                let h = handle_arc.read().await;
                                                 match probe_with_channel(&h, &last_heard_w).await {
                                                     // The channel itself answered, so this
                                                     // server does not reply to keepalive.
@@ -13757,8 +13755,8 @@ async fn initiate_connection(
                                 if dead {
                                     // Re-check generation + verify OUR handle is
                                     // still the registered one before tearing
-                                    // anything down. A slow probe holds the handle
-                                    // lock up to 10s; during that window a manual
+                                    // anything down. A slow probe takes up to
+                                    // 10s; during that window a manual
                                     // reconnect / auto-retry can bump the
                                     // generation and register a fresh, healthy
                                     // connection. Without this guard we'd remove
@@ -14319,7 +14317,7 @@ mod shared_login_note_tests {
 async fn resolve_tunnel_transport(
     state: &SshState,
     session_id: &str,
-) -> Result<(Arc<tokio::sync::Mutex<russh::client::Handle<ssh_manager::ClientHandler>>>, tunnel::ForwardedTargets), String> {
+) -> Result<(Arc<tokio::sync::RwLock<russh::client::Handle<ssh_manager::ClientHandler>>>, tunnel::ForwardedTargets), String> {
     let fwd_key = format!("{}::fwd", session_id);
     let (primary, dedicated) = {
         let conns = state.connections.lock().await;
@@ -14352,7 +14350,7 @@ async fn resolve_tunnel_transport(
 async fn start_tunnel_specs_on(
     app: &tauri::AppHandle,
     sid: &str,
-    handle: &Arc<tokio::sync::Mutex<russh::client::Handle<ssh_manager::ClientHandler>>>,
+    handle: &Arc<tokio::sync::RwLock<russh::client::Handle<ssh_manager::ClientHandler>>>,
     targets: &tunnel::ForwardedTargets,
     tunnels: &Arc<tokio::sync::Mutex<std::collections::HashMap<String, tunnel::ActiveTunnel>>>,
     specs_map: &Arc<tokio::sync::Mutex<std::collections::HashMap<String, Vec<tunnel::TunnelSpec>>>>,
@@ -17334,7 +17332,7 @@ async fn run_info_script(
 
     let start = std::time::Instant::now();
     let channel = {
-        let session = session_arc.lock().await;
+        let session = session_arc.read().await;
         session.channel_open_session().await.map_err(|e| e.to_string())?
     };
     channel.exec(true, script.as_bytes()).await.map_err(|e| e.to_string())?;
@@ -17607,7 +17605,7 @@ async fn run_exec_capture(
             .ok_or_else(|| "Session not connected".to_string())?
     };
     let channel = {
-        let session = session_arc.lock().await;
+        let session = session_arc.read().await;
         session.channel_open_session().await.map_err(|e| e.to_string())?
     };
     channel.exec(true, cmd.as_bytes()).await.map_err(|e| e.to_string())?;
@@ -17818,7 +17816,8 @@ fn parse_sftp_owners(
 // sudo will allow exactly that command, so failures come back as precise
 // errors instead of a broken SFTP stream.
 
-type SessionHandleArc = Arc<tokio::sync::Mutex<russh::client::Handle<ssh_manager::ClientHandler>>>;
+/// A logged-in connection, only ever read-locked (see SshState::connections).
+type SessionHandleArc = Arc<tokio::sync::RwLock<russh::client::Handle<ssh_manager::ClientHandler>>>;
 
 const SUDO_NEED_PASSWORD: &str = "[SUDO] NEED_PASSWORD";
 const SUDO_WRONG_PASSWORD: &str = "[SUDO] WRONG_PASSWORD";
@@ -17901,7 +17900,7 @@ async fn exec_with_stdin_capture(
 ) -> Result<String, String> {
     use russh::ChannelMsg;
     let mut channel = {
-        let session = session_arc.lock().await;
+        let session = session_arc.read().await;
         session.channel_open_session().await.map_err(|e| e.to_string())?
     };
     channel.exec(true, cmd.as_bytes()).await.map_err(|e| e.to_string())?;
@@ -18076,7 +18075,7 @@ pub(crate) async fn open_sftp(
     session_arc: &SessionHandleArc,
 ) -> Result<(russh_sftp::client::SftpSession, bool), String> {
     let channel = {
-        let session = session_arc.lock().await;
+        let session = session_arc.read().await;
         session.channel_open_session().await.map_err(|e| e.to_string())?
     };
     match start_sftp(channel).await {
@@ -18099,7 +18098,7 @@ pub(crate) async fn open_sftp(
 /// A working subsystem is not "missing": the caller keeps `[SUDO] NO_SFTP_SERVER`.
 async fn subsystem_is_missing(session_arc: &SessionHandleArc) -> Result<bool, String> {
     let channel = {
-        let session = session_arc.lock().await;
+        let session = session_arc.read().await;
         session.channel_open_session().await.map_err(|e| e.to_string())?
     };
     match start_sftp(channel).await {
@@ -18175,7 +18174,7 @@ async fn open_elevated_sftp(
     let sudo = if elevation.password.is_some() { "sudo -S -k -p ''" } else { "sudo -n" };
     let cmd = format!("echo {}; exec {} {}", ELEVATED_SFTP_READY, sudo, elevation.server_path);
     let channel = {
-        let session = session_arc.lock().await;
+        let session = session_arc.read().await;
         session.channel_open_session().await.map_err(|e| e.to_string())?
     };
     channel.exec(true, cmd.as_bytes()).await.map_err(|e| e.to_string())?;

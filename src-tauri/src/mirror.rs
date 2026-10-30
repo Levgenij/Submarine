@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio::task::JoinSet;
 
 use crate::ssh_manager::ClientHandler;
@@ -244,7 +244,7 @@ async fn set_state(app: &AppHandle, status: &Arc<Mutex<MirrorStatus>>, new: &str
 /// Open a dedicated SFTP session on the SSH handle. Each mirror gets its
 /// own subsystem channel so it doesn't contend with the file browser or
 /// another mirror task on a shared one.
-async fn open_sftp(handle: &Arc<Mutex<russh::client::Handle<ClientHandler>>>) -> Result<SftpSession, String> {
+async fn open_sftp(handle: &Arc<RwLock<russh::client::Handle<ClientHandler>>>) -> Result<SftpSession, String> {
     // A server without SFTP gets file access over shell commands.
     crate::open_sftp(handle).await.map(|(sftp, _)| sftp).map_err(|e| format!("sftp init: {}", e))
 }
@@ -560,7 +560,7 @@ async fn compare_files(
 // ---------------------------------------------------------------------------
 
 pub async fn dry_run(
-    handle: Arc<Mutex<russh::client::Handle<ClientHandler>>>,
+    handle: Arc<RwLock<russh::client::Handle<ClientHandler>>>,
     spec: MirrorSpec,
 ) -> Result<DryRunReport, String> {
     let local_root = PathBuf::from(&spec.local);
@@ -1098,7 +1098,7 @@ async fn shell_sync_put(
 
 /// Preview-only: what `shell_sync_push` would do, with nothing transferred.
 pub async fn shell_sync_preview(
-    handle: Arc<Mutex<russh::client::Handle<ClientHandler>>>,
+    handle: Arc<RwLock<russh::client::Handle<ClientHandler>>>,
     targets: Vec<ShellSyncTarget>,
 ) -> Result<ShellSyncReport, String> {
     let sftp = open_sftp(&handle).await?;
@@ -1114,7 +1114,7 @@ pub async fn shell_sync_preview(
 /// reported and the rest still go. The trash folder is named with `now_ms`.
 pub async fn shell_sync_push(
     session_id: &str,
-    handle: Arc<Mutex<russh::client::Handle<ClientHandler>>>,
+    handle: Arc<RwLock<russh::client::Handle<ClientHandler>>>,
     targets: Vec<ShellSyncTarget>,
 ) -> Result<ShellSyncPushReport, String> {
     let sftp = open_sftp(&handle).await?;
@@ -1272,7 +1272,7 @@ async fn walk_remote(
 pub async fn start(
     app: AppHandle,
     session_id: String,
-    handle: Arc<Mutex<russh::client::Handle<ClientHandler>>>,
+    handle: Arc<RwLock<russh::client::Handle<ClientHandler>>>,
     map: MirrorMap,
     spec: MirrorSpec,
 ) -> Result<String, String> {
@@ -1383,7 +1383,7 @@ async fn run_mirror(
     app: AppHandle,
     session_id: String,
     mirror_id: String,
-    handle: Arc<Mutex<russh::client::Handle<ClientHandler>>>,
+    handle: Arc<RwLock<russh::client::Handle<ClientHandler>>>,
     spec: MirrorSpec,
     status: Arc<Mutex<MirrorStatus>>,
     mut stop_rx: oneshot::Receiver<()>,
