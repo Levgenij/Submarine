@@ -2240,6 +2240,7 @@ function DesktopApp() {
                               onTerminalsChange={handleTerminalsChange}
                               chromeless={isVisible && isTiled && !isFocused}
                               isActiveView={isFocused}
+                              shown={isVisible && viewIsSession}
                               onPromptChange={handlePromptChange}
                             />
                             )}

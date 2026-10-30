@@ -343,7 +343,7 @@ function writeFollow(on: boolean) {
   window.dispatchEvent(new CustomEvent<boolean>(FOLLOW_EVENT, { detail: on }));
 }
 
-const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, chromeless = false, onTerminalsChange, isActiveView = false, onPromptChange }: any) => {
+const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, chromeless = false, onTerminalsChange, isActiveView = false, shown = false, onPromptChange }: any) => {
   const [status, setStatus] = useState<'connecting' | 'connected' | 'failed' | 'disconnected'>('connecting');
 
   // Bubble every status change up to the parent so the session-tab strip
@@ -2530,7 +2530,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
             <InfoPanel
               sessionId={session.id}
               disabled={status !== 'connected'}
-              visible={activeTool === 'info' && isActiveView}
+              visible={activeTool === 'info' && shown}
               onOpenContainerTerminal={openContainerTerminal}
             />
           </div>
