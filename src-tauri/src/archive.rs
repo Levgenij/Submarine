@@ -1300,7 +1300,7 @@ async fn run_remote_job(
     use russh::ChannelMsg;
     use std::time::{Duration, Instant};
     let mut channel = {
-        let session = session.lock().await;
+        let session = session.read().await;
         session
             .channel_open_session()
             .await
