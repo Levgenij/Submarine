@@ -59,7 +59,7 @@ const appWindow = getCurrentWindow();
 // `serverUuid` is the saved server's sync id. It keys this device's Shell
 // button (see util/shellSync.ts). Quick connect leaves it unset.
 type Session = {
-  id: string; serverId: number; serverName: string; serverUuid?: string | null; protocol?: "ssh" | "rdp" | "telnet" | "vnc"; customName?: string; mirrors?: string; runOnConnect?: string; runOnConnectHeld?: boolean;
+  id: string; serverId: number; serverName: string; serverUuid?: string | null; protocol?: "ssh" | "rdp" | "telnet" | "vnc"; customName?: string; mirrors?: string; runOnConnect?: string; runOnConnectEvery?: boolean; runOnConnectHeld?: boolean;
   quickAuth?: QuickAuth | null; initialTerminals?: SnapTerm[]; initialActiveIndex?: number;
 };
 const tabLabel = (s: Session) => s.customName || s.serverName;
@@ -295,8 +295,10 @@ function DesktopApp() {
     // panel renders a placeholder when blank.
     notes: "" as string,
     // Commands auto-typed into the FIRST terminal on the INITIAL connect only
-    // (never on reconnect or extra shells). Newline-separated. Empty = off.
+    // (never on reconnect). Newline-separated. Empty = off.
     runOnConnect: "" as string,
+    // Also typed once into every new terminal of the server (#256).
+    runOnConnectEvery: false,
     // ProxyJump: id (as a string, like credentialId/folderId) of another node
     // to bounce through. Empty = connect directly. parseInt'd to a number (or
     // null) at save time.
@@ -963,6 +965,8 @@ function DesktopApp() {
         serverUuid: server.uuid ?? null,
         // Commands to auto-run once on the first terminal (see SessionView).
         runOnConnect: server.run_on_connect || "",
+        // And once into each new terminal of the tab (#256).
+        runOnConnectEvery: !!server.run_on_connect_every,
         // Set or changed by someone this profile is shared with, not allowed
         // here yet: SessionView asks before typing them.
         runOnConnectHeld: (server.held || []).includes("run_on_connect"),
@@ -1036,6 +1040,7 @@ function DesktopApp() {
       color: server.color ?? null,
       notes: server.notes || "",
       runOnConnect: server.run_on_connect || "",
+      runOnConnectEvery: !!server.run_on_connect_every,
       jumpHostId: server.jump_host_id?.toString() || "",
       // Attribution (read-only display): who last edited + the HLC stamp.
       editedBy: server.edited_by ?? null,
@@ -2846,7 +2851,7 @@ function DesktopApp() {
             }
             // Same separate-write pattern for the on-connect commands.
             try {
-              await invoke("set_server_run_on_connect", { id: savedId, value: newNode.runOnConnect || "" });
+              await invoke("set_server_run_on_connect", { id: savedId, value: newNode.runOnConnect || "", every: !!newNode.runOnConnectEvery });
             } catch (e) {
               addLog(`SAVE_RUN_ON_CONNECT_FAILED: ${e}`, "error");
             }
