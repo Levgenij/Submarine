@@ -28,14 +28,15 @@ import {
 import { USE_LOCAL_SHELL_KEY, readUseLocalShell } from "./util/terminalShell";
 import { USE_SSH_AGENT_KEY, readUseSshAgent } from "./util/sshAgent";
 import { USE_SSH_CONFIG_KEY, readUseSshConfig } from "./util/sshConfig";
-import { DEFAULT_RDP_OPTIONS, readRdpOptions, writeRdpOptions } from "./util/rdpOptions";
+import { DEFAULT_RDP_OPTIONS, forgetRdpOptions, readRdpOptions, writeRdpOptions } from "./util/rdpOptions";
 import { useIsNarrow } from "./hooks/useViewport";
 import { IS_ANDROID } from "./util/platform";
-import { DEFAULT_VNC_OPTIONS, readVncOptions, writeVncOptions } from "./util/vncOptions";
+import { DEFAULT_VNC_OPTIONS, forgetVncOptions, readVncOptions, writeVncOptions } from "./util/vncOptions";
 import { Sidebar } from "./components/Sidebar";
 import { NodeGrid } from "./components/NodeGrid";
 import { CommandScope, describeScope, parseCommandScope, scopeToJson } from "./util/commandScope";
 import { parseObjectList } from "./util/serverJson";
+import { folderTree } from "./util/folderTree";
 import CommandScopePicker from "./components/CommandScopePicker";
 import type { HeldDeletion } from "./components/HeldDeletions";
 import AddNodePanel from "./components/AddNodePanel";
@@ -717,9 +718,19 @@ function DesktopApp() {
     };
   }, [isUnlocked, appSettings.autoSync, appSettings.syncIntervalMin, quietSync]);
 
+  // What this device keeps for a server and the sync doesn't: it goes with the server.
+  const forgetServer = (s: any) => {
+    if (s.uuid) {
+      forgetRdpOptions(s.uuid);
+      forgetVncOptions(s.uuid);
+    }
+  };
+
   const removeServer = async (id: number) => {
+    const server = servers.find((s: any) => s.id === id);
     try {
       await invoke("delete_server", { id });
+      if (server) forgetServer(server);
       refreshServers();
       bumpSync();
       addLog("Server removed.", "info");
@@ -727,9 +738,13 @@ function DesktopApp() {
   };
 
   const removeFolder = async (id: number) => {
+    // delete_folder removes the folder, its subfolders, and their servers.
+    const tree = folderTree(folders);
+    const inside = tree.subtreeOf(id);
+    const gone = servers.filter((s: any) => inside.has(tree.serverFolder(s) as number));
     try {
       await invoke("delete_folder", { id });
-      // delete_folder removes the folder, its subfolders, and their servers.
+      gone.forEach(forgetServer);
       await Promise.all([refreshFolders(), refreshServers()]);
       bumpSync();
       addLog("Folder removed.", "info");
@@ -1442,7 +1457,7 @@ function DesktopApp() {
                   if (sessionStatuses[s.id] === "connected") {
                     const ok = await confirm({
                       title: "Close this session?",
-                      message: "The SSH connection will be dropped.",
+                      message: "The connection will be dropped.",
                       okLabel: "Close",
                       destructive: true,
                     });
