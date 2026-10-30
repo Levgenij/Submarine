@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.5.0
+
+### Servers
+
+- The built-in RDP client logs in only to a server that uses NLA. A server without it is refused before the password is sent, and the tab says why. Allow without NLA, in the tab or in the server form, lets that one server in on this device. Its password then goes inside TLS only.
+- A refused RDP login says why: a wrong user name or password, an expired password, a locked or disabled account, or a user who is not in Remote Desktop Users. The tab asks for the password again.
+- The built-in RDP client shares the clipboard with the server. Text copied on the server can be pasted here, and text from here goes over on a paste.
+- The built-in RDP client can share a folder or a whole drive of this computer with the server, read-only or not. It is off until it is turned on for a server, it is kept on this device, and a phone does not offer it.
+- The RDP and VNC tabs show how good the connection is, with the round trip, and have a Settings panel: colour depth, desktop effects, network type, encoding, updates per second, and resolution. A server left as it was is asked for what it was asked for before. The picture pauses while the tab is hidden.
+- The RDP tab keeps its session when the desktop restarts after a resize. Its bar fits a narrow split pane.
+- VNC shares the clipboard with the server, plain text up to 1 MB. A busy VNC screen no longer falls behind, and a resize that timed out no longer stops every later one.
+- A phone's keyboard works in the RDP and VNC tabs, keyboards that compose whole words included. Tab, Esc, and the arrows reach the server.
+- Through an SSH server, the computer's RDP app gets the same local address for a server every time, so its saved logins and trusted certificates are found again. On Windows, Remote Desktop Connection gets the server's saved password. The file that carries it is removed once the app has read it. An RDP server's form keeps a password.
+
+### Terminal
+
+- The last column of a full line is no longer cut at the right edge, and selected text stays visible.
+- A new terminal takes the lowest free number.
+- A terminal can open with its own login to the server instead of a channel on the tab's connection, from the menu beside "+". Always for this server keeps that on this device. When its own login fails, the terminal uses the tab's connection.
+- An arrow beside "+" opens its menu, and the menu works from the keyboard.
+- A server's on-connect commands can also run in each new terminal, when Also run them in each new terminal you open is on. In a shared profile, a member who turns it on holds the commands for review again.
+- A flood of output no longer freezes the window. About four seconds of output wait in the app, and past that the oldest part is skipped with a note. Ctrl+C, Ctrl+Z, and Ctrl+\ drop what is waiting at once.
+- The cursor stops blinking 10 seconds after the last key or click.
+
+### Connect
+
+- Password prompts have a Save password tick. A ticked password is saved only after the login works, into the server's saved login or into the server, never over a key. In a shared profile the tick starts off.
+- A password typed at a keyboard-interactive login is kept for the tab, so its other terminals log in with it.
+- Terminals, file panes, and tunnels on one connection open their channels side by side. A tunnel whose target never answers no longer holds up the rest.
+- Locking a profile stops the logins that are still waiting on a server or a prompt.
+
+### Files
+
+- Follow, in the Remote pane header, takes the pane to the folder the terminal is in. The shell has to report its folder. Until it does, the pane shows the line to add to bash, zsh, or fish. Follow is off until turned on and is kept on this device. A header layout saved earlier gets the button from the header's menu.
+- A folder upload or download moves small files a few at a time. When one file fails, the files already moving finish before the error shows.
+- A mirror start no longer downloads the files the mirror itself uploaded to compare them.
+
+### Sharing and sync
+
+- Locking a profile also locks its sharing identity. Taking in a shared profile then asks for the sharing passphrase again.
+- Before a sync removes rows from a profile, a copy of the profile is kept next to it as `<name>.submarine.bak-<time>`. The newest five are kept, at most one every ten minutes. The sync log says how many rows went and where the copy is. Deleting a profile removes its copies.
+- Delete account… in the cloud panel deletes the sync account after asking for the password again. A server that does not support it says so, and nothing is deleted.
+- The profile panel says what the sync server can see of a shared profile.
+
+### App
+
+- On Android 15 and later the app no longer crashes when the system's daily background limit for its connection keeper runs out.
+- On Linux, the programs the app opens, the browser, files, and ProxyCommand, no longer get the app's own WebKit settings.
+- The app does less while nobody works in it. Spinners stop after a few turns, Info polls processes only in the session in front, and monitored servers use the system's TCP keepalive.
+
+The vault gets one column, `servers.run_on_connect_every`. It is added when a profile opens, with no migration step, and an older version of the app ignores it.
+
 ## 0.4.2
 
 ### Files
