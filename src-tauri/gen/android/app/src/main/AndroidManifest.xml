@@ -82,7 +82,7 @@
         </provider>
 
         <!--
-            ConnectionKeeperService: started from MainActivity.onCreate and
+            ConnectionKeeperService: started from MainActivity.onStart and
             calls startForeground() with a persistent status-bar notification
             so Android will not kill our process while the user is switched
             to another app. All SSH/SFTP state lives in the Rust backend
