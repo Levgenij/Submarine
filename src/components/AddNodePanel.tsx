@@ -840,6 +840,11 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                       <RdpSpeedFields o={o} set={set} />
                     </div>
                   </>) : (<>
+                  {IS_WINDOWS && (
+                    <p className="text-[10.5px] text-zinc-500 leading-snug">
+                      Remote Desktop Connection gets this server's saved password and logs in by its own rules: the NLA check of Submarine's tab doesn't apply. Take its certificate warning seriously.
+                    </p>
+                  )}
                   <div className="flex justify-between items-center gap-3">
                     <label className="text-[11px] font-bold text-zinc-400 shrink-0">Window</label>
                     <select
