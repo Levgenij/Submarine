@@ -259,6 +259,21 @@ const ToolPanelActions = ({ slot, onClose, fullToggle, children }: {
   slot
 ) : null;
 
+// The name of a new terminal tab: the lowest number no open terminal has
+// (issue #231). Closing "2" of 1, 2, 3 and opening another gives a new "2",
+// never a second "3". A container's terminal, named after the container,
+// takes none.
+function nextTerminalNumber(terminals: { title: string; container?: unknown }[]): string {
+  const used = new Set(
+    terminals
+      .filter((t) => !t.container && /^\d+$/.test(t.title))
+      .map((t) => Number(t.title)),
+  );
+  let n = 1;
+  while (used.has(n)) n++;
+  return `${n}`;
+}
+
 const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, chromeless = false, onTerminalsChange, isActiveView = false, onPromptChange }: any) => {
   const [status, setStatus] = useState<'connecting' | 'connected' | 'failed' | 'disconnected'>('connecting');
 
@@ -1716,7 +1731,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
           <button
             onClick={() => {
               const newId = `${session.id}-term-${Date.now()}`;
-              setTerminals(prev => [...prev, { id: newId, title: `${prev.length + 1}` }]);
+              setTerminals(prev => [...prev, { id: newId, title: nextTerminalNumber(prev) }]);
               setActiveTab(newId);
             }}
             onContextMenu={(e) => {
@@ -1840,7 +1855,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   onClick={() => {
                     setPlusMenu(null);
                     const newId = `${session.id}-term-${Date.now()}`;
-                    setTerminals(prev => [...prev, { id: newId, title: `${prev.length + 1}` }]);
+                    setTerminals(prev => [...prev, { id: newId, title: nextTerminalNumber(prev) }]);
                     if (splitTerminals.length >= 2) {
                       setSplitTerminals(prev => [...prev, newId]);
                       setSplitRatios(prev => [...prev, 1]);
