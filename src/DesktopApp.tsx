@@ -1133,9 +1133,9 @@ function DesktopApp() {
                 const cur = sessions.find(s => s.id === activeView);
                 const st = cur ? (sessionStatuses[cur.id] ?? 'connecting') : null;
                 const dotTone =
-                  cur && promptSessions.has(cur.id) ? 'bg-primary animate-pulse' :
+                  cur && promptSessions.has(cur.id) ? 'bg-primary animate-pulse-brief' :
                   st === 'connected'    ? 'bg-emerald-400' :
-                  st === 'connecting'   ? 'bg-amber-400 animate-pulse' :
+                  st === 'connecting'   ? 'bg-amber-400 animate-pulse-brief' :
                   st === 'failed'       ? 'bg-rose-500' :
                   st === 'disconnected' ? 'bg-rose-500' :
                                           'bg-zinc-500';
@@ -1169,9 +1169,9 @@ function DesktopApp() {
                   {sessions.map(s => {
                     const st = sessionStatuses[s.id] ?? 'connecting';
                     const dot =
-                      promptSessions.has(s.id) ? 'bg-primary animate-pulse' :
+                      promptSessions.has(s.id) ? 'bg-primary animate-pulse-brief' :
                       st === 'connected'    ? 'bg-emerald-400' :
-                      st === 'connecting'   ? 'bg-amber-400 animate-pulse' :
+                      st === 'connecting'   ? 'bg-amber-400 animate-pulse-brief' :
                       st === 'idle'         ? 'bg-zinc-500' :
                       'bg-rose-500';
                     const isActive = activeView === s.id;
@@ -1298,9 +1298,9 @@ function DesktopApp() {
           // the dot pulses in the accent color until it is answered.
           const waiting = promptSessions.has(s.id);
           const dotTone =
-            waiting               ? "bg-primary animate-pulse" :
+            waiting               ? "bg-primary animate-pulse-brief" :
             st === "connected"    ? "bg-emerald-400" :
-            st === "connecting"   ? "bg-amber-400 animate-pulse" :
+            st === "connecting"   ? "bg-amber-400 animate-pulse-brief" :
             st === "failed"       ? "bg-rose-500" :
             st === "disconnected" ? "bg-rose-500" :
                                     "bg-zinc-500";
@@ -1529,7 +1529,7 @@ function DesktopApp() {
                 : "bg-white/[0.06] border border-white/10 text-zinc-400 hover:bg-white/[0.1] hover:text-white"
             }`}
           >
-            <Radio size={12} className={broadcast.enabled ? "animate-pulse" : ""} />
+            <Radio size={12} className={broadcast.enabled ? "animate-pulse-brief" : ""} />
             {broadcast.enabled && broadcast.targetSessionIds.size > 0 && (
               <span
                 className="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-1 rounded-full bg-orange-500 text-[9px] font-bold text-black flex items-center justify-center leading-none"
@@ -2354,7 +2354,7 @@ function DesktopApp() {
                         const st = sessionStatuses[item.sessionId] ?? 'connecting';
                         const dotTone =
                           st === 'connected'    ? 'bg-emerald-400' :
-                          st === 'connecting'   ? 'bg-amber-400 animate-pulse' :
+                          st === 'connecting'   ? 'bg-amber-400 animate-pulse-brief' :
                                                   'bg-rose-500';
                         return (
                           <div
@@ -2687,7 +2687,7 @@ function DesktopApp() {
                 mounted preserves the live data; the backend pollers were
                 always running, only the UI side was losing state. */}
             <div className={`flex-1 flex flex-col overflow-hidden ${activeView === "monitor" ? "" : "hidden"}`}>
-              <MonitoringPanel servers={servers} refreshServers={refreshServers} addLog={addLog} />
+              <MonitoringPanel servers={servers} refreshServers={refreshServers} addLog={addLog} active={activeView === "monitor"} />
             </div>
 
             {/* Compare workspace — pick any subset of open sessions and

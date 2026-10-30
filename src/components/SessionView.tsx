@@ -82,7 +82,7 @@ const SepToggle = ({ on, onToggle, status, hint, onReconnect, showLabel = true }
         {on && (
           <span
             className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-              status === 'ready' ? 'bg-emerald-400' : status === 'failed' ? 'bg-red-400' : 'bg-amber-400 animate-pulse'
+              status === 'ready' ? 'bg-emerald-400' : status === 'failed' ? 'bg-red-400' : 'bg-amber-400 animate-pulse-brief'
             }`}
           />
         )}
@@ -127,6 +127,21 @@ const SepToggle = ({ on, onToggle, status, hint, onReconnect, showLabel = true }
       )}
     </span>
   );
+};
+
+// The seconds left until `until` (a Date.now() time), ticking on its own: a
+// reconnect countdown re-renders this number, not the whole session view
+// twice a second, for as long as a server stays down.
+const SecondsLeft = ({ until }: { until: number }) => {
+  const left = () => Math.max(0, Math.ceil((until - Date.now()) / 1000));
+  const [secs, setSecs] = useState(left);
+  useEffect(() => {
+    setSecs(left());
+    const t = setInterval(() => setSecs(left()), 250);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [until]);
+  return <>{secs}</>;
 };
 
 const TOOLS = [
@@ -1308,15 +1323,6 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
     };
   }, [session.id, session.serverId]);
 
-  // Force a re-render once per second so the countdown text in the banner
-  // stays current without re-allocating timer state on every render.
-  const [, forceTick] = useState(0);
-  useEffect(() => {
-    if (!nextReconnectAt) return;
-    const t = setInterval(() => forceTick((n) => n + 1), 500);
-    return () => clearInterval(t);
-  }, [nextReconnectAt]);
-
   const clearConnectPrompts = () => {
     // A prompt still showing belongs to the attempt being replaced. Drop its
     // queue slot too: a later dismiss must not retire that stale slot and
@@ -1644,7 +1650,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
   // their scrollback behind the banner.
   if ((reconnectAttempt === 0 || !everConnected) && (status === 'connecting' || status === 'failed')) {
     const retryWaiting = reconnectAttempt > 0 && nextReconnectAt !== null;
-    const retryIn = nextReconnectAt ? Math.max(0, Math.ceil((nextReconnectAt - Date.now()) / 1000)) : 0;
+    const retryIn = <SecondsLeft until={nextReconnectAt ?? 0} />;
     return (
       <div className="relative flex-1 flex flex-col p-4 sm:p-8 bg-[#0a0a0c] text-white overflow-hidden">
         <div className="max-w-2xl w-full mx-auto flex-1 flex flex-col min-h-0">
@@ -1662,7 +1668,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                 {status === 'connecting'
                   ? (reconnectAttempt > 0 ? `Trying again · attempt ${reconnectAttempt}` : 'Establishing Connection...')
                   : retryWaiting
-                    ? `Connection failed · trying again in ${retryIn}s`
+                    ? <>Connection failed · trying again in {retryIn}s</>
                     : 'Connection Failed'}
               </p>
             </div>
@@ -2185,16 +2191,14 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
         (() => {
           const isAttempting = reconnectAttempt > 0 && status === 'connecting';
           const isWaiting = reconnectAttempt > 0 && nextReconnectAt !== null;
-          const countdown = nextReconnectAt
-            ? Math.max(0, Math.ceil((nextReconnectAt - Date.now()) / 1000))
-            : 0;
+          const secs = <SecondsLeft until={nextReconnectAt ?? 0} />;
           const tone =
             isAttempting ? "bg-indigo-500/10 border-indigo-500/30 text-indigo-300" :
             isWaiting    ? "bg-amber-500/10 border-amber-500/30 text-amber-300" :
                            "bg-red-500/10 border-red-500/30 text-red-400";
           const heading =
             isAttempting ? `Reconnecting · attempt ${reconnectAttempt}` :
-            isWaiting    ? `Auto-reconnect in ${countdown}s · attempt ${reconnectAttempt}` :
+            isWaiting    ? <>Auto-reconnect in {secs}s · attempt {reconnectAttempt}</> :
                            "Session disconnected";
           return (
             <div inert={shellInert} className={`shrink-0 px-4 py-2 border-b flex items-center justify-between gap-3 animate-in fade-in ${tone}`}>
@@ -2526,7 +2530,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
             <InfoPanel
               sessionId={session.id}
               disabled={status !== 'connected'}
-              visible={activeTool === 'info'}
+              visible={activeTool === 'info' && isActiveView}
               onOpenContainerTerminal={openContainerTerminal}
             />
           </div>
