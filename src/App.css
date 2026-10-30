@@ -209,3 +209,18 @@ select optgroup {
   scrollbar-width: thin !important;
   scrollbar-color: rgba(96, 165, 250, 0.18) transparent !important;
 }
+
+/* xterm's DOM renderer makes each row as wide as columns × the cell width it
+   measured, and clips the row there. A full line of glyphs can come out a pixel
+   or two wider than that (a font's real advance is a hair more than the measured
+   one, so the error grows with the line), and the last column then lost its
+   right edge (#201). A row may overflow sideways, into the room the fit leaves
+   before the scrollbar; the top and the bottom stay clipped as before.
+   overflow-y: clip and not a clip-path: a clip-path puts each row in a stacking
+   context of its own, and the selection box xterm draws over the rows then hid
+   the selected text (#250). A web view without overflow: clip keeps the row
+   clipped on all four sides, as xterm does. */
+.xterm .xterm-rows > div {
+  overflow-x: visible !important;
+  overflow-y: clip !important;
+}
