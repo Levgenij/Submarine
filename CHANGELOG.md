@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.2
+
+### Terminal
+
+- The phone's key bar is shorter, with every key on screen and no sliding. Ctrl, Esc, Tab and the arrows are always there, and a chevron opens a second row with Alt, Shift and | ~ / -. The row stays open or closed as it was left, and a modifier that's on keeps its row in sight.
+- The key bar works with keyboards that hold a word, such as Samsung's: a key goes after the word, not before it, and Ctrl plus a letter goes out at once.
+- Shift on the key bar now reaches typed letters, and Ctrl or Alt on a character outside ASCII sends its UTF-8 bytes.
+
+### Dependencies
+
+- Patched versions for this month's advisories: certificate checks can no longer accept the distrusted emSign intermediates, operations meant to be constant-time now are, and tokio, zstd and the build tools carry their fixes.
+
+Vault format is unchanged. Existing profiles open without a migration.
+
 ## 0.5.1
 
 ### Servers

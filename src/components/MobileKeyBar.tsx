@@ -131,7 +131,7 @@ export function MobileKeyBar({ modifiers, onToggleModifier, onSpecialKey }: Mobi
         <KeyBtn symbol label="→" onClick={() => onSpecialKey("right")} title="Right arrow" />
         <button
           type="button"
-          onClick={() => setSecondRowOpen(!wantsSecondRow)}
+          onClick={() => setSecondRowOpen(!showSecondRow)}
           onMouseDown={(e) => e.preventDefault()}
           onTouchStart={(e) => e.preventDefault()}
           aria-expanded={showSecondRow}
