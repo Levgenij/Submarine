@@ -451,7 +451,7 @@ const MonitoringPanel = ({ servers, addLog, active = true }: Props) => {
       </div>
 
       {error && (
-        <div className="shrink-0 mx-6 mt-3 px-3 py-2 bg-rose-500/15 border border-rose-500/30 rounded text-rose-200 text-[12px] font-mono flex items-center gap-2">
+        <div className="shrink-0 mx-6 mt-3 px-3 py-2 bg-rose-500/15 border border-rose-500/30 rounded-lg text-rose-200 text-[12px] font-mono flex items-center gap-2">
           <AlertTriangle size={13} /> {error}
         </div>
       )}
@@ -533,7 +533,7 @@ const MonitoringPanel = ({ servers, addLog, active = true }: Props) => {
                     key={s.id}
                     onClick={() => addNode(s.id)}
                     disabled={busy}
-                    className="w-full text-left px-3 py-2 rounded hover:bg-white/[0.05] disabled:opacity-50 flex items-center justify-between"
+                    className="w-full text-left px-3 py-2 rounded-lg hover:bg-white/[0.05] disabled:opacity-50 flex items-center justify-between"
                   >
                     <div className="min-w-0">
                       <div className="text-[12.5px] font-bold text-zinc-50 truncate">{s.name}</div>
@@ -808,7 +808,7 @@ const SettingsModal = ({ onClose, onSaved }: {
                 value={s.outage_threshold} min={1} max={100} step={1} suffix="× polls"
                 onChange={(v) => setS({ ...s, outage_threshold: v })}
               />
-              <label className="flex items-center justify-between gap-3 px-3 py-2 rounded bg-white/[0.03] border border-white/10 cursor-pointer">
+              <label className="flex items-center justify-between gap-3 px-3 py-2 rounded-lg bg-white/[0.03] border border-white/10 cursor-pointer">
                 <div className="flex items-center gap-2">
                   {s.notify_on_outage ? <Bell size={14} className="text-amber-300" /> : <BellOff size={14} className="text-zinc-400" />}
                   <div>
@@ -826,7 +826,7 @@ const SettingsModal = ({ onClose, onSaved }: {
 
               {/* Beep toggle + a "test" button so the user can confirm
                   audio works before relying on it. */}
-              <label className="flex items-center justify-between gap-3 px-3 py-2 rounded bg-white/[0.03] border border-white/10 cursor-pointer">
+              <label className="flex items-center justify-between gap-3 px-3 py-2 rounded-lg bg-white/[0.03] border border-white/10 cursor-pointer">
                 <div className="flex items-center gap-2">
                   <Volume2 size={14} className={s.beep_on_outage ? "text-amber-300" : "text-zinc-400"} />
                   <div>
@@ -839,7 +839,7 @@ const SettingsModal = ({ onClose, onSaved }: {
                     type="button"
                     onClick={(e) => { e.preventDefault(); beepNow(); }}
                     title="Play a test beep"
-                    className="h-7 px-2 rounded text-[10px] font-bold uppercase tracking-wider bg-white/5 text-zinc-200 border border-white/10 hover:bg-white/10"
+                    className="h-7 px-2 rounded-lg text-[10px] font-bold uppercase tracking-wider bg-white/5 text-zinc-200 border border-white/10 hover:bg-white/10"
                   >
                     Test
                   </button>
@@ -858,17 +858,17 @@ const SettingsModal = ({ onClose, onSaved }: {
                 onChange={(v) => setS({ ...s, beep_cooldown_secs: v })}
               />
               {err && (
-                <div className="text-[11px] font-mono text-rose-200 px-2 py-1.5 bg-rose-500/15 border border-rose-500/30 rounded">{err}</div>
+                <div className="text-[11px] font-mono text-rose-200 px-2 py-1.5 bg-rose-500/15 border border-rose-500/30 rounded-lg">{err}</div>
               )}
               <div className="flex items-center gap-2 pt-1">
                 <button
                   onClick={save}
                   disabled={saving}
-                  className="flex-1 h-9 rounded text-[11px] font-bold uppercase tracking-wider bg-primary/25 text-primary border border-primary/50 hover:bg-primary/35 disabled:opacity-50"
+                  className="flex-1 h-9 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-primary/25 text-primary border border-primary/50 hover:bg-primary/35 disabled:opacity-50"
                 >
                   {saving ? "Saving…" : "Apply"}
                 </button>
-                <button onClick={onClose} className="h-9 px-3 rounded text-[11px] font-bold uppercase tracking-wider bg-white/5 text-zinc-200 border border-white/10 hover:bg-white/10">
+                <button onClick={onClose} className="h-9 px-3 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-white/5 text-zinc-200 border border-white/10 hover:bg-white/10">
                   Cancel
                 </button>
               </div>
@@ -884,7 +884,7 @@ const NumberRow = ({ label, hint, value, min, max, step, suffix, onChange }: {
   label: string; hint: string; value: number; min: number; max: number; step: number; suffix?: string;
   onChange: (v: number) => void;
 }) => (
-  <div className="px-3 py-2 rounded bg-white/[0.03] border border-white/10">
+  <div className="px-3 py-2 rounded-lg bg-white/[0.03] border border-white/10">
     <div className="flex items-center justify-between gap-3">
       <div className="min-w-0">
         <div className="text-[12px] font-bold text-zinc-100">{label}</div>
@@ -900,7 +900,7 @@ const NumberRow = ({ label, hint, value, min, max, step, suffix, onChange }: {
             if (isNaN(v)) return;
             onChange(Math.max(min, Math.min(max, v)));
           }}
-          className="w-20 h-8 px-2 bg-black/40 border border-white/10 rounded text-[12px] font-mono font-bold text-zinc-50 outline-none focus:border-primary/40 text-right"
+          className="w-20 h-8 px-2 bg-black/40 border border-white/10 rounded-lg text-[12px] font-mono font-bold text-zinc-50 outline-none focus:border-primary/40 text-right"
         />
         {suffix && <span className="text-[10px] text-zinc-400 font-mono">{suffix}</span>}
       </div>
@@ -964,7 +964,7 @@ const ConfigureSlideover = ({ row, busy, onClose, onSetMetrics, onSetCustoms }: 
                     key={key}
                     onClick={() => toggleBuiltin(key)}
                     disabled={busy}
-                    className={`h-7 px-2.5 rounded text-[10.5px] font-bold uppercase tracking-wider border transition-colors ${
+                    className={`h-7 px-2.5 rounded-lg text-[10.5px] font-bold uppercase tracking-wider border transition-colors ${
                       on
                         ? "bg-primary/15 text-primary border-primary/40 hover:bg-primary/25"
                         : "bg-white/[0.03] text-zinc-300 border-white/10 hover:bg-white/[0.06] hover:text-zinc-100"
@@ -986,7 +986,7 @@ const ConfigureSlideover = ({ row, busy, onClose, onSetMetrics, onSetCustoms }: 
               </button>
             </div>
             {draft.length === 0 ? (
-              <div className="text-[11px] text-zinc-400 font-mono text-center py-4 border border-dashed border-white/10 rounded">
+              <div className="text-[11px] text-zinc-400 font-mono text-center py-4 border border-dashed border-white/10 rounded-lg">
                 No custom commands. Click <span className="text-amber-200">+ Add</span> to define one.
               </div>
             ) : (
@@ -998,10 +998,10 @@ const ConfigureSlideover = ({ row, busy, onClose, onSetMetrics, onSetCustoms }: 
                         value={cm.name}
                         onChange={(e) => updateDraft(idx, { name: e.target.value })}
                         placeholder="Display name"
-                        className="flex-1 h-7 px-2 bg-white/[0.04] border border-white/10 rounded text-[11.5px] text-zinc-50 outline-none focus:border-primary/40"
+                        className="flex-1 h-7 px-2 bg-white/[0.04] border border-white/10 rounded-lg text-[11.5px] text-zinc-50 outline-none focus:border-primary/40"
                       />
                       <button onClick={() => removeDraft(idx)}
-                        className="w-7 h-7 rounded text-zinc-300 hover:text-rose-200 hover:bg-rose-500/15 flex items-center justify-center"
+                        className="w-7 h-7 rounded-lg text-zinc-300 hover:text-rose-200 hover:bg-rose-500/15 flex items-center justify-center"
                         title="Remove">
                         <Trash2 size={12} />
                       </button>
@@ -1011,14 +1011,14 @@ const ConfigureSlideover = ({ row, busy, onClose, onSetMetrics, onSetCustoms }: 
                       onChange={(e) => updateDraft(idx, { command: e.target.value })}
                       placeholder="shell command, e.g.  ps -e | wc -l"
                       rows={2}
-                      className="w-full px-2 py-1.5 bg-black/40 border border-white/10 rounded text-[11.5px] font-mono text-zinc-100 outline-none focus:border-primary/40 resize-y"
+                      className="w-full px-2 py-1.5 bg-black/40 border border-white/10 rounded-lg text-[11.5px] font-mono text-zinc-100 outline-none focus:border-primary/40 resize-y"
                     />
                     <div className="grid grid-cols-3 gap-2 text-[10px]">
                       <label className="space-y-1">
                         <span className="text-zinc-400 uppercase tracking-wider font-bold">Parse</span>
                         <select value={cm.parse}
                           onChange={(e) => updateDraft(idx, { parse: e.target.value as any })}
-                          className="w-full h-7 px-1.5 bg-white/[0.04] border border-white/10 rounded text-[11px] text-zinc-100 outline-none">
+                          className="w-full h-7 px-1.5 bg-white/[0.04] border border-white/10 rounded-lg text-[11px] text-zinc-100 outline-none">
                           <option className="bg-[#1a1a1e]" value="number">First number</option>
                           <option className="bg-[#1a1a1e]" value="regex">Regex capture</option>
                           <option className="bg-[#1a1a1e]" value="text">Raw text</option>
@@ -1029,7 +1029,7 @@ const ConfigureSlideover = ({ row, busy, onClose, onSetMetrics, onSetCustoms }: 
                         <select value={cm.display}
                           onChange={(e) => updateDraft(idx, { display: e.target.value as any })}
                           disabled={cm.parse === "text"}
-                          className="w-full h-7 px-1.5 bg-white/[0.04] border border-white/10 rounded text-[11px] text-zinc-100 outline-none disabled:opacity-50">
+                          className="w-full h-7 px-1.5 bg-white/[0.04] border border-white/10 rounded-lg text-[11px] text-zinc-100 outline-none disabled:opacity-50">
                           <option className="bg-[#1a1a1e]" value="sparkline">Sparkline</option>
                           <option className="bg-[#1a1a1e]" value="big_number">Big number</option>
                           <option className="bg-[#1a1a1e]" value="text">Text</option>
@@ -1040,14 +1040,14 @@ const ConfigureSlideover = ({ row, busy, onClose, onSetMetrics, onSetCustoms }: 
                         <input value={cm.unit || ""}
                           onChange={(e) => updateDraft(idx, { unit: e.target.value })}
                           placeholder="%"
-                          className="w-full h-7 px-2 bg-white/[0.04] border border-white/10 rounded text-[11px] text-zinc-100 outline-none focus:border-primary/40" />
+                          className="w-full h-7 px-2 bg-white/[0.04] border border-white/10 rounded-lg text-[11px] text-zinc-100 outline-none focus:border-primary/40" />
                       </label>
                     </div>
                     {cm.parse === "regex" && (
                       <input value={cm.regex || ""}
                         onChange={(e) => updateDraft(idx, { regex: e.target.value })}
                         placeholder="regex with one capture group, e.g.   load average:\s*([0-9.]+)"
-                        className="w-full h-7 px-2 bg-white/[0.04] border border-white/10 rounded text-[11px] font-mono text-zinc-100 outline-none focus:border-primary/40" />
+                        className="w-full h-7 px-2 bg-white/[0.04] border border-white/10 rounded-lg text-[11px] font-mono text-zinc-100 outline-none focus:border-primary/40" />
                     )}
                   </div>
                 ))}
@@ -1055,7 +1055,7 @@ const ConfigureSlideover = ({ row, busy, onClose, onSetMetrics, onSetCustoms }: 
             )}
             {dirty && (
               <button onClick={() => onSetCustoms(draft)} disabled={busy}
-                className="mt-3 w-full h-9 rounded text-[11px] font-bold uppercase tracking-wider bg-primary/25 text-primary border border-primary/50 hover:bg-primary/35 disabled:opacity-50">
+                className="mt-3 w-full h-9 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-primary/25 text-primary border border-primary/50 hover:bg-primary/35 disabled:opacity-50">
                 Apply Custom Commands
               </button>
             )}

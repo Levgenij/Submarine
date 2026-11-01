@@ -94,7 +94,7 @@ function TerminalFontSettings({ settings, setSettings }: any) {
   const previewFamily = fontFamilyCss(familyDraft);
 
   return (
-    <div className="bg-[#121215] border border-white/5 rounded-2xl p-6 space-y-6 shadow-xl">
+    <div className="bg-[#121215] border border-white/5 rounded-xl p-6 space-y-6 shadow-xl">
       {/* Font face */}
       <div className="space-y-2">
         <div className="flex justify-between items-center gap-2">
@@ -178,7 +178,7 @@ function TerminalFontSettings({ settings, setSettings }: any) {
       </div>
 
       {/* Live preview */}
-      <div className="rounded-xl bg-[#09090b] border border-white/5 px-3 py-2.5 overflow-x-auto custom-scrollbar">
+      <div className="rounded-lg bg-[#09090b] border border-white/5 px-3 py-2.5 overflow-x-auto custom-scrollbar">
         <pre
           className="m-0 whitespace-pre text-[#e4e4e7] leading-snug"
           style={{ fontFamily: previewFamily, fontSize: Math.min(size, 28) }}
@@ -286,7 +286,7 @@ function TerminalColoursSetting({ settings, setSettings }: any) {
     </div>
   );
   return (
-    <div className="bg-[#121215] border border-white/5 rounded-2xl p-6 space-y-4 shadow-xl">
+    <div className="bg-[#121215] border border-white/5 rounded-xl p-6 space-y-4 shadow-xl">
       <div className="text-[11px] font-black text-zinc-500 uppercase tracking-wider">Colours</div>
       <div role="radiogroup" aria-label="Colour scheme" className="grid grid-cols-2 gap-2">
         {schemes.map(swatch)}
@@ -367,7 +367,7 @@ function TerminalScrollbackSetting({ settings, setSettings }: any) {
     if (next !== lines) set(next);
   };
   return (
-    <div className="bg-[#121215] border border-white/5 rounded-2xl p-6 space-y-3 shadow-xl">
+    <div className="bg-[#121215] border border-white/5 rounded-xl p-6 space-y-3 shadow-xl">
       <div className="flex justify-between items-center gap-3">
         <label htmlFor="term-scrollback" className="text-[11px] font-black text-zinc-500 uppercase tracking-wider">Scrollback (lines)</label>
         <div className="flex items-center gap-1.5">
@@ -432,7 +432,7 @@ function ShellConfigSyncSettings({ servers }: { servers: any[] }) {
     .sort((a, b) => String(a.name).localeCompare(String(b.name)));
 
   return (
-    <div className="bg-[#121215] border border-white/5 rounded-2xl p-6 shadow-xl space-y-4">
+    <div className="bg-[#121215] border border-white/5 rounded-xl p-6 shadow-xl space-y-4">
       <div>
         <div className="text-sm font-semibold text-zinc-100">Shell config sync</div>
         <p className="text-[12px] text-zinc-400 leading-relaxed mt-1">
@@ -533,7 +533,7 @@ function DefaultShellSetting({ settings, setSettings }: any) {
   if (!shell) return null;
   const name = shell.split("/").pop();
   return (
-    <div className="bg-[#121215] border border-white/5 rounded-2xl p-6 shadow-xl">
+    <div className="bg-[#121215] border border-white/5 rounded-xl p-6 shadow-xl">
       <div className="flex items-center justify-between gap-4">
         <div className="min-w-0">
           <div className="text-sm font-semibold text-zinc-100">Use my default shell</div>
@@ -570,7 +570,7 @@ function SecureScreenSetting() {
     invoke<boolean>("set_secure_screen", { enabled: !on }).then(setOn, (e) => setError(String(e)));
   };
   return (
-    <div className="bg-[#121215] border border-white/5 rounded-2xl p-6 shadow-xl">
+    <div className="bg-[#121215] border border-white/5 rounded-xl p-6 shadow-xl">
       <div className="flex items-center justify-between gap-4">
         <div className="min-w-0">
           <div className="text-sm font-semibold text-zinc-100">Block screenshots</div>
@@ -601,7 +601,7 @@ function SecureScreenSetting() {
 function SshAgentSetting({ settings, setSettings }: any) {
   const on = settings.useSshAgent !== false;
   return (
-    <div className="bg-[#121215] border border-white/5 rounded-2xl p-6 shadow-xl">
+    <div className="bg-[#121215] border border-white/5 rounded-xl p-6 shadow-xl">
       <div className="flex items-center justify-between gap-4">
         <div className="min-w-0">
           <div className="text-sm font-semibold text-zinc-100">Use keys from an ssh-agent</div>
@@ -628,7 +628,7 @@ function SshAgentSetting({ settings, setSettings }: any) {
 function SshConfigSetting({ settings, setSettings }: any) {
   const on = settings.useSshConfig !== false;
   return (
-    <div className="bg-[#121215] border border-white/5 rounded-2xl p-6 shadow-xl">
+    <div className="bg-[#121215] border border-white/5 rounded-xl p-6 shadow-xl">
       <div className="flex items-center justify-between gap-4">
         <div className="min-w-0">
           <div className="text-sm font-semibold text-zinc-100">Use settings from ~/.ssh/config</div>
@@ -704,7 +704,7 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any)
             <Palette size={14} /> UI Customization
           </div>
 
-          <div className="bg-[#121215] border border-white/5 rounded-2xl p-6 space-y-8 shadow-xl">
+          <div className="bg-[#121215] border border-white/5 rounded-xl p-6 space-y-8 shadow-xl">
             {/* Accent Color */}
             <div className="space-y-4">
               <div className="flex justify-between items-center">
@@ -714,7 +714,7 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any)
                     type="color" 
                     value={settings.primaryColor} 
                     onChange={(e) => setSettings({ ...settings, primaryColor: e.target.value })}
-                    className="w-6 h-6 rounded-md bg-transparent cursor-pointer border-none p-0"
+                    className="w-6 h-6 rounded bg-transparent cursor-pointer border-none p-0"
                   />
                   <input 
                     type="text" 
@@ -729,7 +729,7 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any)
                   <button
                     key={c.value}
                     onClick={() => setSettings({ ...settings, primaryColor: c.value })}
-                    className={`w-full aspect-square rounded-xl border-2 transition-all ${settings.primaryColor === c.value ? 'border-white scale-110 shadow-lg' : 'border-transparent hover:scale-105'}`}
+                    className={`w-full aspect-square rounded-lg border-2 transition-all ${settings.primaryColor === c.value ? 'border-white scale-110 shadow-lg' : 'border-transparent hover:scale-105'}`}
                     style={{ backgroundColor: c.value }}
                     title={c.name}
                   />
@@ -746,7 +746,7 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any)
                     type="color" 
                     value={settings.backgroundColor} 
                     onChange={(e) => setSettings({ ...settings, backgroundColor: e.target.value })}
-                    className="w-6 h-6 rounded-md bg-transparent cursor-pointer border-none p-0"
+                    className="w-6 h-6 rounded bg-transparent cursor-pointer border-none p-0"
                   />
                   <input 
                     type="text" 
@@ -761,7 +761,7 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any)
                   <button
                     key={c.value}
                     onClick={() => setSettings({ ...settings, backgroundColor: c.value })}
-                    className={`w-full aspect-square rounded-xl border-2 transition-all ${settings.backgroundColor === c.value ? 'border-white scale-110 shadow-lg' : 'border-transparent hover:scale-105'}`}
+                    className={`w-full aspect-square rounded-lg border-2 transition-all ${settings.backgroundColor === c.value ? 'border-white scale-110 shadow-lg' : 'border-transparent hover:scale-105'}`}
                     style={{ backgroundColor: c.value }}
                     title={c.name}
                   />
@@ -819,13 +819,13 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any)
               <List size={14} /> Activity Log
             </div>
 
-            <div className="bg-[#121215] border border-white/5 rounded-2xl p-6 space-y-4 shadow-xl">
+            <div className="bg-[#121215] border border-white/5 rounded-xl p-6 space-y-4 shadow-xl">
               <p className="text-sm text-zinc-400 leading-relaxed">
                 Diagnostic timeline of what the app has been doing this session. Useful for confirming a connection actually failed or watching a transfer's progress in retrospect.
               </p>
               <button
                 onClick={onOpenLogs}
-                className="px-4 h-9 bg-primary/10 border border-primary/30 text-primary rounded-xl text-xs font-bold uppercase hover:bg-primary hover:text-zinc-950 transition-all w-full flex items-center justify-center gap-2"
+                className="px-4 h-9 bg-primary/10 border border-primary/30 text-primary rounded-lg text-xs font-bold uppercase hover:bg-primary hover:text-zinc-950 transition-all w-full flex items-center justify-center gap-2"
               >
                 <List size={14} /> View Activity Log
               </button>
@@ -839,7 +839,7 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any)
             <Cloud size={14} /> Cloud Sync
           </div>
 
-          <div className="bg-[#121215] border border-white/5 rounded-2xl p-6 space-y-4 shadow-xl">
+          <div className="bg-[#121215] border border-white/5 rounded-xl p-6 space-y-4 shadow-xl">
             <div className="flex items-center justify-between gap-4">
               <div className="min-w-0">
                 <div className="text-sm font-semibold text-zinc-100">Auto-sync</div>
@@ -872,7 +872,7 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any)
             <History size={14} /> Sessions
           </div>
 
-          <div className="bg-[#121215] border border-white/5 rounded-2xl p-6 space-y-4 shadow-xl">
+          <div className="bg-[#121215] border border-white/5 rounded-xl p-6 space-y-4 shadow-xl">
             <div className="flex items-center justify-between gap-4">
               <div className="min-w-0">
                 <div className="text-sm font-semibold text-zinc-100">Restore previous sessions</div>
@@ -898,13 +898,13 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any)
             <RefreshCw size={14} /> Maintenance
           </div>
 
-          <div className="bg-[#121215] border border-white/5 rounded-2xl p-6 space-y-4 shadow-xl">
+          <div className="bg-[#121215] border border-white/5 rounded-xl p-6 space-y-4 shadow-xl">
             {storage && (
               <div className="space-y-1.5 pb-4 border-b border-white/5">
                 <div className="flex items-center gap-2">
                   <span className="text-[11px] font-black text-zinc-500 uppercase tracking-wider">Data folder</span>
                   {storage.portable && (
-                    <span className="px-1.5 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider text-primary bg-primary/10 border border-primary/30">
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider text-primary bg-primary/10 border border-primary/30">
                       Portable
                     </span>
                   )}
@@ -926,7 +926,7 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any)
                   setSettings((s: any) => ({ ...s, primaryColor: '#60a5fa', backgroundColor: '#0a0a0c', terminalFontSize: 14, terminalFontFamily: '' }));
                 }
               }}
-              className="px-4 h-9 bg-zinc-900 border border-white/5 text-zinc-300 rounded-xl text-xs font-bold uppercase hover:bg-white/5 transition-all w-full"
+              className="px-4 h-9 bg-zinc-900 border border-white/5 text-zinc-300 rounded-lg text-xs font-bold uppercase hover:bg-white/5 transition-all w-full"
             >
               Reset to Defaults
             </button>

@@ -46,7 +46,7 @@ export function LinkMark({ link, open, onClick }: { link: LinkStats | null; open
       aria-label={said}
       title={`${said}. Details`}
       data-link-quality={q}
-      className={`h-7 px-2 flex items-center gap-1.5 rounded-md text-[11px] font-semibold transition-colors ${open ? "bg-primary/15" : "bg-white/5 hover:bg-white/10"}`}
+      className={`h-7 px-2 flex items-center gap-1.5 rounded-lg text-[11px] font-semibold transition-colors ${open ? "bg-primary/15" : "bg-white/5 hover:bg-white/10"}`}
     >
       <Icon size={13} className={colour} aria-hidden="true" />
       <span className={`hidden [@container(min-width:560px)]:inline ${colour}`}>{LINK_WORDS[q]}</span>
@@ -73,7 +73,7 @@ export function ToolPanel({ title, onClose, children }: { title: string; onClose
       >
         <div className="flex items-center justify-between gap-2">
           <h3 className="text-[12px] font-bold text-zinc-200">{title}</h3>
-          <button onClick={onClose} aria-label="Close" className="h-6 w-6 flex items-center justify-center rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-white/5">
+          <button onClick={onClose} aria-label="Close" className="h-6 w-6 flex items-center justify-center rounded text-zinc-500 hover:text-zinc-200 hover:bg-white/5">
             <X size={12} />
           </button>
         </div>
@@ -88,7 +88,7 @@ function ReconnectBar({ onReconnect }: { onReconnect: () => void }) {
   return (
     <div role="status" className="flex items-center gap-2 p-2 rounded-lg border border-primary/25 bg-primary/5 text-[11px] leading-snug text-zinc-300">
       <span className="flex-1 min-w-0">Some of this applies when the tab connects again.</span>
-      <button onClick={onReconnect} className="shrink-0 h-7 px-2.5 rounded-md bg-primary/15 text-primary hover:bg-primary/25 font-semibold transition-colors">
+      <button onClick={onReconnect} className="shrink-0 h-7 px-2.5 rounded-lg bg-primary/15 text-primary hover:bg-primary/25 font-semibold transition-colors">
         Reconnect now
       </button>
     </div>

@@ -614,9 +614,9 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
   };
 
   const inputBase =
-    "w-full h-11 px-4 bg-zinc-900/40 border border-white/5 rounded-xl text-[14px] text-zinc-50 placeholder:text-zinc-600 outline-none focus:border-primary/50 focus:bg-zinc-900/60 transition-colors";
+    "w-full h-11 px-4 bg-zinc-900/40 border border-white/5 rounded-lg text-[14px] text-zinc-50 placeholder:text-zinc-600 outline-none focus:border-primary/50 focus:bg-zinc-900/60 transition-colors";
   const passwordInputClass =
-    "w-full h-11 pl-4 bg-zinc-900/40 border border-white/5 rounded-xl text-[14px] text-zinc-50 placeholder:text-zinc-600 outline-none focus:border-primary/50 focus:bg-zinc-900/60 transition-colors";
+    "w-full h-11 pl-4 bg-zinc-900/40 border border-white/5 rounded-lg text-[14px] text-zinc-50 placeholder:text-zinc-600 outline-none focus:border-primary/50 focus:bg-zinc-900/60 transition-colors";
 
   // The create form's checks, live. Length counts characters the way the
   // backend does (code points, not UTF-16 units).
@@ -803,7 +803,7 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
             <button
               onClick={createNew}
               disabled={busy}
-              className="w-full h-11 rounded-xl text-[14px] font-semibold bg-primary text-black hover:shadow-[0_0_24px_rgba(var(--primary),0.3)] disabled:opacity-50 flex items-center justify-center transition-all"
+              className="w-full h-11 rounded-lg text-[14px] font-semibold bg-primary text-black hover:shadow-[0_0_24px_rgba(var(--primary),0.3)] disabled:opacity-50 flex items-center justify-center transition-all"
             >
               {busy ? "Creating…" : "Create profile"}
             </button>
@@ -1047,7 +1047,7 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
 
 // Small pill telling you where a profile lives at a glance.
 const StatusChip = ({ row }: { row: Row }) => {
-  const base = "inline-flex items-center gap-1 px-1.5 h-5 rounded-md text-[9.5px] font-semibold uppercase tracking-wide border shrink-0";
+  const base = "inline-flex items-center gap-1 px-1.5 h-5 rounded text-[9.5px] font-semibold uppercase tracking-wide border shrink-0";
   if (row.local && row.cloud)
     return <span className={`${base} text-emerald-300 bg-emerald-500/10 border-emerald-500/20`}><CheckCircle2 size={10} /> Synced</span>;
   if (row.local)
@@ -1065,7 +1065,7 @@ const RowAction = ({
     onClick={onClick}
     disabled={disabled}
     title={label}
-    className={`h-7 px-2 rounded-md text-[11px] font-medium border flex items-center gap-1 disabled:opacity-40 transition-colors ${
+    className={`h-7 px-2 rounded-lg text-[11px] font-medium border flex items-center gap-1 disabled:opacity-40 transition-colors ${
       danger
         ? "text-rose-300/90 bg-rose-500/5 border-rose-500/15 hover:bg-rose-500/15 hover:text-rose-200"
         : "text-zinc-400 bg-white/[0.03] border-white/10 hover:bg-white/[0.07] hover:text-zinc-100"
@@ -1106,7 +1106,7 @@ const FooterButton = ({
     onClick={onClick}
     disabled={disabled}
     title={title}
-    className={`h-7 px-2 rounded-md flex items-center gap-1.5 transition-colors hover:bg-white/[0.05] disabled:cursor-default disabled:hover:bg-transparent ${
+    className={`h-7 px-2 rounded-lg flex items-center gap-1.5 transition-colors hover:bg-white/[0.05] disabled:cursor-default disabled:hover:bg-transparent ${
       tone || "text-zinc-500 hover:text-zinc-200"
     }`}
   >
@@ -1199,7 +1199,7 @@ const SecretInput = forwardRef<HTMLInputElement, SecretInputProps>(
           aria-label="Show password"
           aria-pressed={shown}
           title={shown ? "Hide password" : "Show password"}
-          className="absolute right-1.5 top-1/2 -translate-y-1/2 w-7 h-7 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-white/5 flex items-center justify-center"
+          className="absolute right-1.5 top-1/2 -translate-y-1/2 w-7 h-7 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-white/5 flex items-center justify-center"
         >
           {shown ? <EyeOff size={14} /> : <Eye size={14} />}
         </button>

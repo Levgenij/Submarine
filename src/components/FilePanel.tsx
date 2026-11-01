@@ -2239,7 +2239,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // selection can be cleared) but there is nothing to act on.
   const noVisibleSelection = dirStats.selectedCount === 0;
   // Selection-bar button. Taller on a phone so it is an easy tap target.
-  const actionBtn ="h-8 sm:h-7 min-w-8 px-2 sm:px-2.5 rounded-md border flex items-center justify-center gap-1.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed";
+  const actionBtn ="h-8 sm:h-7 min-w-8 px-2 sm:px-2.5 rounded-lg border flex items-center justify-center gap-1.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed";
 
   const openDirProperties = async () => {
     if (!sessionId || !currentPath) return;
@@ -2755,7 +2755,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     >
       {disabled && (
         <div className="absolute inset-0 z-[80] bg-black/55 backdrop-blur-[1px] flex items-center justify-center text-zinc-300 text-xs font-mono uppercase">
-          <span className="px-3 py-1.5 bg-red-500/15 border border-red-500/30 rounded text-red-300">
+          <span className="px-3 py-1.5 bg-red-500/15 border border-red-500/30 rounded-lg text-red-300">
             Session disconnected
           </span>
         </div>
@@ -2959,7 +2959,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           bar is a flex sibling of the list, so it shortens the list instead
           of covering the last rows. (The transfers bar lives on the
           SftpWorkspace root, so it stays visible on the Mirror tab too.) */}
-      <div className={`flex-1 min-h-0 flex flex-col border rounded-lg bg-[#121214] overflow-hidden transition-colors duration-200 shadow-2xl shadow-indigo-950/10 ${dragOver ? "border-indigo-400" : "border-indigo-500/30"}`}>
+      <div className={`flex-1 min-h-0 flex flex-col border rounded-xl bg-[#121214] overflow-hidden transition-colors duration-200 shadow-2xl shadow-indigo-950/10 ${dragOver ? "border-indigo-400" : "border-indigo-500/30"}`}>
       <div className="relative flex-1 min-h-0 flex flex-col">
       {/* List */}
       <div
@@ -3800,12 +3800,12 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                           const v = e.target.value.replace(/[^0-7]/g, "").slice(0, 3);
                           setModal({ ...modal, v1: v });
                         }}
-                        className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />
+                        className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded-lg text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />
                     </div>
                     <div className="flex-1">
                       <label className="text-[10px] text-zinc-400 block mb-1">Owner UID</label>
                       <input type="text" value={modal.v2 || ""} onChange={(e) => setModal({ ...modal, v2: e.target.value })}
-                        className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px]" />
+                        className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded-lg text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px]" />
                     </div>
                   </div>
                 </>
@@ -3816,14 +3816,14 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                     <input type="text" autoFocus value={modal.v1 || ""}
                       onChange={(e) => setModal({ ...modal, v1: e.target.value })}
                       onKeyDown={(e) => e.key === "Enter" && submitModal()}
-                      className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />
+                      className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded-lg text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />
                   </div>
                   <div>
                     <label className="text-[10px] text-zinc-400 block mb-1">Target</label>
                     <input type="text" value={modal.v2 || ""}
                       onChange={(e) => setModal({ ...modal, v2: e.target.value })}
                       onKeyDown={(e) => e.key === "Enter" && submitModal()}
-                      className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />
+                      className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded-lg text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />
                   </div>
                 </>
               ) : modal.type === "duplicate" ? (
@@ -3833,7 +3833,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                     <input type="text" value={modal.v1 || ""}
                       onChange={(e) => setModal({ ...modal, v1: e.target.value })}
                       onKeyDown={(e) => e.key === "Enter" && submitModal()}
-                      className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />
+                      className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded-lg text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />
                   </div>
                   <div>
                     <label className="text-[10px] text-zinc-400 block mb-1">Name</label>
@@ -3841,7 +3841,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                       onFocus={(e) => e.currentTarget.select()}
                       onChange={(e) => setModal({ ...modal, v2: e.target.value })}
                       onKeyDown={(e) => e.key === "Enter" && submitModal()}
-                      className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />
+                      className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded-lg text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />
                   </div>
                 </>
               ) : modal.type === "archive" ? (
@@ -3852,7 +3852,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                       onFocus={(e) => e.currentTarget.select()}
                       onChange={(e) => setModal({ ...modal, v1: e.target.value })}
                       onKeyDown={(e) => e.key === "Enter" && submitModal()}
-                      className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />
+                      className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded-lg text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />
                   </div>
                   <div>
                     <label className="text-[10px] text-zinc-400 block mb-1">Format</label>
@@ -3863,7 +3863,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                           type="button"
                           aria-pressed={modal.v2 === f.format}
                           onClick={() => setModal({ ...modal, v2: f.format })}
-                          className={`h-7 rounded border transition-colors ${
+                          className={`h-7 rounded-lg border transition-colors ${
                             modal.v2 === f.format
                               ? "bg-indigo-500/20 border-indigo-400/40 text-indigo-200"
                               : "bg-white/[0.04] border-white/10 text-zinc-400 hover:bg-white/[0.08]"
@@ -3889,12 +3889,12 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                   <input type="text" autoFocus value={modal.v1 || ""}
                     onChange={(e) => setModal({ ...modal, v1: e.target.value })}
                     onKeyDown={(e) => e.key === "Enter" && submitModal()}
-                    className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />
+                    className="w-full h-7 px-2 bg-white/5 border border-white/5 rounded-lg text-zinc-200 focus:outline-none focus:border-indigo-400/40 text-[11.5px] font-mono" />
                 </div>
               )}
               <div className="flex gap-2 justify-end pt-2">
-                <button onClick={() => setModal(null)} className="px-3 h-7 rounded border border-white/5 text-zinc-400 hover:text-white">Cancel</button>
-                <button onClick={submitModal} className="px-3 h-7 rounded bg-indigo-500 text-white font-bold hover:bg-indigo-600">{modal.type === "archive" ? "Create" : "Apply"}</button>
+                <button onClick={() => setModal(null)} className="px-3 h-7 rounded-lg border border-white/5 text-zinc-400 hover:text-white">Cancel</button>
+                <button onClick={submitModal} className="px-3 h-7 rounded-lg bg-indigo-500 text-white font-bold hover:bg-indigo-600">{modal.type === "archive" ? "Create" : "Apply"}</button>
               </div>
             </div>
           </div>

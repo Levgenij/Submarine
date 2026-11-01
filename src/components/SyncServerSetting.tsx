@@ -157,7 +157,7 @@ const SyncServerSetting = ({ view, signedIn, onChanged }: Props) => {
                     aria-checked={proxy.mode === m.mode}
                     disabled={busy}
                     onClick={() => setProxy({ ...proxy, mode: m.mode })}
-                    className={`h-7 rounded border transition-colors disabled:opacity-50 ${
+                    className={`h-7 rounded-lg border transition-colors disabled:opacity-50 ${
                       proxy.mode === m.mode
                         ? "bg-primary/15 border-primary/40 text-zinc-100"
                         : "bg-white/[0.04] border-white/10 text-zinc-400 hover:bg-white/[0.08]"
@@ -190,14 +190,14 @@ const SyncServerSetting = ({ view, signedIn, onChanged }: Props) => {
             <button
               onClick={() => { setEditing(false); setError(null); }}
               disabled={busy}
-              className="h-7 px-3 rounded bg-white/5 border border-white/10 text-zinc-300 hover:bg-white/10 disabled:opacity-50"
+              className="h-7 px-3 rounded-lg bg-white/5 border border-white/10 text-zinc-300 hover:bg-white/10 disabled:opacity-50"
             >
               Cancel
             </button>
             <button
               onClick={() => save(server)}
               disabled={busy}
-              className="h-7 px-3 rounded bg-primary text-black font-bold disabled:opacity-50"
+              className="h-7 px-3 rounded-lg bg-primary text-black font-bold disabled:opacity-50"
             >
               {busy ? "Checking…" : "Save"}
             </button>

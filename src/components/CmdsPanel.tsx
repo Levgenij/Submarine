@@ -545,7 +545,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
                 // re-read (just after "This server only" flips), when the
                 // count on screen is for the other scope.
                 disabled={history.length === 0 || !!searchQuery || historyLoading}
-                className="h-6 px-2 rounded-md bg-white/[0.03] border border-white/10 hover:bg-rose-500/15 hover:border-rose-500/40 text-zinc-400 hover:text-rose-300 flex items-center gap-1.5 text-[10px] font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white/[0.03] disabled:hover:border-white/10 disabled:hover:text-zinc-400"
+                className="h-6 px-2 rounded bg-white/[0.03] border border-white/10 hover:bg-rose-500/15 hover:border-rose-500/40 text-zinc-400 hover:text-rose-300 flex items-center gap-1.5 text-[10px] font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white/[0.03] disabled:hover:border-white/10 disabled:hover:text-zinc-400"
                 title={searchQuery ? "Clear the search first: Clear removes all history, not just the matches" : hasNode && onlyThisServer ? "Clear this server's history" : "Clear all history"}
               >
                 <Trash2 size={11} /> Clear
@@ -638,14 +638,14 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
                     <div className="flex items-center gap-1.5 shrink-0">
                       <button
                         onClick={() => writeToTerminal(h.command, true)}
-                        className="w-7 h-7 rounded-md bg-primary/15 text-primary border border-primary/40 hover:bg-primary hover:text-zinc-950 hover:border-primary flex items-center justify-center transition-all"
+                        className="w-7 h-7 rounded-lg bg-primary/15 text-primary border border-primary/40 hover:bg-primary hover:text-zinc-950 hover:border-primary flex items-center justify-center transition-all"
                         title="Run in active terminal (writes + Enter)"
                       >
                         <Play size={12} fill="currentColor" />
                       </button>
                       <button
                         onClick={() => writeToTerminal(h.command, false)}
-                        className="w-7 h-7 rounded-md bg-white/[0.03] border border-white/10 hover:bg-white/10 hover:border-white/20 text-zinc-300 hover:text-white flex items-center justify-center transition-all"
+                        className="w-7 h-7 rounded-lg bg-white/[0.03] border border-white/10 hover:bg-white/10 hover:border-white/20 text-zinc-300 hover:text-white flex items-center justify-center transition-all"
                         title="Paste into active terminal (no Enter)"
                       >
                         <ClipboardCopy size={12} />
@@ -653,7 +653,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
                       <button
                         onClick={() => (form ? setAdding(null) : beginAdd(h))}
                         disabled={saved}
-                        className="w-7 h-7 rounded-md bg-white/[0.03] border border-white/10 hover:bg-white/10 hover:border-white/20 text-zinc-300 hover:text-white flex items-center justify-center transition-all disabled:text-emerald-400 disabled:border-emerald-500/30 disabled:bg-emerald-500/10 disabled:cursor-default"
+                        className="w-7 h-7 rounded-lg bg-white/[0.03] border border-white/10 hover:bg-white/10 hover:border-white/20 text-zinc-300 hover:text-white flex items-center justify-center transition-all disabled:text-emerald-400 disabled:border-emerald-500/30 disabled:bg-emerald-500/10 disabled:cursor-default"
                         title={saved ? "Already in Commands" : "Add to Commands"}
                       >
                         {saved ? <Check size={12} /> : <BookmarkPlus size={12} />}
@@ -672,7 +672,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
                           if (e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); void saveAdd(); }
                         }}
                         placeholder="Title"
-                        className="w-full h-7 px-2 bg-black/40 border border-white/10 rounded text-[11px] text-white placeholder-zinc-600 focus:outline-none focus:border-primary/50"
+                        className="w-full h-7 px-2 bg-black/40 border border-white/10 rounded-lg text-[11px] text-white placeholder-zinc-600 focus:outline-none focus:border-primary/50"
                         autoFocus
                       />
                       <textarea
@@ -684,7 +684,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
                         }}
                         placeholder="Command body — runnable in shell"
                         rows={3}
-                        className="w-full p-2 bg-black/40 border border-white/10 rounded font-mono text-[11px] text-zinc-200 placeholder-zinc-600 leading-relaxed resize-y focus:outline-none focus:border-primary/50 custom-scrollbar"
+                        className="w-full p-2 bg-black/40 border border-white/10 rounded-lg font-mono text-[11px] text-zinc-200 placeholder-zinc-600 leading-relaxed resize-y focus:outline-none focus:border-primary/50 custom-scrollbar"
                       />
                       {canScopeToServer && (
                         <div className="grid grid-cols-2 gap-1 p-0.5 rounded-lg bg-black/40 border border-white/10">
@@ -692,7 +692,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
                             <button
                               key={s}
                               onClick={() => setAdding({ ...form, scope: s })}
-                              className={`h-6 rounded-md text-[10px] font-bold transition-all ${
+                              className={`h-6 rounded text-[10px] font-bold transition-all ${
                                 form.scope === s ? "bg-primary/15 text-primary" : "text-zinc-500 hover:text-zinc-200"
                               }`}
                             >
@@ -757,7 +757,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
                           if (e.key === "Escape") { e.preventDefault(); cancelEdit(); }
                         }}
                         placeholder="Title"
-                        className="w-full h-7 px-2 bg-black/40 border border-white/10 rounded text-[11px] text-white placeholder-zinc-600 focus:outline-none focus:border-primary/50"
+                        className="w-full h-7 px-2 bg-black/40 border border-white/10 rounded-lg text-[11px] text-white placeholder-zinc-600 focus:outline-none focus:border-primary/50"
                         autoFocus
                       />
                       <textarea
@@ -769,7 +769,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
                         }}
                         placeholder="Command body — runnable in shell"
                         rows={5}
-                        className="w-full p-2 bg-black/40 border border-white/10 rounded font-mono text-[11px] text-zinc-200 placeholder-zinc-600 leading-relaxed resize-y focus:outline-none focus:border-primary/50 custom-scrollbar"
+                        className="w-full p-2 bg-black/40 border border-white/10 rounded-lg font-mono text-[11px] text-zinc-200 placeholder-zinc-600 leading-relaxed resize-y focus:outline-none focus:border-primary/50 custom-scrollbar"
                       />
                       <div className="flex gap-1.5">
                         <button
@@ -805,21 +805,21 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
                       <div className="flex items-center gap-1.5 shrink-0">
                         <button
                           onClick={() => writeToTerminal(c.content, true)}
-                          className="w-7 h-7 rounded-md bg-primary/15 text-primary border border-primary/40 hover:bg-primary hover:text-zinc-950 hover:border-primary flex items-center justify-center transition-all"
+                          className="w-7 h-7 rounded-lg bg-primary/15 text-primary border border-primary/40 hover:bg-primary hover:text-zinc-950 hover:border-primary flex items-center justify-center transition-all"
                           title="Run in active terminal (writes + Enter)"
                         >
                           <Play size={12} fill="currentColor" />
                         </button>
                         <button
                           onClick={() => writeToTerminal(c.content, false)}
-                          className="w-7 h-7 rounded-md bg-white/[0.03] border border-white/10 hover:bg-white/10 hover:border-white/20 text-zinc-300 hover:text-white flex items-center justify-center transition-all"
+                          className="w-7 h-7 rounded-lg bg-white/[0.03] border border-white/10 hover:bg-white/10 hover:border-white/20 text-zinc-300 hover:text-white flex items-center justify-center transition-all"
                           title="Paste into active terminal (no Enter)"
                         >
                           <ClipboardCopy size={12} />
                         </button>
                         <button
                           onClick={() => beginEditCommand(c)}
-                          className="w-7 h-7 rounded-md bg-white/[0.03] border border-white/10 hover:bg-white/10 hover:border-white/20 text-zinc-300 hover:text-white flex items-center justify-center transition-all"
+                          className="w-7 h-7 rounded-lg bg-white/[0.03] border border-white/10 hover:bg-white/10 hover:border-white/20 text-zinc-300 hover:text-white flex items-center justify-center transition-all"
                           title="Edit command inline"
                         >
                           <Pencil size={12} />
@@ -883,7 +883,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
                       value={edit.title}
                       onChange={(e) => setEdit({ ...edit, title: e.target.value })}
                       placeholder="Title"
-                      className="w-full h-7 px-2 bg-black/40 border border-white/10 rounded text-[11px] text-white placeholder-zinc-600 focus:outline-none focus:border-primary/50"
+                      className="w-full h-7 px-2 bg-black/40 border border-white/10 rounded-lg text-[11px] text-white placeholder-zinc-600 focus:outline-none focus:border-primary/50"
                     />
                     <textarea
                       value={edit.body}
@@ -893,7 +893,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
                       }}
                       placeholder="Note body — markdown, paths, snippets…"
                       rows={6}
-                      className="w-full p-2 bg-black/40 border border-white/10 rounded font-sans text-[11px] text-zinc-200 placeholder-zinc-600 leading-relaxed resize-y focus:outline-none focus:border-primary/50 custom-scrollbar"
+                      className="w-full p-2 bg-black/40 border border-white/10 rounded-lg font-sans text-[11px] text-zinc-200 placeholder-zinc-600 leading-relaxed resize-y focus:outline-none focus:border-primary/50 custom-scrollbar"
                       autoFocus
                     />
                     <div className="flex gap-1.5 flex-wrap">

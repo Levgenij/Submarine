@@ -1729,7 +1729,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
               const el = e.currentTarget;
               logFollowRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 32;
             }}
-            className="flex-1 min-h-0 bg-[#121214] border border-white/5 rounded-2xl p-4 font-mono overflow-y-auto overscroll-contain custom-scrollbar shadow-inner relative select-text cursor-text"
+            className="flex-1 min-h-0 bg-[#121214] border border-white/5 rounded-xl p-4 font-mono overflow-y-auto overscroll-contain custom-scrollbar shadow-inner relative select-text cursor-text"
             style={{ WebkitOverflowScrolling: 'touch', fontSize: logFontSize, fontFamily: logFontFamily, lineHeight: 1.5 }}
           >
             {logs.map((l, i) => (
@@ -1816,7 +1816,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                 requestTerminalFocus();
               }}
               title={t.container ? `Container: ${t.container.name}` : undefined}
-              className={`h-8 px-3 sm:px-4 ${terminals.length > 1 ? 'pr-8' : ''} rounded-lg flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider transition-all ${
+              className={`h-10 sm:h-8 pl-3 ${terminals.length > 1 ? 'pr-10 sm:pr-8' : 'pr-3'} rounded-lg flex items-center gap-2 text-[11px] font-semibold whitespace-nowrap tracking-tight transition-all ${
                 isFocusedHalf
                   ? 'bg-primary/10 text-primary border border-primary/20 shadow-inner'
                   : isSplitPartner
@@ -1837,7 +1837,13 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                 onClick={(e) => {
                   e.stopPropagation();
                   setTerminals(prev => prev.filter(x => x.id !== t.id));
-                  if (activeTab === t.id) setActiveTab(terminals[0].id);
+                  if (activeTab === t.id) {
+                    // A split partner first, so focus stays inside the split;
+                    // otherwise the tab that takes this one's place.
+                    const rest = terminals.filter(x => x.id !== t.id);
+                    const partner = splitTerminals.find(id => id !== t.id);
+                    setActiveTab(partner ?? rest[Math.min(terminals.indexOf(t), rest.length - 1)].id);
+                  }
                   // Closing a terminal that's participating in the split
                   // has to drop it from splitTerminals AND splitRatios or
                   // the flex layout renders a torn-down partner.
@@ -1857,7 +1863,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   }
                 }}
                 aria-label="Close terminal"
-                className="absolute right-1 top-1/2 -translate-y-1/2 w-5 h-5 flex items-center justify-center rounded opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100 hover:bg-white/5 hover:text-red-400 text-zinc-500 transition-all"
+                className="absolute right-1 top-1/2 -translate-y-1/2 w-8 h-8 sm:w-6 sm:h-6 flex items-center justify-center rounded opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100 hover:bg-white/10 hover:text-red-400 text-zinc-500 transition-all"
               >
                 <X size={12} />
               </button>
@@ -2218,14 +2224,14 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
               </div>
               <div className="flex items-center gap-2">
                 {isWaiting && (
-                  <button onClick={cancelReconnect} className="px-3 py-1.5 sm:py-1 min-h-8 sm:min-h-6 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white rounded-md text-[10px] font-bold uppercase tracking-wider transition-colors">
+                  <button onClick={cancelReconnect} className="px-3 py-1.5 sm:py-1 min-h-8 sm:min-h-6 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white rounded-lg text-[10px] font-bold uppercase tracking-wider transition-colors">
                     Cancel
                   </button>
                 )}
-                <button onClick={reconnect} className="px-3 py-1.5 sm:py-1 min-h-8 sm:min-h-6 bg-primary/10 text-primary hover:bg-primary/20 rounded-md text-[10px] font-bold uppercase tracking-wider transition-colors flex items-center gap-1.5">
+                <button onClick={reconnect} className="px-3 py-1.5 sm:py-1 min-h-8 sm:min-h-6 bg-primary/10 text-primary hover:bg-primary/20 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-colors flex items-center gap-1.5">
                   <Play size={12} /> {isWaiting ? "Now" : "Reconnect"}
                 </button>
-                <button onClick={onClose} className="px-3 py-1.5 sm:py-1 min-h-8 sm:min-h-6 bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-white rounded-md text-[10px] font-bold uppercase tracking-wider transition-colors">
+                <button onClick={onClose} className="px-3 py-1.5 sm:py-1 min-h-8 sm:min-h-6 bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-white rounded-lg text-[10px] font-bold uppercase tracking-wider transition-colors">
                   Close
                 </button>
               </div>
@@ -2579,7 +2585,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
             <div
               ref={shellSyncPanelRef}
               tabIndex={-1}
-              className="max-w-xl w-full mt-6 sm:mt-12 bg-[#121215] border border-white/10 rounded-2xl shadow-2xl overflow-hidden outline-none"
+              className="max-w-xl w-full mt-6 sm:mt-12 bg-[#121215] border border-white/10 rounded-xl shadow-2xl overflow-hidden outline-none"
             >
               <div className="px-5 py-4 border-b border-white/5 flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2 min-w-0">

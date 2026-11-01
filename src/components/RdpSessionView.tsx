@@ -403,7 +403,7 @@ export default function RdpSessionView({ session, displayName, onClose, onStatus
 
   const logPanel = (
     <div
-      className="flex-1 min-h-0 bg-[#121214] border border-white/5 rounded-2xl p-4 font-mono text-[12px] overflow-y-auto overscroll-contain custom-scrollbar select-text cursor-text"
+      className="flex-1 min-h-0 bg-[#121214] border border-white/5 rounded-xl p-4 font-mono text-[12px] overflow-y-auto overscroll-contain custom-scrollbar select-text cursor-text"
       style={{ WebkitOverflowScrolling: "touch", lineHeight: 1.5 }}
     >
       {logs.map((l, i) => (
@@ -440,7 +440,7 @@ export default function RdpSessionView({ session, displayName, onClose, onStatus
       <div className="relative flex-1 flex flex-col p-4 sm:p-8 bg-[#0a0a0c] text-white overflow-hidden">
         <div className="max-w-2xl w-full mx-auto">
           <div className="flex items-center gap-3 mb-4">
-            <div className="shrink-0 w-9 h-9 rounded-xl flex items-center justify-center bg-primary/10 text-primary" aria-hidden="true">
+            <div className="shrink-0 w-9 h-9 rounded-lg flex items-center justify-center bg-primary/10 text-primary" aria-hidden="true">
               <MonitorSmartphone size={16} />
             </div>
             <div className="min-w-0 flex-1">
@@ -456,7 +456,7 @@ export default function RdpSessionView({ session, displayName, onClose, onStatus
               <X size={13} />
             </button>
           </div>
-          <div role="note" className="flex gap-2.5 p-3 rounded-xl border border-amber-500/25 bg-amber-500/5 text-[12.5px] leading-relaxed text-amber-200/90">
+          <div role="note" className="flex gap-2.5 p-3 rounded-lg border border-amber-500/25 bg-amber-500/5 text-[12.5px] leading-relaxed text-amber-200/90">
             <FlaskConical size={15} className="shrink-0 mt-0.5 text-amber-300" aria-hidden="true" />
             <span>
               On a phone, RDP servers open with Submarine's built-in RDP client. {RDP_BUILTIN_EXPERIMENTAL} Your choice is kept for this server on this phone.
@@ -464,7 +464,7 @@ export default function RdpSessionView({ session, displayName, onClose, onStatus
           </div>
           <button
             onClick={useBuiltin}
-            className="mt-4 h-10 px-4 flex items-center gap-2 rounded-xl bg-primary/15 text-primary hover:bg-primary/25 text-[13px] font-semibold transition-colors"
+            className="mt-4 h-10 px-4 flex items-center gap-2 rounded-lg bg-primary/15 text-primary hover:bg-primary/25 text-[13px] font-semibold transition-colors"
           >
             <FlaskConical size={14} aria-hidden="true" /> Open with the built-in client
           </button>
@@ -498,7 +498,7 @@ export default function RdpSessionView({ session, displayName, onClose, onStatus
                 onClick={() => void pasteToServer("ctrlv", false)}
                 title="Paste this device's clipboard into the server"
                 aria-label="Paste this device's clipboard into the server"
-                className="h-7 px-2 flex items-center gap-1.5 rounded-md bg-white/5 text-zinc-300 hover:text-zinc-100 text-[11px] font-semibold transition-colors"
+                className="h-7 px-2 flex items-center gap-1.5 rounded-lg bg-white/5 text-zinc-300 hover:text-zinc-100 text-[11px] font-semibold transition-colors"
               >
                 <ClipboardPaste size={12} aria-hidden="true" /><span className="hidden [@container(min-width:560px)]:inline">Paste</span>
               </button>
@@ -511,7 +511,7 @@ export default function RdpSessionView({ session, displayName, onClose, onStatus
                 aria-expanded={panel === "files"}
                 title="Shared files"
                 aria-label="Shared files"
-                className={`h-7 px-2 flex items-center gap-1.5 rounded-md text-[11px] font-semibold transition-colors ${panel === "files" ? "bg-primary/15 text-primary" : "bg-white/5 text-zinc-400 hover:text-zinc-200"}`}
+                className={`h-7 px-2 flex items-center gap-1.5 rounded-lg text-[11px] font-semibold transition-colors ${panel === "files" ? "bg-primary/15 text-primary" : "bg-white/5 text-zinc-400 hover:text-zinc-200"}`}
               >
                 <FolderSymlink size={12} aria-hidden="true" /><span className="hidden [@container(min-width:700px)]:inline">Files</span>
               </button>
@@ -521,7 +521,7 @@ export default function RdpSessionView({ session, displayName, onClose, onStatus
               aria-expanded={panel === "settings"}
               title="Speed and quality"
               aria-label="Speed and quality"
-              className={`h-7 px-2 flex items-center gap-1.5 rounded-md text-[11px] font-semibold transition-colors ${panel === "settings" ? "bg-primary/15 text-primary" : "bg-white/5 text-zinc-400 hover:text-zinc-200"}`}
+              className={`h-7 px-2 flex items-center gap-1.5 rounded-lg text-[11px] font-semibold transition-colors ${panel === "settings" ? "bg-primary/15 text-primary" : "bg-white/5 text-zinc-400 hover:text-zinc-200"}`}
             >
               <SlidersHorizontal size={12} aria-hidden="true" /><span className="hidden [@container(min-width:700px)]:inline">Settings</span>
             </button>
@@ -530,7 +530,7 @@ export default function RdpSessionView({ session, displayName, onClose, onStatus
                 onClick={() => setShowLog((v) => !v)}
                 aria-pressed={showLog}
                 title={showLog ? "Hide the log" : "Show the log"}
-                className={`h-7 px-2 rounded-md text-[11px] font-semibold transition-colors ${showLog ? "bg-primary/15 text-primary" : "bg-white/5 text-zinc-400 hover:text-zinc-200"}`}
+                className={`h-7 px-2 rounded-lg text-[11px] font-semibold transition-colors ${showLog ? "bg-primary/15 text-primary" : "bg-white/5 text-zinc-400 hover:text-zinc-200"}`}
               >
                 Log
               </button>
@@ -539,7 +539,7 @@ export default function RdpSessionView({ session, displayName, onClose, onStatus
               <button
                 onClick={allowWithoutNla}
                 title="Log in to this server without NLA: the password then goes inside TLS only"
-                className="h-7 px-2 flex items-center gap-1.5 rounded-md bg-amber-500/15 text-amber-200 hover:bg-amber-500/25 text-[11px] font-semibold transition-colors"
+                className="h-7 px-2 flex items-center gap-1.5 rounded-lg bg-amber-500/15 text-amber-200 hover:bg-amber-500/25 text-[11px] font-semibold transition-colors"
               >
                 <AlertTriangle size={12} aria-hidden="true" />Allow without NLA
               </button>
@@ -549,7 +549,7 @@ export default function RdpSessionView({ session, displayName, onClose, onStatus
                 onClick={connect}
                 title="Reconnect"
                 aria-label="Reconnect"
-                className="h-7 px-2 flex items-center gap-1.5 rounded-md bg-primary/10 text-primary hover:bg-primary/20 text-[11px] font-semibold transition-colors"
+                className="h-7 px-2 flex items-center gap-1.5 rounded-lg bg-primary/10 text-primary hover:bg-primary/20 text-[11px] font-semibold transition-colors"
               >
                 <RotateCw size={12} /><span className="hidden [@container(min-width:560px)]:inline">Reconnect</span>
               </button>
@@ -558,7 +558,7 @@ export default function RdpSessionView({ session, displayName, onClose, onStatus
               onClick={onClose}
               title="Close session"
               aria-label="Close session"
-              className="h-7 px-2 flex items-center gap-1.5 rounded-md bg-white/5 text-zinc-300 hover:bg-red-500/15 hover:text-red-300 text-[11px] font-semibold transition-colors"
+              className="h-7 px-2 flex items-center gap-1.5 rounded-lg bg-white/5 text-zinc-300 hover:bg-red-500/15 hover:text-red-300 text-[11px] font-semibold transition-colors"
             >
               <X size={12} /><span className="hidden [@container(min-width:560px)]:inline">Close</span>
             </button>
@@ -570,7 +570,7 @@ export default function RdpSessionView({ session, displayName, onClose, onStatus
             <span className="min-w-0 truncate">Text was copied on the server ({serverCopy.length} characters).</span>
             <button
               onClick={() => navigator.clipboard.writeText(serverCopy).then(() => setServerCopy(null), () => {})}
-              className="shrink-0 h-6 px-2 rounded-md bg-primary/20 text-primary hover:bg-primary/30 font-semibold"
+              className="shrink-0 h-6 px-2 rounded bg-primary/20 text-primary hover:bg-primary/30 font-semibold"
             >
               Copy it here
             </button>
@@ -626,7 +626,7 @@ export default function RdpSessionView({ session, displayName, onClose, onStatus
       <div className="max-w-2xl w-full mx-auto flex-1 flex flex-col min-h-0">
         <div className="flex items-center gap-3 mb-3 sm:mb-4">
           <div
-            className={`shrink-0 w-9 h-9 rounded-xl flex items-center justify-center ${broken ? "bg-red-500/10 text-red-400" : "bg-primary/10 text-primary"}`}
+            className={`shrink-0 w-9 h-9 rounded-lg flex items-center justify-center ${broken ? "bg-red-500/10 text-red-400" : "bg-primary/10 text-primary"}`}
             aria-hidden="true"
           >
             {working ? <Loader2 size={16} className="animate-spin-brief" /> : broken ? <AlertTriangle size={16} /> : <MonitorSmartphone size={16} />}
@@ -670,7 +670,7 @@ export default function RdpSessionView({ session, displayName, onClose, onStatus
         </div>
 
         {status === "connected" && opened && (
-          <div className="mb-3 sm:mb-4 p-4 rounded-2xl border border-white/5 bg-[#121214] text-[12.5px] leading-relaxed text-zinc-300 space-y-1.5">
+          <div className="mb-3 sm:mb-4 p-4 rounded-xl border border-white/5 bg-[#121214] text-[12.5px] leading-relaxed text-zinc-300 space-y-1.5">
             <p>
               {opened.app} connects to <span className="font-mono text-zinc-100">{opened.address}</span>
               {opened.via ? <> - a port of this computer that goes through the SSH server <span className="text-zinc-100">{opened.via}</span>.</> : "."}

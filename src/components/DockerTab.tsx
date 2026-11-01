@@ -147,7 +147,7 @@ function describeError(err: string, ctx?: string): { title: string; hint?: strin
 // Compact, minimal — Docker's strip sits UNDER the Info strip (Info > Docker),
 // so two heavy uppercase rows stacked up and wrapped to a second line. No
 // uppercase / letter-spacing, smaller height + padding keeps it to one line.
-const subTabBase = "shrink-0 h-8 sm:h-7 px-2.5 rounded-md flex items-center gap-1.5 text-[10.5px] font-semibold tracking-tight transition-all";
+const subTabBase = "shrink-0 h-8 sm:h-7 px-2.5 rounded-lg flex items-center gap-1.5 text-[10.5px] font-semibold tracking-tight transition-all";
 const subTabIdle = "text-zinc-400 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white";
 const subTabActive = "bg-primary/15 text-primary border border-primary/30 shadow-inner";
 
@@ -288,7 +288,7 @@ const DockerTab = ({ sessionId, disabled, onOpenContainerTerminal }: DockerTabPr
           <button
             onClick={refreshActive}
             title="Refresh this tab"
-            className="h-7 px-2 rounded-md text-[10px] font-bold uppercase tracking-wider text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white flex items-center gap-1.5 transition-all"
+            className="h-7 px-2 rounded-lg text-[10px] font-bold uppercase tracking-wider text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white flex items-center gap-1.5 transition-all"
           >
             <RefreshCw size={11} /> Refresh
           </button>
@@ -524,7 +524,7 @@ const ImagesView = ({ state }: { state: TabState<ImageRow[]> }) => {
       {filtered.length === 0 ? <Empty>No images.</Empty> : (
         <div className="space-y-1">
           {visible.map((img, i) => (
-            <div key={i} className="bg-black/30 border border-white/5 rounded px-2 py-1.5 flex items-center justify-between gap-2">
+            <div key={i} className="bg-black/30 border border-white/5 rounded-lg px-2 py-1.5 flex items-center justify-between gap-2">
               <div className="min-w-0">
                 <div className="text-[11px] font-mono font-bold text-white truncate">{img.repo}<span className="text-zinc-500">:{img.tag}</span></div>
                 <div className="text-[10px] text-zinc-500 truncate">{img.id.slice(0, 12)} · {img.createdSince}</div>
@@ -533,7 +533,7 @@ const ImagesView = ({ state }: { state: TabState<ImageRow[]> }) => {
             </div>
           ))}
           {filtered.length > 30 && (
-            <button onClick={() => setShowAll(s => !s)} className="w-full h-7 rounded-md border border-white/10 text-[10px] font-bold uppercase tracking-wider text-zinc-400 hover:bg-white/5 hover:text-white">
+            <button onClick={() => setShowAll(s => !s)} className="w-full h-7 rounded-lg border border-white/10 text-[10px] font-bold uppercase tracking-wider text-zinc-400 hover:bg-white/5 hover:text-white">
               {showAll ? "Show fewer" : `Show all ${filtered.length}`}
             </button>
           )}
@@ -562,13 +562,13 @@ const VolumesView = ({ state }: { state: TabState<VolumeRow[]> }) => {
       {filtered.length === 0 ? <Empty>No volumes.</Empty> : (
         <div className="space-y-1">
           {visible.map((v, i) => (
-            <div key={i} className="bg-black/30 border border-white/5 rounded px-2 py-1.5">
+            <div key={i} className="bg-black/30 border border-white/5 rounded-lg px-2 py-1.5">
               <div className="text-[11px] font-mono font-bold text-white truncate">{v.name}</div>
               <div className="text-[10px] text-zinc-500 font-mono truncate">{v.driver} · {v.mountpoint}</div>
             </div>
           ))}
           {filtered.length > 30 && (
-            <button onClick={() => setShowAll(s => !s)} className="w-full h-7 rounded-md border border-white/10 text-[10px] font-bold uppercase tracking-wider text-zinc-400 hover:bg-white/5 hover:text-white">
+            <button onClick={() => setShowAll(s => !s)} className="w-full h-7 rounded-lg border border-white/10 text-[10px] font-bold uppercase tracking-wider text-zinc-400 hover:bg-white/5 hover:text-white">
               {showAll ? "Show fewer" : `Show all ${filtered.length}`}
             </button>
           )}
@@ -588,7 +588,7 @@ const NetworksView = ({ state }: { state: TabState<NetworkRow[]> }) => {
       {state.data.length === 0 ? <Empty>No networks.</Empty> : (
         <div className="space-y-1 mt-1">
           {state.data.map((n, i) => (
-            <div key={i} className="bg-black/30 border border-white/5 rounded px-2 py-1.5 flex items-center justify-between gap-2">
+            <div key={i} className="bg-black/30 border border-white/5 rounded-lg px-2 py-1.5 flex items-center justify-between gap-2">
               <div className="min-w-0">
                 <div className="text-[11px] font-mono font-bold text-white truncate">{n.name}</div>
                 <div className="text-[10px] text-zinc-500 font-mono truncate">{n.driver} · scope:{n.scope}</div>
@@ -647,7 +647,7 @@ const ComposeView = ({
           <Empty>{state.data.length === 0 ? "No containers carry compose labels — nothing here was started by docker compose." : "No matches."}</Empty>
           {state.data.length === 0 && hasRaw && (
             <Card title="Raw docker output">
-              <pre className="text-[10.5px] font-mono text-zinc-300 whitespace-pre overflow-x-auto select-text bg-black/50 border border-white/5 rounded p-2 max-h-[200px] overflow-y-auto">{rawFallback}</pre>
+              <pre className="text-[10.5px] font-mono text-zinc-300 whitespace-pre overflow-x-auto select-text bg-black/50 border border-white/5 rounded-lg p-2 max-h-[200px] overflow-y-auto">{rawFallback}</pre>
             </Card>
           )}
         </>
@@ -752,7 +752,7 @@ const KindPill = ({
 }) => (
   <button
     onClick={onClick}
-    className={`h-8 sm:h-7 px-2.5 sm:px-2 rounded-md text-[10.5px] font-semibold tracking-tight transition-all border flex items-center gap-1.5 ${
+    className={`h-8 sm:h-7 px-2.5 sm:px-2 rounded-lg text-[10.5px] font-semibold tracking-tight transition-all border flex items-center gap-1.5 ${
       active
         ? "bg-primary/15 text-primary border-primary/30"
         : "bg-white/[0.04] text-zinc-400 border-white/10 hover:bg-white/[0.08] hover:text-white"
@@ -819,7 +819,7 @@ const PruneView = ({ sessionId }: { sessionId: string }) => {
               <button
                 onClick={() => run(s.key, s.label)}
                 disabled={busy !== null}
-                className="shrink-0 h-7 px-2.5 rounded-md text-[10px] font-bold uppercase tracking-wider text-rose-300 bg-rose-500/10 border border-rose-500/30 hover:bg-rose-500/20 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 transition-all"
+                className="shrink-0 h-7 px-2.5 rounded-lg text-[10px] font-bold uppercase tracking-wider text-rose-300 bg-rose-500/10 border border-rose-500/30 hover:bg-rose-500/20 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 transition-all"
               >
                 {busy === s.key ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
                 Prune
@@ -1018,7 +1018,7 @@ const ContainerDetailsModal = ({
     <ModalShell title={`Container · ${name}`} onClose={onClose} actions={
       <button
         onClick={() => onOpenContainerTerminal(name, false)}
-        className="h-7 px-2.5 rounded-md text-[10px] font-bold uppercase tracking-wider text-sky-200 bg-sky-500/15 border border-sky-500/30 hover:bg-sky-500/25 flex items-center gap-1.5 transition-all"
+        className="h-7 px-2.5 rounded-lg text-[10px] font-bold uppercase tracking-wider text-sky-200 bg-sky-500/15 border border-sky-500/30 hover:bg-sky-500/25 flex items-center gap-1.5 transition-all"
       >
         <Terminal size={11} /> Open Terminal
       </button>
@@ -1051,7 +1051,7 @@ const ContainerDetailsModal = ({
               <select
                 value={logsTail}
                 onChange={(e) => setLogsTail(parseInt(e.target.value, 10))}
-                className="h-7 px-2 bg-black/40 border border-white/10 rounded text-[10px] text-zinc-200 font-mono focus:border-primary/50 outline-none"
+                className="h-7 px-2 bg-black/40 border border-white/10 rounded-lg text-[10px] text-zinc-200 font-mono focus:border-primary/50 outline-none"
               >
                 <option value={100}>Tail 100</option>
                 <option value={500}>Tail 500</option>
@@ -1063,20 +1063,20 @@ const ContainerDetailsModal = ({
               <button
                 onClick={() => fetchLogs(logsTail)}
                 disabled={logsLoading || live}
-                className="h-7 px-2 rounded-md text-[10px] font-bold uppercase tracking-wider text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
+                className="h-7 px-2 rounded-lg text-[10px] font-bold uppercase tracking-wider text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
               >
                 {logsLoading ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} Reload
               </button>
               <button
                 onClick={live ? stopLive : startLive}
-                className={`h-7 px-2 rounded-md text-[10px] font-bold uppercase tracking-wider flex items-center gap-1.5 transition-all ${live ? "bg-rose-500/15 text-rose-300 border border-rose-500/30 hover:bg-rose-500/25" : "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/25"}`}
+                className={`h-7 px-2 rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center gap-1.5 transition-all ${live ? "bg-rose-500/15 text-rose-300 border border-rose-500/30 hover:bg-rose-500/25" : "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/25"}`}
               >
                 {live ? <><Square size={11} /> Stop live</> : <><Play size={11} /> Go live</>}
               </button>
               {live && <span className="text-[10px] text-emerald-400 font-mono animate-pulse-brief">● streaming</span>}
               <button
                 onClick={() => { navigator.clipboard.writeText(logs).catch(() => {}); }}
-                className="ml-auto h-7 px-2 rounded-md text-[10px] font-bold uppercase tracking-wider text-zinc-400 hover:text-white hover:bg-white/5 flex items-center gap-1.5"
+                className="ml-auto h-7 px-2 rounded-lg text-[10px] font-bold uppercase tracking-wider text-zinc-400 hover:text-white hover:bg-white/5 flex items-center gap-1.5"
               >
                 <Copy size={11} /> Copy
               </button>
@@ -1111,7 +1111,7 @@ const ContainerDetailsModal = ({
             <button
               onClick={fetchOneStats}
               disabled={oneStats.loading}
-              className="h-7 px-2.5 rounded-md text-[10px] font-bold uppercase tracking-wider text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 flex items-center gap-1.5"
+              className="h-7 px-2.5 rounded-lg text-[10px] font-bold uppercase tracking-wider text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 flex items-center gap-1.5"
             >
               {oneStats.loading ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} Refresh
             </button>
@@ -1132,13 +1132,13 @@ const ContainerDetailsModal = ({
               <button
                 onClick={fetchInspect}
                 disabled={inspect.loading}
-                className="h-7 px-2 rounded-md text-[10px] font-bold uppercase tracking-wider text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 flex items-center gap-1.5"
+                className="h-7 px-2 rounded-lg text-[10px] font-bold uppercase tracking-wider text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 flex items-center gap-1.5"
               >
                 {inspect.loading ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} Refresh
               </button>
               <button
                 onClick={() => { if (inspect.data) navigator.clipboard.writeText(JSON.stringify(inspect.data, null, 2)).catch(() => {}); }}
-                className="ml-auto h-7 px-2 rounded-md text-[10px] font-bold uppercase tracking-wider text-zinc-400 hover:text-white hover:bg-white/5 flex items-center gap-1.5"
+                className="ml-auto h-7 px-2 rounded-lg text-[10px] font-bold uppercase tracking-wider text-zinc-400 hover:text-white hover:bg-white/5 flex items-center gap-1.5"
               >
                 <Copy size={11} /> Copy JSON
               </button>
@@ -1340,7 +1340,7 @@ const FilterInput = ({ value, onChange, placeholder }: { value: string; onChange
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
-      className="h-7 pl-7 pr-2 text-[10px] bg-black/40 border border-white/10 rounded-md text-zinc-200 placeholder:text-zinc-600 focus:border-primary/50 outline-none w-44"
+      className="h-7 pl-7 pr-2 text-[10px] bg-black/40 border border-white/10 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:border-primary/50 outline-none w-44"
     />
   </div>
 );
@@ -1351,7 +1351,7 @@ const CountPill = ({ active, onClick, tone, count, children }: { active: boolean
     : tone === "primary" ? (active ? "bg-primary/15 text-primary border-primary/30" : "bg-white/[0.04] text-zinc-400 border-white/10")
     : (active ? "bg-zinc-500/20 text-zinc-200 border-zinc-500/30" : "bg-white/[0.04] text-zinc-400 border-white/10");
   return (
-    <button onClick={onClick} className={`h-9 sm:h-7 px-3 sm:px-2 rounded-md text-[10.5px] font-bold uppercase tracking-wider transition-all border flex items-center gap-1.5 ${baseTone} hover:brightness-110`}>
+    <button onClick={onClick} className={`h-9 sm:h-7 px-3 sm:px-2 rounded-lg text-[10.5px] font-bold uppercase tracking-wider transition-all border flex items-center gap-1.5 ${baseTone} hover:brightness-110`}>
       <span>{children}</span>
       <span className="text-[9.5px] opacity-70">{count}</span>
     </button>
@@ -1369,7 +1369,7 @@ const ActionBtn = ({ onClick, disabled, title, tone, children }: { onClick: () =
     // lines on a 360 px viewport. Desktop shrinks to h-7 since pointer
     // accuracy is finer than a thumb tip.
     <button onClick={onClick} disabled={disabled} title={title}
-      className={`h-8 w-8 sm:h-7 sm:w-7 rounded-md border bg-white/[0.04] flex items-center justify-center transition-all disabled:opacity-40 disabled:cursor-not-allowed ${cls}`}>
+      className={`h-8 w-8 sm:h-7 sm:w-7 rounded-lg border bg-white/[0.04] flex items-center justify-center transition-all disabled:opacity-40 disabled:cursor-not-allowed ${cls}`}>
       {children}
     </button>
   );
@@ -1382,7 +1382,7 @@ const ProjectActionBtn = ({ busy, onClick, tone, children }: { busy: boolean; on
     : "text-zinc-300 bg-white/[0.04] border-white/10 hover:bg-white/[0.08]";
   return (
     <button disabled={busy} onClick={onClick}
-      className={`h-9 sm:h-7 px-3 sm:px-2.5 rounded-md text-[10.5px] font-bold uppercase tracking-wider border flex items-center gap-1.5 disabled:opacity-40 ${cls}`}>
+      className={`h-9 sm:h-7 px-3 sm:px-2.5 rounded-lg text-[10.5px] font-bold uppercase tracking-wider border flex items-center gap-1.5 disabled:opacity-40 ${cls}`}>
       {busy && <Loader2 size={11} className="animate-spin" />}
       {children}
     </button>
@@ -1434,7 +1434,7 @@ const ErrorBanner = ({ err, onRetry }: { err: string; onRetry?: () => void }) =>
       {onRetry && (
         <button
           onClick={onRetry}
-          className="shrink-0 h-6 px-2 rounded-md text-[10px] font-bold uppercase tracking-wider text-red-200 bg-red-500/10 border border-red-500/30 hover:bg-red-500/20 flex items-center gap-1"
+          className="shrink-0 h-6 px-2 rounded text-[10px] font-bold uppercase tracking-wider text-red-200 bg-red-500/10 border border-red-500/30 hover:bg-red-500/20 flex items-center gap-1"
         >
           <RefreshCw size={10} /> Retry
         </button>
@@ -1461,7 +1461,7 @@ const ModalShell = ({ title, onClose, actions, children }: { title: string; onCl
           {/* h-9 w-9 = 36 px touch target on phone, vs the old icon
               which was a 14 px icon with no padding zone — easy to miss
               with a thumb. */}
-          <button aria-label="Close" onClick={onClose} className="h-9 w-9 sm:h-7 sm:w-7 flex items-center justify-center rounded-md text-zinc-500 hover:text-white hover:bg-white/5">
+          <button aria-label="Close" onClick={onClose} className="h-9 w-9 sm:h-7 sm:w-7 flex items-center justify-center rounded-lg text-zinc-500 hover:text-white hover:bg-white/5">
             <X size={16} />
           </button>
         </div>

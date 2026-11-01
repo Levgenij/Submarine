@@ -23,7 +23,7 @@ export function QuickChoiceRow<T extends string>({ choices, current, onPick, hin
               role="radio"
               aria-checked={current === p.value}
               onClick={() => onPick(p.value)}
-              className={`h-8 px-1 rounded-md text-[11px] font-semibold truncate transition-colors ${current === p.value ? "bg-primary/20 text-primary" : "text-zinc-400 hover:text-zinc-200"}`}
+              className={`h-8 px-1 rounded text-[11px] font-semibold truncate transition-colors ${current === p.value ? "bg-primary/20 text-primary" : "text-zinc-400 hover:text-zinc-200"}`}
             >
               {p.label}
             </button>

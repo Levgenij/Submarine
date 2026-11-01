@@ -433,7 +433,7 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
             onPointerDown={(e) => beginDrag(e, s.id)}
             onClick={(e) => e.stopPropagation()}
             title={onMoveServer ? "Drag to reorder, or onto a folder" : "Drag to reorder"}
-            className="shrink-0 -ml-1.5 -mr-1 p-1 rounded-md text-zinc-600 hover:text-zinc-300 cursor-grab active:cursor-grabbing opacity-100 sm:opacity-0 sm:group-hover:opacity-100 [@media(hover:none)]:!opacity-100 transition-opacity"
+            className="shrink-0 -ml-1.5 -mr-1 p-1 rounded text-zinc-600 hover:text-zinc-300 cursor-grab active:cursor-grabbing opacity-100 sm:opacity-0 sm:group-hover:opacity-100 [@media(hover:none)]:!opacity-100 transition-opacity"
             style={{ touchAction: 'none' }}
           >
             <GripVertical size={14} />
@@ -532,7 +532,7 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
             onPointerDown={(e) => beginFolderDrag(e, f.id)}
             onClick={(e) => e.stopPropagation()}
             title="Drag into another folder"
-            className="shrink-0 -ml-1.5 -mr-1 p-1 rounded-md text-zinc-600 hover:text-zinc-300 cursor-grab active:cursor-grabbing opacity-100 sm:opacity-0 sm:group-hover:opacity-100 [@media(hover:none)]:!opacity-100 transition-opacity"
+            className="shrink-0 -ml-1.5 -mr-1 p-1 rounded text-zinc-600 hover:text-zinc-300 cursor-grab active:cursor-grabbing opacity-100 sm:opacity-0 sm:group-hover:opacity-100 [@media(hover:none)]:!opacity-100 transition-opacity"
             style={{ touchAction: 'none' }}
           >
             <GripVertical size={14} />
@@ -593,7 +593,7 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
           </div>
         ) : (
           <div className="relative flex items-center shrink-0">
-            <span className="text-[10px] bg-black/60 text-zinc-400 px-1.5 py-0.5 rounded-md font-mono group-hover:opacity-0 group-has-[:focus-visible]:opacity-0 transition-opacity">{serverCount}</span>
+            <span className="text-[10px] bg-black/60 text-zinc-400 px-1.5 py-0.5 rounded font-mono group-hover:opacity-0 group-has-[:focus-visible]:opacity-0 transition-opacity">{serverCount}</span>
             <div className="absolute right-0 flex items-center gap-0.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-has-[:focus-visible]:opacity-100 [@media(hover:none)]:!opacity-100 transition-all bg-gradient-to-l from-[#16161b] via-[#16161b] to-transparent pl-6">
               <button
                 onClick={(e) => { e.stopPropagation(); setRenaming({ id: f.id, draft: f.name || "" }); }}
@@ -656,7 +656,7 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
           </span>
           <button
             onClick={reviewKey}
-            className="shrink-0 px-2.5 h-7 rounded text-[10.5px] font-bold uppercase tracking-wider bg-amber-400/10 border border-amber-400/30 text-amber-200 hover:bg-amber-400/20"
+            className="shrink-0 px-2.5 h-7 rounded-lg text-[10.5px] font-bold uppercase tracking-wider bg-amber-400/10 border border-amber-400/30 text-amber-200 hover:bg-amber-400/20"
           >
             Review
           </button>
@@ -673,7 +673,7 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
           </span>
           <button
             onClick={() => setReviewOpen(true)}
-            className="shrink-0 px-2.5 h-7 rounded text-[10.5px] font-bold uppercase tracking-wider bg-amber-400/10 border border-amber-400/30 text-amber-200 hover:bg-amber-400/20"
+            className="shrink-0 px-2.5 h-7 rounded-lg text-[10.5px] font-bold uppercase tracking-wider bg-amber-400/10 border border-amber-400/30 text-amber-200 hover:bg-amber-400/20"
           >
             Review
           </button>
@@ -691,7 +691,7 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
           </span>
           <button
             onClick={() => setDeletionsOpen(true)}
-            className="shrink-0 px-2.5 h-7 rounded text-[10.5px] font-bold uppercase tracking-wider bg-amber-400/10 border border-amber-400/30 text-amber-200 hover:bg-amber-400/20"
+            className="shrink-0 px-2.5 h-7 rounded-lg text-[10.5px] font-bold uppercase tracking-wider bg-amber-400/10 border border-amber-400/30 text-amber-200 hover:bg-amber-400/20"
           >
             Review
           </button>
@@ -710,7 +710,7 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
               aria-label="Back"
               title="Up one level"
               onClick={() => setActiveFolderId(tree.parentOf(activeFolderId))}
-              className="w-8 h-8 bg-black rounded-xl border border-white/5 flex items-center justify-center hover:bg-white/10 hover:text-white text-zinc-500 transition-all shadow-inner shrink-0"
+              className="w-8 h-8 bg-black rounded-lg border border-white/5 flex items-center justify-center hover:bg-white/10 hover:text-white text-zinc-500 transition-all shadow-inner shrink-0"
             >
               <ChevronLeft size={16} />
             </button>
@@ -734,7 +734,7 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
                       <button
                         data-drop-folder={target}
                         onClick={() => setActiveFolderId(step.id === "root" ? null : step.id)}
-                        className={`px-1.5 py-0.5 rounded-md truncate max-w-[12rem] transition-colors ${
+                        className={`px-1.5 py-0.5 rounded truncate max-w-[12rem] transition-colors ${
                           hot ? 'bg-primary/20 text-primary ring-2 ring-primary/60' : 'text-zinc-400 hover:text-white hover:bg-white/5'
                         } ${dragging ? 'ring-1 ring-white/10' : ''}`}
                       >
@@ -770,9 +770,9 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
           <div className="h-full flex items-center justify-center">
             <button
               onClick={onAddClick}
-              className="flex flex-col items-center gap-4 p-12 rounded-3xl border-2 border-dashed border-zinc-800 hover:border-primary/40 hover:bg-primary/5 transition-all group"
+              className="flex flex-col items-center gap-4 p-12 rounded-xl border-2 border-dashed border-zinc-800 hover:border-primary/40 hover:bg-primary/5 transition-all group"
             >
-              <div className="w-14 h-14 bg-primary/10 rounded-2xl flex items-center justify-center text-primary shadow-[0_0_15px_rgba(var(--primary),0.1)] transition-transform">
+              <div className="w-14 h-14 bg-primary/10 rounded-xl flex items-center justify-center text-primary shadow-[0_0_15px_rgba(var(--primary),0.1)] transition-transform">
                 <Plus size={28} />
               </div>
               <div className="text-center">

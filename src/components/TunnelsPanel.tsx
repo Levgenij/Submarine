@@ -317,7 +317,7 @@ const TunnelsPanel = ({ sessionId, serverId, disabled = false }: TunnelsPanelPro
     const targetText = live && running ? live.target : rule?.remote ?? live?.target ?? "";
     const iconButton = "p-0.5 rounded hover:bg-white/10 text-zinc-400 shrink-0 disabled:opacity-40";
     return (
-      <div key={key} className={`rounded border ${stateTone} p-2 font-mono text-[11px]`}>
+      <div key={key} className={`rounded-lg border ${stateTone} p-2 font-mono text-[11px]`}>
         <div className="flex items-center gap-2 min-w-0">
           <KindIcon size={12} className="shrink-0" />
           {isRenaming ? (
@@ -422,7 +422,7 @@ const TunnelsPanel = ({ sessionId, serverId, disabled = false }: TunnelsPanelPro
     <div className="flex-1 flex flex-col h-full bg-[#09090b] overflow-hidden relative">
       {disabled && (
         <div className="absolute inset-0 z-30 bg-black/55 backdrop-blur-[1px] flex items-center justify-center text-zinc-300 text-xs font-mono uppercase">
-          <span className="px-3 py-1.5 bg-red-500/15 border border-red-500/30 rounded text-red-300">
+          <span className="px-3 py-1.5 bg-red-500/15 border border-red-500/30 rounded-lg text-red-300">
             Session disconnected
           </span>
         </div>
@@ -454,13 +454,13 @@ const TunnelsPanel = ({ sessionId, serverId, disabled = false }: TunnelsPanelPro
             maxLength={NAME_MAX}
             placeholder="Name (optional)"
             aria-label="Forward name"
-            className="w-full h-7 px-2 bg-white/[0.04] border border-white/10 rounded text-[11px] text-zinc-200"
+            className="w-full h-7 px-2 bg-white/[0.04] border border-white/10 rounded-lg text-[11px] text-zinc-200"
           />
           <div className="flex items-center gap-2">
             <select
               value={draft.type}
               onChange={(e) => setDraft({ ...draft, type: e.target.value as "D" | "L" | "R" })}
-              className="h-7 px-1.5 bg-white/[0.04] border border-white/10 rounded text-[11px] text-primary font-bold uppercase shrink-0"
+              className="h-7 px-1.5 bg-white/[0.04] border border-white/10 rounded-lg text-[11px] text-primary font-bold uppercase shrink-0"
             >
               <option value="D" className="bg-[#1a1a1e]">Dynamic</option>
               <option value="L" className="bg-[#1a1a1e]">Local</option>
@@ -474,7 +474,7 @@ const TunnelsPanel = ({ sessionId, serverId, disabled = false }: TunnelsPanelPro
                 draft.type === "L" ? "Local addr (8080 or 0.0.0.0:8080)" :
                                       "Server bind (8080 or 0.0.0.0:8080)"
               }
-              className="flex-1 min-w-0 h-7 px-2 bg-white/[0.04] border border-white/10 rounded text-[11px] font-mono text-zinc-200"
+              className="flex-1 min-w-0 h-7 px-2 bg-white/[0.04] border border-white/10 rounded-lg text-[11px] font-mono text-zinc-200"
             />
           </div>
           {draft.type !== "D" && (
@@ -484,7 +484,7 @@ const TunnelsPanel = ({ sessionId, serverId, disabled = false }: TunnelsPanelPro
                 value={draft.remote}
                 onChange={(e) => setDraft({ ...draft, remote: e.target.value })}
                 placeholder={draft.type === "L" ? "Target host:port (eg intranet:80)" : "Local target host:port"}
-                className="flex-1 min-w-0 h-7 px-2 bg-white/[0.04] border border-white/10 rounded text-[11px] font-mono text-zinc-200"
+                className="flex-1 min-w-0 h-7 px-2 bg-white/[0.04] border border-white/10 rounded-lg text-[11px] font-mono text-zinc-200"
               />
             </div>
           )}
@@ -497,7 +497,7 @@ const TunnelsPanel = ({ sessionId, serverId, disabled = false }: TunnelsPanelPro
             <button
               onClick={addTunnel}
               disabled={busy}
-              className="h-7 px-3 rounded text-[10px] font-bold uppercase tracking-wider bg-primary/15 text-primary border border-primary/30 hover:bg-primary/25 disabled:opacity-50 shrink-0"
+              className="h-7 px-3 rounded-lg text-[10px] font-bold uppercase tracking-wider bg-primary/15 text-primary border border-primary/30 hover:bg-primary/25 disabled:opacity-50 shrink-0"
             >
               {busy ? "…" : "Start"}
             </button>

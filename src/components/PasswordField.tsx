@@ -41,7 +41,7 @@ const PasswordField = ({
         onClick={() => setShow((s) => !s)}
         tabIndex={-1}
         title={show ? "Hide password" : "Show password"}
-        className="absolute right-1.5 top-1/2 -translate-y-1/2 w-7 h-7 rounded-md text-zinc-400 hover:text-zinc-100 hover:bg-white/5 flex items-center justify-center"
+        className="absolute right-1.5 top-1/2 -translate-y-1/2 w-7 h-7 rounded-lg text-zinc-400 hover:text-zinc-100 hover:bg-white/5 flex items-center justify-center"
       >
         {show ? <EyeOff size={14} /> : <Eye size={14} />}
       </button>

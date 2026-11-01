@@ -74,13 +74,13 @@ const S: Record<string, CSSProperties> = {
   lede: { color: "#9fb2c7", fontSize: 14.5, lineHeight: 1.6, margin: "0 0 20px", maxWidth: "58ch" },
   row: { display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 20 },
   btn: {
-    fontSize: 13, fontWeight: 600, padding: "9px 16px", borderRadius: 10, cursor: "pointer",
+    fontSize: 13, fontWeight: 600, padding: "9px 16px", borderRadius: 8, cursor: "pointer",
     background: "rgba(255,255,255,.05)", color: "#e7eef6", border: "1px solid rgba(255,255,255,.12)",
   },
   btnPrimary: { background: "#3b82f6", borderColor: "#3b82f6", color: "#fff" },
   pre: {
     fontFamily: "ui-monospace, 'Cascadia Code', monospace", fontSize: 11.5, lineHeight: 1.5,
     color: "#7f97ad", background: "rgba(255,255,255,.03)", border: "1px solid rgba(255,255,255,.08)",
-    borderRadius: 10, padding: 14, overflow: "auto", maxHeight: 260, whiteSpace: "pre-wrap", margin: 0,
+    borderRadius: 8, padding: 14, overflow: "auto", maxHeight: 260, whiteSpace: "pre-wrap", margin: 0,
   },
 };

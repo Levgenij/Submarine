@@ -15,7 +15,7 @@ export const Sidebar = ({ activeTab, setActiveTab, isMobile, onLogout, profileNa
   const profileRail = (
     <button
       onClick={() => setActiveTab('profile')}
-      className={`p-2.5 rounded-xl transition-all duration-300 relative flex items-center justify-center ${
+      className={`p-2.5 rounded-lg transition-all duration-300 relative flex items-center justify-center ${
         activeTab === 'profile'
           ? 'text-primary bg-primary/10 shadow-[0_0_20px_rgba(var(--primary),0.15)]'
           : 'text-zinc-500 hover:text-zinc-200 hover:bg-white/5'
@@ -62,7 +62,7 @@ export const Sidebar = ({ activeTab, setActiveTab, isMobile, onLogout, profileNa
             <button
               key={item.id}
               onClick={() => setActiveTab(item.id)}
-              className={`p-2.5 rounded-xl transition-all duration-300 relative group flex items-center justify-center ${
+              className={`p-2.5 rounded-lg transition-all duration-300 relative group flex items-center justify-center ${
                 activeTab === item.id
                   ? 'text-primary bg-primary/10 shadow-[0_0_20px_rgba(var(--primary),0.15)]'
                   : 'text-zinc-500 hover:text-zinc-200 hover:bg-white/5'
@@ -84,7 +84,7 @@ export const Sidebar = ({ activeTab, setActiveTab, isMobile, onLogout, profileNa
           {onLogout && (
             <button
               onClick={onLogout}
-              className="p-2.5 rounded-xl transition-all flex items-center justify-center text-zinc-300 hover:text-amber-300 hover:bg-amber-500/10"
+              className="p-2.5 rounded-lg transition-all flex items-center justify-center text-zinc-300 hover:text-amber-300 hover:bg-amber-500/10"
               title="Lock & switch profile"
             >
               <LogOut size={20} />
@@ -92,7 +92,7 @@ export const Sidebar = ({ activeTab, setActiveTab, isMobile, onLogout, profileNa
           )}
           <button
             onClick={() => setActiveTab('settings')}
-            className={`p-2.5 rounded-xl transition-all flex items-center justify-center ${
+            className={`p-2.5 rounded-lg transition-all flex items-center justify-center ${
               activeTab === 'settings'
                 ? 'text-primary bg-primary/10 shadow-[0_0_20px_rgba(var(--primary),0.15)]'
                 : 'text-zinc-500 hover:text-zinc-200 hover:bg-white/5'
@@ -121,7 +121,7 @@ export const Sidebar = ({ activeTab, setActiveTab, isMobile, onLogout, profileNa
           <button
             key={item.id}
             onClick={() => setActiveTab(item.id)}
-            className={`p-2.5 rounded-xl transition-all duration-300 relative group flex items-center justify-center ${
+            className={`p-2.5 rounded-lg transition-all duration-300 relative group flex items-center justify-center ${
               activeTab === item.id
                 ? 'text-primary bg-primary/10 shadow-[0_0_20px_rgba(var(--primary),0.15)]'
                 : 'text-zinc-500 hover:text-zinc-200 hover:bg-white/5'
@@ -142,7 +142,7 @@ export const Sidebar = ({ activeTab, setActiveTab, isMobile, onLogout, profileNa
         {onLogout && (
           <button
             onClick={onLogout}
-            className="p-2.5 rounded-xl transition-all flex items-center justify-center text-zinc-300 hover:text-amber-300 hover:bg-amber-500/10"
+            className="p-2.5 rounded-lg transition-all flex items-center justify-center text-zinc-300 hover:text-amber-300 hover:bg-amber-500/10"
             title="Lock & switch profile"
           >
             <LogOut size={20} />
@@ -150,7 +150,7 @@ export const Sidebar = ({ activeTab, setActiveTab, isMobile, onLogout, profileNa
         )}
         <button
           onClick={() => setActiveTab('settings')}
-          className={`p-2.5 rounded-xl transition-all flex items-center justify-center ${
+          className={`p-2.5 rounded-lg transition-all flex items-center justify-center ${
             activeTab === 'settings'
               ? 'text-primary bg-primary/10 shadow-[0_0_20px_rgba(var(--primary),0.15)]'
               : 'text-zinc-500 hover:text-zinc-200 hover:bg-white/5'

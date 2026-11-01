@@ -330,14 +330,14 @@ const CloudPanel = ({ isOpen, onClose, onLocalProfilesChanged }: Props) => {
 
         <div className="flex-1 overflow-y-auto custom-scrollbar p-5 space-y-3">
           {error && (
-            <div className="px-3 py-2 bg-rose-500/15 border border-rose-500/30 rounded text-rose-200 text-[12px] flex items-start gap-2">
+            <div className="px-3 py-2 bg-rose-500/15 border border-rose-500/30 rounded-lg text-rose-200 text-[12px] flex items-start gap-2">
               <AlertTriangle size={13} className="mt-0.5 shrink-0" />
               <span className="flex-1 break-words whitespace-pre-line">{error}</span>
               <button aria-label="Dismiss" onClick={() => setError(null)} className="text-rose-300/70 hover:text-white mt-0.5"><X size={12} /></button>
             </div>
           )}
           {info && !error && (
-            <div className="px-3 py-2 bg-emerald-500/10 border border-emerald-500/20 rounded text-emerald-100 text-[12px] flex items-center gap-2">
+            <div className="px-3 py-2 bg-emerald-500/10 border border-emerald-500/20 rounded-lg text-emerald-100 text-[12px] flex items-center gap-2">
               <CheckCircle2 size={13} /> <span className="flex-1 break-words">{info}</span>
               <button aria-label="Dismiss" onClick={() => setInfo(null)} className="text-emerald-200/70 hover:text-white"><X size={12} /></button>
             </div>
@@ -403,13 +403,13 @@ const CloudPanel = ({ isOpen, onClose, onLocalProfilesChanged }: Props) => {
               <div className="flex items-center gap-2 pt-1">
                 <button
                   onClick={() => { setError(null); setInfo(null); setPassword(""); setStage("link-email"); }}
-                  className="flex-1 h-9 rounded text-[11.5px] text-zinc-300 hover:text-primary hover:bg-white/5 border border-white/10 flex items-center justify-center gap-1.5"
+                  className="flex-1 h-9 rounded-lg text-[11.5px] text-zinc-300 hover:text-primary hover:bg-white/5 border border-white/10 flex items-center justify-center gap-1.5"
                 >
                   <Wand2 size={12} /> Email me a sign-in link
                 </button>
                 <button
                   onClick={() => { setError(null); setInfo(null); setPassword(""); setStage("forgot-email"); }}
-                  className="flex-1 h-9 rounded text-[11.5px] text-zinc-300 hover:text-primary hover:bg-white/5 border border-white/10"
+                  className="flex-1 h-9 rounded-lg text-[11.5px] text-zinc-300 hover:text-primary hover:bg-white/5 border border-white/10"
                 >
                   Forgot password?
                 </button>
@@ -674,7 +674,7 @@ const CloudPanel = ({ isOpen, onClose, onLocalProfilesChanged }: Props) => {
                 <button
                   onClick={handleLogout}
                   disabled={busy}
-                  className="h-8 px-3 rounded text-[11.5px] font-bold uppercase tracking-wider bg-white/5 border border-white/10 text-zinc-300 hover:text-rose-300 hover:bg-rose-500/10 flex items-center gap-1.5 disabled:opacity-50"
+                  className="h-8 px-3 rounded-lg text-[11.5px] font-bold uppercase tracking-wider bg-white/5 border border-white/10 text-zinc-300 hover:text-rose-300 hover:bg-rose-500/10 flex items-center gap-1.5 disabled:opacity-50"
                 >
                   <LogOut size={11} /> Sign out
                 </button>
@@ -713,14 +713,14 @@ const CloudPanel = ({ isOpen, onClose, onLocalProfilesChanged }: Props) => {
                       <button
                         onClick={() => { setConfirmDelete(false); setDeletePw(""); setError(null); }}
                         disabled={busy}
-                        className="h-8 px-3 rounded text-[11.5px] font-bold uppercase tracking-wider bg-white/5 border border-white/10 text-zinc-300 hover:bg-white/10 disabled:opacity-50"
+                        className="h-8 px-3 rounded-lg text-[11.5px] font-bold uppercase tracking-wider bg-white/5 border border-white/10 text-zinc-300 hover:bg-white/10 disabled:opacity-50"
                       >
                         Cancel
                       </button>
                       <button
                         onClick={handleDeleteAccount}
                         disabled={busy || !deletePw}
-                        className="h-8 px-3 rounded text-[11.5px] font-bold uppercase tracking-wider bg-rose-500 text-white hover:bg-rose-400 disabled:opacity-40 flex items-center gap-1.5"
+                        className="h-8 px-3 rounded-lg text-[11.5px] font-bold uppercase tracking-wider bg-rose-500 text-white hover:bg-rose-400 disabled:opacity-40 flex items-center gap-1.5"
                       >
                         <Trash2 size={11} /> {busy ? "Deleting…" : "Delete account"}
                       </button>

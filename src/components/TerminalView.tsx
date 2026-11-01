@@ -1532,7 +1532,7 @@ const TerminalView = ({
             onMouseDown={(e) => e.preventDefault()}
             onClick={typeSavedPassword}
             title="Type this server's saved password. You press Enter."
-            className="pointer-events-auto flex items-center gap-1.5 rounded-md bg-zinc-800 border border-white/10 px-2 py-1 shadow-lg text-[11px] text-zinc-200 hover:text-white hover:border-primary/40"
+            className="pointer-events-auto flex items-center gap-1.5 rounded-lg bg-zinc-800 border border-white/10 px-2 py-1 shadow-lg text-[11px] text-zinc-200 hover:text-white hover:border-primary/40"
           >
             <KeyRound size={12} className="text-primary shrink-0" />
             <span className="whitespace-nowrap">Saved password</span>
@@ -1540,7 +1540,7 @@ const TerminalView = ({
           {passwordError && (
             <div
               onMouseDown={(e) => e.preventDefault()}
-              className="pointer-events-auto rounded-md bg-zinc-900 border border-white/10 px-2 py-1.5 text-[11px] text-zinc-300 shadow-lg leading-snug"
+              className="pointer-events-auto rounded-lg bg-zinc-900 border border-white/10 px-2 py-1.5 text-[11px] text-zinc-300 shadow-lg leading-snug"
             >
               {passwordError}
             </div>
@@ -1552,7 +1552,7 @@ const TerminalView = ({
           top-2 right-2 keeps it clear of the disconnected badge (which
           centers) and the clipboard toast (bottom-right). */}
       {showSearch && (
-        <div className="absolute top-2 right-2 z-20 flex items-center gap-1 rounded-md bg-zinc-800 border border-white/10 px-1.5 py-1 shadow-lg">
+        <div className="absolute top-2 right-2 z-20 flex items-center gap-1 rounded-lg bg-zinc-800 border border-white/10 px-1.5 py-1 shadow-lg">
           <input
             ref={searchInputRef}
             autoFocus

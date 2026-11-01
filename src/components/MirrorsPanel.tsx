@@ -302,7 +302,7 @@ const MirrorsPanel = ({ sessionId, serverId = 0, configuredMirrors, disabled = f
     <div className="flex-1 flex flex-col h-full bg-[#09090b] overflow-hidden relative">
       {disabled && (
         <div className="absolute inset-0 z-30 bg-black/55 backdrop-blur-[1px] flex items-center justify-center text-zinc-300 text-xs font-mono uppercase">
-          <span className="px-3 py-1.5 bg-red-500/15 border border-red-500/30 rounded text-red-300">
+          <span className="px-3 py-1.5 bg-red-500/15 border border-red-500/30 rounded-lg text-red-300">
             Session disconnected
           </span>
         </div>
@@ -335,7 +335,7 @@ const MirrorsPanel = ({ sessionId, serverId = 0, configuredMirrors, disabled = f
             {!IS_ANDROID && (
               <button
                 onClick={pickLocal}
-                className="h-7 px-2 rounded bg-white/[0.04] border border-white/10 hover:bg-white/10 text-zinc-300 text-[11px] flex items-center gap-1.5 shrink-0"
+                className="h-7 px-2 rounded-lg bg-white/[0.04] border border-white/10 hover:bg-white/10 text-zinc-300 text-[11px] flex items-center gap-1.5 shrink-0"
                 title="Pick a local directory"
               >
                 <FolderOpen size={12} /> Browse
@@ -347,7 +347,7 @@ const MirrorsPanel = ({ sessionId, serverId = 0, configuredMirrors, disabled = f
               placeholder={IS_ANDROID
                 ? "/storage/emulated/0/… (type path)"
                 : "/local/path (or browse)"}
-              className="flex-1 min-w-0 h-7 px-2 bg-white/[0.04] border border-white/10 rounded text-[11px] font-mono text-zinc-200"
+              className="flex-1 min-w-0 h-7 px-2 bg-white/[0.04] border border-white/10 rounded-lg text-[11px] font-mono text-zinc-200"
             />
           </div>
           <div className="flex items-center gap-2">
@@ -356,7 +356,7 @@ const MirrorsPanel = ({ sessionId, serverId = 0, configuredMirrors, disabled = f
               value={draft.remote}
               onChange={(e) => setDraft({ ...draft, remote: e.target.value })}
               placeholder="/remote/path on server"
-              className="flex-1 min-w-0 h-7 px-2 bg-white/[0.04] border border-white/10 rounded text-[11px] font-mono text-zinc-200"
+              className="flex-1 min-w-0 h-7 px-2 bg-white/[0.04] border border-white/10 rounded-lg text-[11px] font-mono text-zinc-200"
             />
           </div>
           <textarea
@@ -364,14 +364,14 @@ const MirrorsPanel = ({ sessionId, serverId = 0, configuredMirrors, disabled = f
             onChange={(e) => setExcludesText(e.target.value)}
             placeholder="Excludes (one per line) — substring or *.ext"
             rows={2}
-            className="w-full p-2 bg-white/[0.04] border border-white/10 rounded text-[10.5px] font-mono text-zinc-300 placeholder-zinc-600 resize-none focus:outline-none focus:border-primary/40"
+            className="w-full p-2 bg-white/[0.04] border border-white/10 rounded-lg text-[10.5px] font-mono text-zinc-300 placeholder-zinc-600 resize-none focus:outline-none focus:border-primary/40"
           />
           <div className="flex items-center gap-2 text-[10.5px] text-zinc-400">
             <span className="shrink-0 uppercase tracking-wider font-bold text-zinc-500 text-[9.5px]">On conflict</span>
             <select
               value={draft.conflict_resolution}
               onChange={(e) => setDraft({ ...draft, conflict_resolution: e.target.value as ConflictMode })}
-              className="h-7 px-2 bg-white/[0.04] border border-white/10 rounded text-[11px] text-zinc-200 outline-none focus:border-primary/40"
+              className="h-7 px-2 bg-white/[0.04] border border-white/10 rounded-lg text-[11px] text-zinc-200 outline-none focus:border-primary/40"
               title="Decides which side wins when a file exists on both sides with different content. Missing-on-one-side files always copy across regardless."
             >
               <option value="local">Local wins (overwrite remote)</option>
@@ -392,7 +392,7 @@ const MirrorsPanel = ({ sessionId, serverId = 0, configuredMirrors, disabled = f
             <button
               onClick={submitDraft}
               disabled={working}
-              className="h-7 px-3 rounded text-[10px] font-bold uppercase tracking-wider bg-primary/15 text-primary border border-primary/30 hover:bg-primary/25 disabled:opacity-50"
+              className="h-7 px-3 rounded-lg text-[10px] font-bold uppercase tracking-wider bg-primary/15 text-primary border border-primary/30 hover:bg-primary/25 disabled:opacity-50"
             >
               {working ? "…" : "Continue"}
             </button>
@@ -437,7 +437,7 @@ const MirrorsPanel = ({ sessionId, serverId = 0, configuredMirrors, disabled = f
               over re-engineering the reconciliation flow, so this is the
               single point of consent for the data-loss window. */}
           {pending.report.entries.length > 0 && (
-            <div className={`flex items-start gap-2 text-[10.5px] px-2.5 py-1.5 rounded border ${
+            <div className={`flex items-start gap-2 text-[10.5px] px-2.5 py-1.5 rounded-lg border ${
               downloadModified > 0
                 ? "bg-amber-500/10 border-amber-500/30 text-amber-200"
                 : "bg-sky-500/5 border-sky-500/20 text-sky-200"
@@ -459,7 +459,7 @@ const MirrorsPanel = ({ sessionId, serverId = 0, configuredMirrors, disabled = f
             </div>
           )}
 
-          <div className="text-[11px] text-zinc-300 bg-black/40 border border-white/5 rounded p-2 max-h-40 overflow-auto custom-scrollbar font-mono">
+          <div className="text-[11px] text-zinc-300 bg-black/40 border border-white/5 rounded-lg p-2 max-h-40 overflow-auto custom-scrollbar font-mono">
             {pending.report.entries.length === 0 ? (
               <div className="text-zinc-500 italic">Already in sync — nothing to move in either direction.</div>
             ) : (
@@ -490,14 +490,14 @@ const MirrorsPanel = ({ sessionId, serverId = 0, configuredMirrors, disabled = f
             <div className="flex gap-2">
               <button
                 onClick={() => setPending(null)}
-                className="h-7 px-3 rounded text-[10px] font-bold uppercase tracking-wider bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/10"
+                className="h-7 px-3 rounded-lg text-[10px] font-bold uppercase tracking-wider bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/10"
               >
                 Cancel
               </button>
               <button
                 onClick={confirmStart}
                 disabled={working}
-                className="h-7 px-3 rounded text-[10px] font-bold uppercase tracking-wider bg-primary text-black border border-primary disabled:opacity-50 flex items-center gap-1.5"
+                className="h-7 px-3 rounded-lg text-[10px] font-bold uppercase tracking-wider bg-primary text-black border border-primary disabled:opacity-50 flex items-center gap-1.5"
               >
                 <Check size={11} /> Start mirror
               </button>
@@ -519,7 +519,7 @@ const MirrorsPanel = ({ sessionId, serverId = 0, configuredMirrors, disabled = f
           const liveId = runningByPair[key];
           const live = liveId ? statuses[liveId] : null;
           return (
-            <div key={`saved-${i}`} className="rounded border border-white/5 bg-white/[0.02] p-2 font-mono text-[11px]">
+            <div key={`saved-${i}`} className="rounded-lg border border-white/5 bg-white/[0.02] p-2 font-mono text-[11px]">
               <div className="flex items-center gap-2">
                 <FolderUp size={12} className="text-primary shrink-0" />
                 <span className="text-zinc-300 truncate flex-1">{m.local}</span>
@@ -555,7 +555,7 @@ const MirrorsPanel = ({ sessionId, serverId = 0, configuredMirrors, disabled = f
         {Object.values(statuses)
           .filter((s) => !allSavedMirrors.some((m) => m.local === s.local && m.remote === s.remote))
           .map((live) => (
-            <div key={live.id} className="rounded border border-white/5 bg-white/[0.02] p-2 font-mono text-[11px]">
+            <div key={live.id} className="rounded-lg border border-white/5 bg-white/[0.02] p-2 font-mono text-[11px]">
               <div className="flex items-center gap-2">
                 <FolderUp size={12} className="text-primary shrink-0" />
                 <span className="text-zinc-300 truncate flex-1">{live.local}</span>

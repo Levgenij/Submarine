@@ -2,6 +2,19 @@
 export default {
   content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
   theme: {
+    // The whole radius scale; a class outside it renders square. By size, so
+    // that like controls match and a corner nested in another stays concentric
+    // (inner = outer minus the padding between them):
+    //   rounded       small things under 28px: tags, tiny buttons, menu rows, segments in a track
+    //   rounded-lg    controls and blocks: buttons, inputs, tabs, menus, inline notes
+    //   rounded-xl    surfaces: cards, dialogs, popovers
+    //   rounded-full  what is meant to be round: dots, switches, count badges, progress bars
+    borderRadius: {
+      DEFAULT: "0.25rem",
+      lg: "0.5rem",
+      xl: "0.75rem",
+      full: "9999px",
+    },
     extend: {
       colors: {
         background: "var(--background)",

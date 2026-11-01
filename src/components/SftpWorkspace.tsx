@@ -320,7 +320,7 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
 
   const rootByLogin = !elevation.elevated && loginUser === "root";
   const rootBadgeClass =
-    "h-6 px-2 flex items-center gap-1 rounded-md text-[10px] font-black uppercase tracking-wider bg-rose-500/20 text-rose-200 border border-rose-500/50";
+    "h-6 px-2 flex items-center gap-1 rounded text-[10px] font-black uppercase tracking-wider bg-rose-500/20 text-rose-200 border border-rose-500/50";
   const elevationControl = (
     <div className="flex items-center gap-1.5 shrink-0 min-w-0">
       {elevation.elevated ? (
@@ -341,7 +341,7 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
           onClick={toggleElevation}
           disabled={elevBusy || disabled}
           title="Run file operations as root (sudo)"
-          className="h-6 px-2 flex items-center gap-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-white/[0.04] text-zinc-300 border border-white/10 hover:bg-white/10 hover:text-white disabled:opacity-40"
+          className="h-6 px-2 flex items-center gap-1 rounded text-[10px] font-bold uppercase tracking-wider bg-white/[0.04] text-zinc-300 border border-white/10 hover:bg-white/10 hover:text-white disabled:opacity-40"
         >
           <Shield size={11} /> {elevBusy ? "…" : "sudo"}
         </button>
@@ -605,7 +605,7 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
             aria-pressed={compareOn}
             aria-label="Compare"
             title={compareOn ? "Stop comparing" : "Compare: mark what differs between the two folders"}
-            className={`self-center shrink-0 h-7 rounded-md border text-[12.5px] font-semibold flex items-center justify-center transition-colors ${
+            className={`self-center shrink-0 h-7 rounded-lg border text-[12.5px] font-semibold flex items-center justify-center transition-colors ${
               showSubLabels ? "px-2.5 gap-1.5" : "w-7"
             } ${
               compareOn
@@ -639,7 +639,7 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
                     setLayoutPersisted("tabs");
                     setActiveSidePersisted(id);
                   }}
-                  className={`h-7 rounded-md border text-[12.5px] font-semibold transition-colors flex items-center justify-center ${
+                  className={`h-7 rounded border text-[12.5px] font-semibold transition-colors flex items-center justify-center ${
                     showSubLabels ? "px-3 gap-1.5" : "w-7"
                   } ${
                     on
@@ -665,10 +665,10 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
         {compareOn && (
           <div className="shrink-0 flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1.5 border-b border-white/5 bg-black/20 text-[10.5px] text-zinc-400">
             <span className="text-zinc-500">Each folder against the other, by name, size and time:</span>
-            <span className="flex items-center gap-1"><span className="w-1 h-3 rounded-sm bg-amber-400" /> only here</span>
-            <span className="flex items-center gap-1"><span className="w-1 h-3 rounded-sm bg-rose-400" /> another size or kind</span>
-            <span className="flex items-center gap-1"><span className="w-1 h-3 rounded-sm bg-emerald-400" /> newer</span>
-            <span className="flex items-center gap-1"><span className="w-1 h-3 rounded-sm bg-zinc-500" /> older</span>
+            <span className="flex items-center gap-1"><span className="w-1 h-3 rounded bg-amber-400" /> only here</span>
+            <span className="flex items-center gap-1"><span className="w-1 h-3 rounded bg-rose-400" /> another size or kind</span>
+            <span className="flex items-center gap-1"><span className="w-1 h-3 rounded bg-emerald-400" /> newer</span>
+            <span className="flex items-center gap-1"><span className="w-1 h-3 rounded bg-zinc-500" /> older</span>
             <label className="ml-auto flex items-center gap-1.5 cursor-pointer select-none">
               <input
                 type="checkbox"

@@ -445,14 +445,14 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
               <button
                 onClick={openImportModal}
                 title="Import from ~/.ssh/config"
-                className="h-8 px-2.5 flex items-center gap-1.5 text-[11px] font-bold text-primary bg-primary/10 border border-primary/30 hover:bg-primary/20 rounded-xl transition-all"
+                className="h-8 px-2.5 flex items-center gap-1.5 text-[11px] font-bold text-primary bg-primary/10 border border-primary/30 hover:bg-primary/20 rounded-lg transition-all"
               >
                 <Download size={12} />
                 <span className="hidden sm:inline">Import from ~/.ssh/config</span>
                 <span className="sm:hidden">Import</span>
               </button>
             )}
-            <button aria-label="Close" onClick={onClose} className="w-8 h-8 flex items-center justify-center text-zinc-500 hover:text-white bg-black border border-white/5 hover:bg-white/10 rounded-xl transition-all shadow-inner">
+            <button aria-label="Close" onClick={onClose} className="w-8 h-8 flex items-center justify-center text-zinc-500 hover:text-white bg-black border border-white/5 hover:bg-white/10 rounded-lg transition-all shadow-inner">
               <X size={16} />
             </button>
           </div>
@@ -460,7 +460,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
 
         {/* Scrollable Content */}
         <div className="p-6 flex-1 overflow-y-auto custom-scrollbar space-y-6">
-          {formError && <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-500 text-[12px] font-bold">{formError}</div>}
+          {formError && <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-500 text-[12px] font-bold">{formError}</div>}
 
           <div className="grid grid-cols-1 gap-4">
             {/* SSH, RDP, telnet or VNC. An RDP server opens in this computer's
@@ -688,7 +688,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                         onClick={generateKey}
                         disabled={keyBrowseBusy || generatingKey}
                         title="Make a new SSH key and use it for this server"
-                        className="h-6 px-2 flex items-center gap-1 text-[10px] font-bold text-primary bg-primary/10 border border-primary/30 hover:bg-primary/20 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-all"
+                        className="h-6 px-2 flex items-center gap-1 text-[10px] font-bold text-primary bg-primary/10 border border-primary/30 hover:bg-primary/20 disabled:opacity-40 disabled:cursor-not-allowed rounded transition-all"
                       >
                         <Plus size={10} />
                         Generate
@@ -697,7 +697,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                         type="button"
                         onClick={browseForKey}
                         disabled={keyBrowseBusy || generatingKey}
-                        className="h-6 px-2 flex items-center gap-1 text-[10px] font-bold text-primary bg-primary/10 border border-primary/30 hover:bg-primary/20 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-all"
+                        className="h-6 px-2 flex items-center gap-1 text-[10px] font-bold text-primary bg-primary/10 border border-primary/30 hover:bg-primary/20 disabled:opacity-40 disabled:cursor-not-allowed rounded transition-all"
                       >
                         <Key size={10} />
                         {keyBrowseBusy ? "Loading…" : "Load from file"}
@@ -725,7 +725,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                       <button
                         type="button"
                         onClick={copyPublicKey}
-                        className="h-6 px-2 flex items-center gap-1 text-[10px] font-bold text-primary bg-primary/10 border border-primary/30 hover:bg-primary/20 rounded-lg transition-all"
+                        className="h-6 px-2 flex items-center gap-1 text-[10px] font-bold text-primary bg-primary/10 border border-primary/30 hover:bg-primary/20 rounded transition-all"
                       >
                         <Copy size={10} />
                         {publicKeyCopied ? "Copied" : "Copy public key"}
@@ -1029,7 +1029,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                   <div key={idx} className="p-2.5 bg-[#1a1a1e] rounded-lg border border-white/5 group space-y-1.5">
                     <div className="flex items-center gap-2">
                       <input
-                        className="flex-1 min-w-0 h-7 bg-black/40 rounded px-2 text-[11.5px] font-mono text-zinc-200 border border-white/10 outline-none focus:border-primary/50"
+                        className="flex-1 min-w-0 h-7 bg-black/40 rounded-lg px-2 text-[11.5px] font-mono text-zinc-200 border border-white/10 outline-none focus:border-primary/50"
                         placeholder="/local/path"
                         value={m.local}
                         onChange={(e) => {
@@ -1040,7 +1040,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                       />
                       <ArrowLeftRight size={10} className="text-zinc-700 shrink-0 mx-1" />
                       <input
-                        className="flex-1 min-w-0 h-7 bg-black/40 rounded px-2 text-[11.5px] font-mono text-zinc-200 border border-white/10 outline-none focus:border-primary/50"
+                        className="flex-1 min-w-0 h-7 bg-black/40 rounded-lg px-2 text-[11.5px] font-mono text-zinc-200 border border-white/10 outline-none focus:border-primary/50"
                         placeholder="/remote/path"
                         value={m.remote}
                         onChange={(e) => {

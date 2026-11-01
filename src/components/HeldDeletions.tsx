@@ -91,14 +91,14 @@ export function HeldDeletions({ items, onResolve, onClose }: {
           <button
             disabled={busy}
             onClick={() => decide(false)}
-            className="px-3 h-8 rounded text-[11px] font-bold uppercase tracking-wider bg-primary/15 border border-primary/40 text-primary hover:bg-primary/25 disabled:opacity-50"
+            className="px-3 h-8 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-primary/15 border border-primary/40 text-primary hover:bg-primary/25 disabled:opacity-50"
           >
             Keep them
           </button>
           <button
             disabled={busy}
             onClick={() => decide(true)}
-            className="px-3 h-8 rounded text-[11px] font-bold uppercase tracking-wider bg-rose-500/10 border border-rose-500/40 text-rose-300 hover:bg-rose-500/20 disabled:opacity-50"
+            className="px-3 h-8 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-rose-500/10 border border-rose-500/40 text-rose-300 hover:bg-rose-500/20 disabled:opacity-50"
           >
             Delete here too
           </button>

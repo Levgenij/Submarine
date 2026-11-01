@@ -111,7 +111,7 @@ export function HeldReview({ servers, onAllow, onClose }: {
                   <button
                     disabled={busy}
                     onClick={() => allow(s.id, [])}
-                    className="shrink-0 px-2.5 h-7 rounded text-[10.5px] font-bold uppercase tracking-wider bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/[0.08] hover:text-white disabled:opacity-50"
+                    className="shrink-0 px-2.5 h-7 rounded-lg text-[10.5px] font-bold uppercase tracking-wider bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/[0.08] hover:text-white disabled:opacity-50"
                   >
                     Allow all
                   </button>
@@ -126,7 +126,7 @@ export function HeldReview({ servers, onAllow, onClose }: {
                         <div className="text-[12px] text-zinc-200 break-words">{d.what}</div>
                         {d.detail && (
                           item === "run_on_connect" || item.startsWith("metric:") ? (
-                            <pre className="mt-1 max-h-32 overflow-auto custom-scrollbar rounded bg-black/40 border border-white/5 px-2 py-1 text-[11px] text-amber-200/90 whitespace-pre-wrap break-all">{d.detail}</pre>
+                            <pre className="mt-1 max-h-32 overflow-auto custom-scrollbar rounded-lg bg-black/40 border border-white/5 px-2 py-1 text-[11px] text-amber-200/90 whitespace-pre-wrap break-all">{d.detail}</pre>
                           ) : (
                             <div className="mt-0.5 text-[11px] text-zinc-500">{d.detail}</div>
                           )
@@ -136,7 +136,7 @@ export function HeldReview({ servers, onAllow, onClose }: {
                         disabled={busy}
                         onClick={() => allow(s.id, [item])}
                         aria-label={`Allow: ${d.what}`}
-                        className="shrink-0 px-2.5 h-7 rounded text-[10.5px] font-bold uppercase tracking-wider bg-primary/15 border border-primary/40 text-primary hover:bg-primary/25 disabled:opacity-50"
+                        className="shrink-0 px-2.5 h-7 rounded-lg text-[10.5px] font-bold uppercase tracking-wider bg-primary/15 border border-primary/40 text-primary hover:bg-primary/25 disabled:opacity-50"
                       >
                         Allow
                       </button>
@@ -151,7 +151,7 @@ export function HeldReview({ servers, onAllow, onClose }: {
           <button
             onClick={onClose}
             data-default-focus
-            className="px-3 h-8 rounded text-[11px] font-bold uppercase tracking-wider bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/[0.08] hover:text-white"
+            className="px-3 h-8 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/[0.08] hover:text-white"
           >
             Close
           </button>

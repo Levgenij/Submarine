@@ -440,7 +440,7 @@ export default function ProfilePanel({ onSync, syncing, lastSyncLabel, autoSync,
                     <button
                       key={m}
                       onClick={() => onSetInterval(m)}
-                      className={`h-7 px-2.5 rounded-md text-[11.5px] font-medium transition-colors ${
+                      className={`h-7 px-2.5 rounded-lg text-[11.5px] font-medium transition-colors ${
                         syncIntervalMin === m
                           ? "bg-primary text-black"
                           : "bg-zinc-900/60 text-zinc-400 hover:text-zinc-200 border border-white/5"
@@ -583,13 +583,13 @@ export default function ProfilePanel({ onSync, syncing, lastSyncLabel, autoSync,
                   <div className="flex bg-black/30 border border-white/10 rounded-lg p-0.5">
                     <button
                       onClick={() => setRole("editor")}
-                      className={`h-8 px-2.5 rounded-md text-[11px] font-bold flex items-center gap-1 ${role === "editor" ? "bg-sky-500/20 text-sky-200" : "text-zinc-400"}`}
+                      className={`h-8 px-2.5 rounded text-[11px] font-bold flex items-center gap-1 ${role === "editor" ? "bg-sky-500/20 text-sky-200" : "text-zinc-400"}`}
                     >
                       <Pencil size={10} /> Editor
                     </button>
                     <button
                       onClick={() => setRole("user")}
-                      className={`h-8 px-2.5 rounded-md text-[11px] font-bold flex items-center gap-1 ${role === "user" ? "bg-white/10 text-zinc-100" : "text-zinc-400"}`}
+                      className={`h-8 px-2.5 rounded text-[11px] font-bold flex items-center gap-1 ${role === "user" ? "bg-white/10 text-zinc-100" : "text-zinc-400"}`}
                     >
                       <Eye size={10} /> Viewer
                     </button>
@@ -672,7 +672,7 @@ export default function ProfilePanel({ onSync, syncing, lastSyncLabel, autoSync,
                 <button
                   onClick={replaceKey}
                   disabled={busy}
-                  className="h-7 px-2.5 rounded bg-amber-400/10 border border-amber-400/30 text-amber-200 hover:bg-amber-400/20 text-[11px] font-bold disabled:opacity-40 flex items-center gap-1.5"
+                  className="h-7 px-2.5 rounded-lg bg-amber-400/10 border border-amber-400/30 text-amber-200 hover:bg-amber-400/20 text-[11px] font-bold disabled:opacity-40 flex items-center gap-1.5"
                 >
                   {busy ? <Loader2 size={11} className="animate-spin" /> : <KeyRound size={11} />} Replace the key
                 </button>

@@ -360,21 +360,21 @@ export const ConfirmProvider = ({ children }: { children: React.ReactNode }) => 
             </p>
             <div className="grid grid-cols-2 gap-2">
               <button onClick={() => closeOverwrite("overwrite")} data-default-focus
-                      className="h-9 rounded text-[11px] font-bold uppercase tracking-wider bg-primary/15 border border-primary/40 text-primary hover:bg-primary/25">
+                      className="h-9 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-primary/15 border border-primary/40 text-primary hover:bg-primary/25">
                 Overwrite
               </button>
               <button onClick={() => closeOverwrite("skip")}
-                      className="h-9 rounded text-[11px] font-bold uppercase tracking-wider bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/[0.08] hover:text-white">
+                      className="h-9 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/[0.08] hover:text-white">
                 Skip
               </button>
               {owState.opts.batchSize > 1 && (
                 <>
                   <button onClick={() => closeOverwrite("overwrite-all")}
-                          className="h-9 rounded text-[11px] font-bold uppercase tracking-wider bg-primary/10 border border-primary/30 text-primary hover:bg-primary/20">
+                          className="h-9 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-primary/10 border border-primary/30 text-primary hover:bg-primary/20">
                     Overwrite all
                   </button>
                   <button onClick={() => closeOverwrite("skip-all")}
-                          className="h-9 rounded text-[11px] font-bold uppercase tracking-wider bg-white/[0.03] border border-white/10 text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200">
+                          className="h-9 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-white/[0.03] border border-white/10 text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200">
                     Skip all
                   </button>
                 </>
@@ -382,7 +382,7 @@ export const ConfirmProvider = ({ children }: { children: React.ReactNode }) => 
             </div>
             <div className="mt-3 flex justify-end">
               <button onClick={() => closeOverwrite("cancel")}
-                      className="px-3 h-7 rounded text-[10px] font-bold uppercase tracking-wider bg-rose-500/10 border border-rose-500/30 text-rose-300 hover:bg-rose-500/20">
+                      className="px-3 h-7 rounded-lg text-[10px] font-bold uppercase tracking-wider bg-rose-500/10 border border-rose-500/30 text-rose-300 hover:bg-rose-500/20">
                 Cancel batch
               </button>
             </div>
@@ -417,12 +417,12 @@ export const ConfirmProvider = ({ children }: { children: React.ReactNode }) => 
             <div className="flex justify-end gap-2">
               <button onClick={() => close(false)}
                       data-default-focus={state.opts.safeDefault ? true : undefined}
-                      className="px-3 h-8 rounded text-[11px] font-bold uppercase tracking-wider bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/[0.08] hover:text-white">
+                      className="px-3 h-8 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/[0.08] hover:text-white">
                 {state.opts.cancelLabel || "Cancel"}
               </button>
               <button onClick={() => close(true)} ref={confirmOkRef}
                       data-default-focus={state.opts.safeDefault ? undefined : true}
-                      className={`px-3 h-8 rounded text-[11px] font-bold uppercase tracking-wider border ${
+                      className={`px-3 h-8 rounded-lg text-[11px] font-bold uppercase tracking-wider border ${
                         state.opts.destructive
                           ? "bg-rose-500/15 border-rose-500/40 text-rose-300 hover:bg-rose-500/25"
                           : "bg-primary/15 border-primary/40 text-primary hover:bg-primary/25"
@@ -471,11 +471,11 @@ export const ConfirmProvider = ({ children }: { children: React.ReactNode }) => 
             )}
             <div className="flex justify-end gap-2 mt-2">
               <button onClick={() => closeTextPrompt(null)}
-                      className="px-3 h-8 rounded text-[11px] font-bold uppercase tracking-wider bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/[0.08] hover:text-white">
+                      className="px-3 h-8 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/[0.08] hover:text-white">
                 {tpState.opts.cancelLabel || "Cancel"}
               </button>
               <button onClick={submitTextPrompt}
-                      className="px-3 h-8 rounded text-[11px] font-bold uppercase tracking-wider bg-primary/15 border border-primary/40 text-primary hover:bg-primary/25">
+                      className="px-3 h-8 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-primary/15 border border-primary/40 text-primary hover:bg-primary/25">
                 {tpState.opts.okLabel || "OK"}
               </button>
             </div>

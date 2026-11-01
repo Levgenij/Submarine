@@ -77,7 +77,7 @@ const QuickConnectModal = ({ isOpen, onClose, onConnect }: Props) => {
 
         <div className="flex-1 overflow-y-auto custom-scrollbar p-5 space-y-3">
           {err && (
-            <div className="px-3 py-2 bg-rose-500/15 border border-rose-500/30 rounded text-rose-200 text-[11.5px] font-mono flex items-center gap-2">
+            <div className="px-3 py-2 bg-rose-500/15 border border-rose-500/30 rounded-lg text-rose-200 text-[11.5px] font-mono flex items-center gap-2">
               <AlertTriangle size={12} /> {err}
             </div>
           )}

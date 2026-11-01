@@ -79,7 +79,7 @@ function DesktopApp() {
   const [isUnlocked, setIsUnlocked] = useState(false);
   // Multi-exec broadcast state lives in a shared provider (see App.tsx) so
   // TerminalView instances across every tab can read `enabled` + `targets`
-  // without prop-drilling. The pill in the tab strip is the toggle + picker.
+  // without prop-drilling. The button in the tab strip is the toggle + picker.
   const broadcast = useBroadcast();
   const [broadcastMenuOpen, setBroadcastMenuOpen] = useState(false);
   // `activeProfile` is the name the user picked + unlocked. Stays null
@@ -1124,7 +1124,7 @@ function DesktopApp() {
 
       {/* Mobile session picker — replaces the horizontal tab strip on
           narrow viewports so a phone doesn't spend its whole title row
-          on 3-character truncated tabs. A single pill shows the current
+          on 3-character truncated tabs. A single button shows the current
           session (or a "Servers" placeholder when nothing is open); tap
           opens a dropdown listing every session with status + close +
           merge affordances. Desktop still gets the full scrolling tab
@@ -1135,7 +1135,7 @@ function DesktopApp() {
             <button
               type="button"
               onClick={() => setMobileSessionPickerOpen(v => !v)}
-              className={`w-full h-7 px-3 rounded-full flex items-center gap-2 border transition-all ${
+              className={`w-full h-7 px-3 rounded-lg flex items-center gap-2 border transition-all ${
                 activeView.startsWith('session-') || activeView === 'wall'
                   ? 'bg-primary/15 text-primary border-primary/40 shadow-inner'
                   : 'bg-white/[0.06] text-zinc-300 border-white/10'
@@ -1376,9 +1376,9 @@ function DesktopApp() {
               // more scrolling — they never hide the name behind an ellipsis.
               // `whitespace-nowrap` keeps long names on a single line; without
               // it a tab with a 30-char hostname would wrap into a two-line
-              // pill and break the row's height.
+              // tab and break the row's height.
               title={`${s.customName ? `${s.customName} (${s.serverName})` : s.serverName}${isMergedTab ? ' · split beside current view (Ctrl-click to unpair)' : ''}`}
-              className={`group no-drag flex items-center h-7 px-2.5 sm:px-4 rounded-full cursor-pointer transition-all shrink-0 mr-1 ${
+              className={`group no-drag flex items-center h-7 pl-2.5 sm:pl-3 pr-1 rounded-lg cursor-pointer transition-all shrink-0 mr-1 ${
                 activeView === s.id
                   ? 'bg-primary/15 text-primary border border-primary/40 shadow-inner shadow-primary/10'
                   : isMergedTab
@@ -1405,7 +1405,7 @@ function DesktopApp() {
                   combination gave the smallest, hardest-to-read name in the
                   whole title bar even though it's the ID users need most.
                   Bumping to 12 px and dropping the uppercase transform gives
-                  the same tab pill roughly 30% more legible characters per
+                  the same tab roughly 30% more legible characters per
                   pixel (uppercase is wider per glyph) without changing the
                   strip height, which stays h-7. */}
               {/* Keyboard opens the tab the same way a click does. A span, not a
@@ -1431,7 +1431,7 @@ function DesktopApp() {
               <button
                 type="button"
                 aria-label="Session actions"
-                className="sm:hidden ml-1 h-5 w-5 flex items-center justify-center rounded hover:bg-white/5 shrink-0 text-zinc-400"
+                className="sm:hidden ml-1 h-5 w-5 flex items-center justify-center rounded hover:bg-white/10 shrink-0 text-zinc-400"
                 onClick={(e) => {
                   e.stopPropagation();
                   const rect = e.currentTarget.getBoundingClientRect();
@@ -1441,13 +1441,13 @@ function DesktopApp() {
                 <MoreVertical size={13} />
               </button>
               {/* Desktop-only inline close. Hidden until hover (or keyboard
-                  focus) so the tab reads clean at rest; sizing (w-5 h-5,
-                  12 px icon) matches the terminal-tab close inside
-                  SessionView so both tab strips look like siblings. */}
+                  focus) so the tab reads clean at rest; its space stays reserved so
+                  the tab doesn't change width. Inset 4 px like the terminal-tab close
+                  in SessionView, so the corners nest in both strips. */}
               <button
                 type="button"
                 aria-label="Close session"
-                className="hidden sm:flex ml-1 h-5 w-5 items-center justify-center rounded hover:bg-white/5 shrink-0 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-zinc-400 hover:text-red-400 transition-opacity"
+                className="hidden sm:flex ml-1 h-5 w-5 items-center justify-center rounded hover:bg-white/10 shrink-0 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-zinc-400 hover:text-red-400 transition-opacity"
                 onClick={async (e) => {
                   e.stopPropagation();
                   // Only confirm when there's an actual live connection to
@@ -1480,7 +1480,7 @@ function DesktopApp() {
         })}
       </div>
       {/* Wall trigger — moved OUT of the scrollable tab strip and next
-          to the Broadcast pill so both multi-session affordances live
+          to the Broadcast button so both multi-session affordances live
           in the same "utility cluster" at the right edge of the title
           bar. Icon-only on every viewport (mobile inherits from
           Broadcast's compact pattern), badge for pin count so state is
@@ -1503,7 +1503,7 @@ function DesktopApp() {
               ? `Wall · ${wallItems.length} pinned terminal${wallItems.length === 1 ? '' : 's'}`
               : "Wall — pinboard for terminals across servers"}
             aria-label="Wall pinboard"
-            className={`relative flex items-center justify-center w-7 h-7 rounded-full transition-all ${
+            className={`relative flex items-center justify-center w-7 h-7 rounded-lg transition-all ${
               activeView === "wall"
                 ? "bg-primary/15 border border-primary/40 text-primary shadow-inner shadow-primary/10"
                 : "bg-white/[0.06] border border-white/10 text-zinc-400 hover:bg-white/[0.1] hover:text-white"
@@ -1538,7 +1538,7 @@ function DesktopApp() {
               ? `Broadcasting to ${broadcast.targetSessionIds.size} session${broadcast.targetSessionIds.size === 1 ? "" : "s"}`
               : "Broadcast input to multiple sessions"}
             aria-label="Broadcast input"
-            className={`relative flex items-center justify-center w-7 h-7 rounded-full transition-all ${
+            className={`relative flex items-center justify-center w-7 h-7 rounded-lg transition-all ${
               broadcast.enabled
                 ? "bg-orange-500/15 border border-orange-400/40 text-orange-300 shadow-inner shadow-orange-400/10"
                 : "bg-white/[0.06] border border-white/10 text-zinc-400 hover:bg-white/[0.1] hover:text-white"
@@ -1560,7 +1560,7 @@ function DesktopApp() {
                 className="fixed inset-0 z-[60]"
                 onClick={() => setBroadcastMenuOpen(false)}
               />
-              <div className="absolute z-[70] top-full mt-1 right-0 w-[280px] bg-[#15151a] border border-white/10 rounded-lg shadow-2xl p-2 text-[11px]">
+              <div className="absolute z-[70] top-full mt-1 right-0 w-[280px] bg-[#15151a] border border-white/10 rounded-xl shadow-2xl p-2 text-[11px]">
                 <div className="flex items-center justify-between mb-2 px-1">
                   <label className="flex items-center gap-2 cursor-pointer select-none">
                     <input
@@ -1683,7 +1683,7 @@ function DesktopApp() {
         <>
           <div className="fixed inset-0 z-[60]" onClick={() => setTabMenu(null)} onContextMenu={(e) => { e.preventDefault(); setTabMenu(null); }} />
           <div
-            className="fixed z-[70] bg-[#15151a] border border-white/10 rounded-md shadow-2xl py-1 min-w-[240px] text-[11px] no-drag"
+            className="fixed z-[70] bg-[#15151a] border border-white/10 rounded-lg shadow-2xl py-1 min-w-[240px] text-[11px] no-drag"
             style={{ left: Math.min(tabMenu.x, window.innerWidth - 260), top: Math.min(tabMenu.y, window.innerHeight - 380) }}
           >
             {target && (tabMenu.renaming ? (
@@ -1953,14 +1953,14 @@ function DesktopApp() {
                     <button
                       onClick={() => { setEditCredData({ id: null, name: "", auth_type: "password", username: "", password: "", key_id: null }); setIsCredPanelOpen(true); }}
                       title="Add Password"
-                      className="h-9 px-2.5 sm:px-4 bg-zinc-900 text-zinc-200 text-[12px] sm:text-[13px] font-bold rounded-xl border border-white/5 hover:bg-zinc-800 transition-all flex items-center gap-1.5"
+                      className="h-9 px-2.5 sm:px-4 bg-zinc-900 text-zinc-200 text-[12px] sm:text-[13px] font-bold rounded-lg border border-white/5 hover:bg-zinc-800 transition-all flex items-center gap-1.5"
                     >
                       <Plus size={14} /> <span className="hidden sm:inline">Add Password</span><span className="sm:hidden">Password</span>
                     </button>
                     <button
                       onClick={() => { setEditKeyData({ id: null, name: "", public_key: "", private_key: "", passphrase: "" }); setIsKeyPanelOpen(true); }}
                       title="Add Key"
-                      className="h-9 px-2.5 sm:px-4 bg-zinc-900 text-zinc-200 text-[12px] sm:text-[13px] font-bold rounded-xl border border-white/5 hover:bg-zinc-800 transition-all flex items-center gap-1.5"
+                      className="h-9 px-2.5 sm:px-4 bg-zinc-900 text-zinc-200 text-[12px] sm:text-[13px] font-bold rounded-lg border border-white/5 hover:bg-zinc-800 transition-all flex items-center gap-1.5"
                     >
                       <Plus size={14} /> <span className="hidden sm:inline">Add Key</span><span className="sm:hidden">Key</span>
                     </button>
@@ -1978,7 +1978,7 @@ function DesktopApp() {
                         if (name) invoke("generate_ssh_key", { name }).then(() => refreshSshKeys());
                       }}
                       title="Generate Key"
-                      className="h-9 px-2.5 sm:px-4 bg-primary text-black text-[12px] sm:text-[13px] font-bold rounded-xl shadow-lg shadow-primary/20 flex items-center gap-1.5"
+                      className="h-9 px-2.5 sm:px-4 bg-primary text-black text-[12px] sm:text-[13px] font-bold rounded-lg shadow-lg shadow-primary/20 flex items-center gap-1.5"
                     >
                       <Key size={14} /> <span className="hidden sm:inline">Generate Key</span><span className="sm:hidden">Generate</span>
                     </button>
@@ -1992,7 +1992,7 @@ function DesktopApp() {
                     </h3>
                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2">
                       {credentials.length === 0 ? (
-                        <div className="col-span-full py-10 text-center text-zinc-600 text-[14px] italic border border-dashed border-white/5 rounded-2xl">Nothing here yet.</div>
+                        <div className="col-span-full py-10 text-center text-zinc-600 text-[14px] italic border border-dashed border-white/5 rounded-xl">Nothing here yet.</div>
                       ) : (
                         credentials.map(c => (
                           <div key={c.id} className="bg-[#16161a] border border-white/5 rounded-xl p-3 group relative hover:border-primary/30 transition-all">
@@ -2037,7 +2037,7 @@ function DesktopApp() {
                     </h3>
                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2">
                       {sshKeys.length === 0 ? (
-                        <div className="col-span-full py-10 text-center text-zinc-600 text-[14px] italic border border-dashed border-white/5 rounded-2xl">No keys saved yet.</div>
+                        <div className="col-span-full py-10 text-center text-zinc-600 text-[14px] italic border border-dashed border-white/5 rounded-xl">No keys saved yet.</div>
                       ) : (
                         sshKeys.map((k: any) => (
                           <div key={k.id} className="bg-[#16161a] border border-white/5 rounded-xl p-3 group relative hover:border-primary/30 transition-all">
@@ -2327,7 +2327,7 @@ function DesktopApp() {
                   <button
                     onClick={() => setWallPickerOpen(v => !v)}
                     title="Pick terminals to pin"
-                    className="px-3 py-1 bg-primary/15 hover:bg-primary/25 text-primary border border-primary/30 rounded-md text-[10px] font-bold uppercase tracking-wider flex items-center gap-1.5"
+                    className="px-3 py-1 bg-primary/15 hover:bg-primary/25 text-primary border border-primary/30 rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center gap-1.5"
                   >
                     <Plus size={11} /> Add
                   </button>
@@ -2335,7 +2335,7 @@ function DesktopApp() {
                     <button
                       onClick={() => setWallItems([])}
                       title="Unpin everything (terminals stay open in their sessions)"
-                      className="px-3 py-1 bg-white/[0.04] hover:bg-rose-500/15 hover:text-rose-300 border border-white/10 rounded-md text-[10px] font-bold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5"
+                      className="px-3 py-1 bg-white/[0.04] hover:bg-rose-500/15 hover:text-rose-300 border border-white/10 rounded-lg text-[10px] font-bold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5"
                     >
                       <X size={11} /> Clear
                     </button>
@@ -2375,7 +2375,7 @@ function DesktopApp() {
                         return (
                           <div
                             key={item.id}
-                            className="flex flex-col overflow-hidden border border-white/10 rounded-md bg-[#09090b] shadow-[0_2px_10px_rgba(0,0,0,0.4)] hover:border-primary/30 transition-colors"
+                            className="flex flex-col overflow-hidden border border-white/10 rounded-xl bg-[#09090b] shadow-[0_2px_10px_rgba(0,0,0,0.4)] hover:border-primary/30 transition-colors"
                           >
                             {/* Slim tile header — server + terminal
                                 title, quick-jump into the session,
@@ -2466,7 +2466,7 @@ function DesktopApp() {
                             const terms = sessionTerminals[s.id] ?? [];
                             const st = sessionStatuses[s.id] ?? 'connecting';
                             return (
-                              <div key={s.id} className="rounded bg-white/[0.02] border border-white/5">
+                              <div key={s.id} className="rounded-lg bg-white/[0.02] border border-white/5">
                                 <div className="flex items-center gap-2 px-2 py-1.5 border-b border-white/5">
                                   <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
                                     st === 'connected' ? 'bg-emerald-400' :
@@ -2582,25 +2582,25 @@ function DesktopApp() {
                             value={libraryQuery}
                             onChange={(e) => setLibraryQuery(e.target.value)}
                             placeholder="Search title or content…"
-                            className="h-9 pl-7 pr-3 w-44 sm:w-56 bg-black/40 border border-white/10 rounded-xl text-[12px] text-zinc-200 placeholder:text-zinc-600 outline-none focus:border-primary/40"
+                            className="h-9 pl-7 pr-3 w-44 sm:w-56 bg-black/40 border border-white/10 rounded-lg text-[12px] text-zinc-200 placeholder:text-zinc-600 outline-none focus:border-primary/40"
                           />
                         </div>
                         <button
                           onClick={openAdd}
                           title={addLabel}
-                          className="h-9 px-3 sm:px-4 bg-primary text-black text-[12px] sm:text-[13px] font-bold rounded-xl shadow-lg shadow-primary/20 flex items-center gap-1.5 transition-all hover:brightness-110 self-start sm:self-auto"
+                          className="h-9 px-3 sm:px-4 bg-primary text-black text-[12px] sm:text-[13px] font-bold rounded-lg shadow-lg shadow-primary/20 flex items-center gap-1.5 transition-all hover:brightness-110 self-start sm:self-auto"
                         >
                           <Plus size={14} /> {addLabel}
                         </button>
                       </div>
                     </div>
                     {/* Segmented control — Commands vs Notes. Counts sit
-                        inside each pill so switching contexts is a single
+                        inside each segment so switching contexts is a single
                         glance. */}
-                    <div className="flex items-center gap-1 self-start bg-black/30 border border-white/5 rounded-xl p-0.5">
+                    <div className="flex items-center gap-1 self-start bg-black/30 border border-white/5 rounded-lg p-0.5">
                       <button
                         onClick={() => setLibraryTab("commands")}
-                        className={`h-8 px-3 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-all flex items-center gap-1.5 ${
+                        className={`h-8 px-3 rounded text-[11px] font-bold uppercase tracking-wider transition-all flex items-center gap-1.5 ${
                           onCommandsTab
                             ? "bg-primary/15 text-primary shadow-inner"
                             : "text-zinc-400 hover:text-zinc-100"
@@ -2613,7 +2613,7 @@ function DesktopApp() {
                       </button>
                       <button
                         onClick={() => setLibraryTab("notes")}
-                        className={`h-8 px-3 rounded-lg text-[11px] font-bold uppercase tracking-wider transition-all flex items-center gap-1.5 ${
+                        className={`h-8 px-3 rounded text-[11px] font-bold uppercase tracking-wider transition-all flex items-center gap-1.5 ${
                           !onCommandsTab
                             ? "bg-primary/15 text-primary shadow-inner"
                             : "text-zinc-400 hover:text-zinc-100"
@@ -2630,14 +2630,14 @@ function DesktopApp() {
                   {onCommandsTab ? (
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 pb-10">
                       {filteredCommands.length === 0 ? (
-                        <div className="col-span-full py-12 text-center text-zinc-500 text-[14px] italic border border-dashed border-white/10 rounded-2xl">
+                        <div className="col-span-full py-12 text-center text-zinc-500 text-[14px] italic border border-dashed border-white/10 rounded-xl">
                           {q ? `No commands match "${libraryQuery}".` : "No commands yet."}
                         </div>
                       ) : (
                         filteredCommands.map(cmd => {
                           const scope = parseCommandScope(cmd.scope);
                           return (
-                          <div key={cmd.id} className={`bg-[#16161a] border border-white/5 rounded-2xl p-4 flex flex-col group relative overflow-hidden shadow-inner ${scope ? "min-h-[150px]" : "h-[150px]"}`}>
+                          <div key={cmd.id} className={`bg-[#16161a] border border-white/5 rounded-xl p-4 flex flex-col group relative overflow-hidden shadow-inner ${scope ? "min-h-[150px]" : "h-[150px]"}`}>
                             <div className="flex justify-between items-start mb-2">
                               <h3 className="text-[16px] font-bold text-primary tracking-tight truncate flex-1">{cmd.title}</h3>
                               <div className="flex items-center gap-2 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-has-[:focus-visible]:opacity-100 transition-opacity">
@@ -2649,7 +2649,7 @@ function DesktopApp() {
                                 }} className="text-zinc-500 hover:text-red-500 transition-colors"><Trash2 size={14} /></button>
                               </div>
                             </div>
-                            <div className="bg-black/30 rounded-xl p-3 border border-white/5 flex-1 relative group-hover:border-primary/20 transition-colors overflow-hidden min-h-0">
+                            <div className="bg-black/30 rounded-lg p-3 border border-white/5 flex-1 relative group-hover:border-primary/20 transition-colors overflow-hidden min-h-0">
                               <pre className="text-[12px] text-zinc-400 font-mono whitespace-pre-wrap leading-relaxed line-clamp-3">{cmd.content}</pre>
                             </div>
                             {scope && (
@@ -2666,12 +2666,12 @@ function DesktopApp() {
                   ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 pb-10">
                       {filteredNotes.length === 0 ? (
-                        <div className="col-span-full py-12 text-center text-zinc-500 text-[14px] italic border border-dashed border-white/10 rounded-2xl">
+                        <div className="col-span-full py-12 text-center text-zinc-500 text-[14px] italic border border-dashed border-white/10 rounded-xl">
                           {q ? `No notes match "${libraryQuery}".` : "No notes yet."}
                         </div>
                       ) : (
                         filteredNotes.map(n => (
-                          <div key={n.id} className="bg-[#16161a] border border-white/5 rounded-2xl p-4 flex flex-col group relative overflow-hidden shadow-inner h-[170px]">
+                          <div key={n.id} className="bg-[#16161a] border border-white/5 rounded-xl p-4 flex flex-col group relative overflow-hidden shadow-inner h-[170px]">
                             <div className="flex justify-between items-start mb-2 gap-2">
                               <h3 className="text-[15px] font-bold text-primary tracking-tight truncate flex-1">{n.title || "Untitled"}</h3>
                               <div className="flex items-center gap-2 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-has-[:focus-visible]:opacity-100 transition-opacity shrink-0">
@@ -2683,7 +2683,7 @@ function DesktopApp() {
                                 }} className="text-zinc-500 hover:text-red-500 transition-colors"><Trash2 size={14} /></button>
                               </div>
                             </div>
-                            <div className="bg-black/30 rounded-xl p-3 border border-white/5 flex-1 relative group-hover:border-primary/20 transition-colors overflow-hidden cursor-pointer"
+                            <div className="bg-black/30 rounded-lg p-3 border border-white/5 flex-1 relative group-hover:border-primary/20 transition-colors overflow-hidden cursor-pointer"
                                  onClick={() => { setEditNoteData({ id: n.id, title: n.title || "", body: n.body || "" }); setIsNotePanelOpen(true); }}>
                               <pre className="text-[12px] text-zinc-400 whitespace-pre-wrap leading-relaxed line-clamp-4 font-sans">{n.body}</pre>
                             </div>
@@ -2741,7 +2741,7 @@ function DesktopApp() {
                   <div className="flex items-center gap-2 self-end sm:self-auto">
                     <button
                       onClick={() => setActiveView("settings")}
-                      className="hidden sm:flex h-9 px-3 bg-white/[0.04] text-zinc-300 text-[12px] font-bold rounded-xl border border-white/5 hover:bg-white/10 hover:text-white transition-all items-center gap-1.5"
+                      className="hidden sm:flex h-9 px-3 bg-white/[0.04] text-zinc-300 text-[12px] font-bold rounded-lg border border-white/5 hover:bg-white/10 hover:text-white transition-all items-center gap-1.5"
                     >
                       <ChevronLeft size={14} /> Settings
                     </button>
@@ -2749,13 +2749,13 @@ function DesktopApp() {
                       const ok = await confirm({ title: "Clear activity log?", message: "All entries will be discarded.", destructive: true });
                       if (!ok) return;
                       setLogs([]);
-                    }} className="h-8 sm:h-9 px-2.5 sm:px-4 bg-zinc-900 text-zinc-200 text-[11px] sm:text-[13px] font-bold rounded-xl border border-white/5 hover:bg-red-500/20 hover:text-red-400 hover:border-primary/50 transition-all flex items-center gap-1.5">
+                    }} className="h-8 sm:h-9 px-2.5 sm:px-4 bg-zinc-900 text-zinc-200 text-[11px] sm:text-[13px] font-bold rounded-lg border border-white/5 hover:bg-red-500/20 hover:text-red-400 hover:border-primary/50 transition-all flex items-center gap-1.5">
                       <Trash2 size={13} /> Clear
                     </button>
                   </div>
                 </header>
 
-                <div className="flex-1 overflow-y-auto custom-scrollbar bg-black/50 rounded-xl sm:rounded-2xl border border-white/5 p-2 sm:p-4 space-y-0.5 sm:space-y-1 shadow-inner select-text cursor-text">
+                <div className="flex-1 overflow-y-auto custom-scrollbar bg-black/50 rounded-xl border border-white/5 p-2 sm:p-4 space-y-0.5 sm:space-y-1 shadow-inner select-text cursor-text">
                   {logs.length === 0 ? (
                     <div className="h-full flex items-center justify-center text-zinc-600 text-[12px] sm:text-[14px] font-mono italic">
                       Nothing yet.
@@ -2764,7 +2764,7 @@ function DesktopApp() {
                     [...logs].reverse().map((log) => (
                       <div
                         key={(log as any).id ?? `${log.time}-${log.msg}`}
-                        className="flex flex-col sm:flex-row sm:items-start sm:gap-3 text-[10px] sm:text-[12px] font-mono group hover:bg-white/5 p-1 rounded-md transition-colors"
+                        className="flex flex-col sm:flex-row sm:items-start sm:gap-3 text-[10px] sm:text-[12px] font-mono group hover:bg-white/5 p-1 rounded transition-colors"
                       >
                         <div className="flex items-baseline gap-2 sm:gap-3 sm:shrink-0">
                           <span className="text-zinc-600 sm:w-20 shrink-0">{log.time}</span>
@@ -2962,12 +2962,12 @@ function DesktopApp() {
               <TerminalSquare size={18} className="text-primary" />
               {editCommandData.id ? "Edit command" : "New command"}
             </h2>
-            <button aria-label="Close" onClick={() => { setIsCommandPanelOpen(false); setFormError(""); }} className="w-7 h-7 flex items-center justify-center text-zinc-500 hover:text-white bg-black border border-white/5 hover:bg-white/10 rounded-full transition-all">
+            <button aria-label="Close" onClick={() => { setIsCommandPanelOpen(false); setFormError(""); }} className="w-7 h-7 flex items-center justify-center text-zinc-500 hover:text-white bg-black border border-white/5 hover:bg-white/10 rounded-lg transition-all">
               <X size={16} />
             </button>
           </div>
           <div className="p-6 flex-1 overflow-y-auto space-y-6">
-            {formError && <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-500 text-[12px] font-bold">{formError}</div>}
+            {formError && <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-500 text-[12px] font-bold">{formError}</div>}
             <div className="space-y-1.5">
               <label className="text-[12px] font-bold text-zinc-400 ml-1">Title</label>
               <input type="text" className="w-full h-10 bg-black rounded-lg px-3 text-[13px] text-white border border-white/10 outline-none focus:border-primary/50 focus:bg-zinc-900/50 transition-all shadow-inner" placeholder="e.g. Update packages" value={editCommandData.title} onChange={e => setEditCommandData({ ...editCommandData, title: e.target.value })} />
@@ -3029,12 +3029,12 @@ function DesktopApp() {
               <StickyNote size={18} className="text-primary" />
               {editNoteData.id ? "Edit note" : "New note"}
             </h2>
-            <button aria-label="Close" onClick={() => { setIsNotePanelOpen(false); setFormError(""); }} className="w-7 h-7 flex items-center justify-center text-zinc-500 hover:text-white bg-black border border-white/5 hover:bg-white/10 rounded-full transition-all">
+            <button aria-label="Close" onClick={() => { setIsNotePanelOpen(false); setFormError(""); }} className="w-7 h-7 flex items-center justify-center text-zinc-500 hover:text-white bg-black border border-white/5 hover:bg-white/10 rounded-lg transition-all">
               <X size={16} />
             </button>
           </div>
           <div className="p-6 flex-1 overflow-y-auto space-y-6 flex flex-col">
-            {formError && <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-500 text-[12px] font-bold">{formError}</div>}
+            {formError && <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-500 text-[12px] font-bold">{formError}</div>}
             <div className="space-y-1.5">
               <label className="text-[12px] font-bold text-zinc-400 ml-1">Title</label>
               <input type="text" className="w-full h-10 bg-black rounded-lg px-3 text-[13px] text-white border border-white/10 outline-none focus:border-primary/50 focus:bg-zinc-900/50 transition-all shadow-inner" placeholder="e.g. Production credentials reminder" value={editNoteData.title} onChange={e => setEditNoteData({ ...editNoteData, title: e.target.value })} />
@@ -3080,12 +3080,12 @@ function DesktopApp() {
               <Shield size={18} className="text-primary" />
               {editCredData.id ? "Edit login" : "New login"}
             </h2>
-            <button aria-label="Close" onClick={() => { setIsCredPanelOpen(false); setFormError(""); }} className="w-7 h-7 flex items-center justify-center text-zinc-500 hover:text-white bg-black border border-white/5 hover:bg-white/10 rounded-full transition-all">
+            <button aria-label="Close" onClick={() => { setIsCredPanelOpen(false); setFormError(""); }} className="w-7 h-7 flex items-center justify-center text-zinc-500 hover:text-white bg-black border border-white/5 hover:bg-white/10 rounded-lg transition-all">
               <X size={16} />
             </button>
           </div>
           <div className="p-6 flex-1 overflow-y-auto space-y-6">
-            {formError && <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-500 text-[12px] font-bold">{formError}</div>}
+            {formError && <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-500 text-[12px] font-bold">{formError}</div>}
             <div className="space-y-1.5">
               <label className="text-[12px] font-bold text-zinc-400 ml-1">Name</label>
               <input type="text" className="w-full h-10 bg-black rounded-lg px-3 text-[13px] text-white border border-white/10 outline-none focus:border-primary/50 focus:bg-zinc-900/50 transition-all shadow-inner" placeholder="e.g. Work server" value={editCredData.name} onChange={e => setEditCredData({ ...editCredData, name: e.target.value })} />
@@ -3183,12 +3183,12 @@ function DesktopApp() {
               <Key size={18} className="text-primary" />
               {editKeyData.id ? "Edit SSH key" : "New SSH key"}
             </h2>
-            <button aria-label="Close" onClick={() => { setIsKeyPanelOpen(false); setFormError(""); }} className="w-7 h-7 flex items-center justify-center text-zinc-500 hover:text-white bg-black border border-white/5 hover:bg-white/10 rounded-full transition-all">
+            <button aria-label="Close" onClick={() => { setIsKeyPanelOpen(false); setFormError(""); }} className="w-7 h-7 flex items-center justify-center text-zinc-500 hover:text-white bg-black border border-white/5 hover:bg-white/10 rounded-lg transition-all">
               <X size={16} />
             </button>
           </div>
           <div className="p-6 flex-1 overflow-y-auto space-y-6">
-            {formError && <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-500 text-[12px] font-bold">{formError}</div>}
+            {formError && <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-500 text-[12px] font-bold">{formError}</div>}
             {/* Reading the key out of ~/.ssh beats making the user cat it in a
                 terminal and paste two multi-line blobs. Fields are filled in
                 rather than saved outright — the name is a guess from the

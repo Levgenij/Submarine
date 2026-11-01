@@ -71,7 +71,7 @@ export function MobileKeyBar({ modifiers, onToggleModifier, onSpecialKey }: Mobi
         onTouchStart={(e) => e.preventDefault()}
         aria-pressed={s !== "off"}
         title={s === "locked" ? `${label} locked — tap to release` : s === "armed" ? `${label} armed — next key combines, or tap to lock` : `Tap to arm ${label}`}
-        className={`flex-1 min-w-0 h-9 rounded-md text-[clamp(9px,2.9vw,10.5px)] font-bold uppercase border transition-colors ${tone}`}
+        className={`flex-1 min-w-0 h-9 rounded-lg text-[clamp(9px,2.9vw,10.5px)] font-bold uppercase border transition-colors ${tone}`}
       >
         {label}
       </button>
@@ -87,7 +87,7 @@ export function MobileKeyBar({ modifiers, onToggleModifier, onSpecialKey }: Mobi
       onTouchStart={(e) => e.preventDefault()}
       title={title}
       aria-label={title}
-      className={`flex-1 min-w-0 h-9 rounded-md font-bold border border-transparent bg-white/[0.05] text-zinc-300 hover:bg-white/10 active:bg-white/15 transition-colors ${
+      className={`flex-1 min-w-0 h-9 rounded-lg font-bold border border-transparent bg-white/[0.05] text-zinc-300 hover:bg-white/10 active:bg-white/15 transition-colors ${
         symbol ? "text-[14px]" : "text-[clamp(9px,2.9vw,10.5px)] uppercase"
       }`}
     >
@@ -137,7 +137,7 @@ export function MobileKeyBar({ modifiers, onToggleModifier, onSpecialKey }: Mobi
           aria-expanded={showSecondRow}
           title={showSecondRow ? "Fewer keys" : "More keys"}
           aria-label={showSecondRow ? "Fewer keys" : "More keys"}
-          className="flex-1 min-w-0 h-9 rounded-md flex items-center justify-center text-zinc-500 active:bg-white/10"
+          className="flex-1 min-w-0 h-9 rounded-lg flex items-center justify-center text-zinc-500 active:bg-white/10"
         >
           <ChevronUp size={18} className={`transition-transform ${showSecondRow ? "rotate-180" : ""}`} />
         </button>

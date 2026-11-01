@@ -971,7 +971,7 @@ const InfoPanel = ({ sessionId, disabled, visible = true, onOpenContainerTermina
             onClick={() => fetchSection(tab)}
             disabled={activeState.loading || disabled}
             title="Refresh this tab"
-            className="h-9 sm:h-7 px-3 sm:px-2.5 rounded-md flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-wider text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+            className="h-9 sm:h-7 px-3 sm:px-2.5 rounded-lg flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-wider text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 disabled:cursor-not-allowed transition-all"
           >
             {activeState.loading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
             <span>Refresh</span>
@@ -1717,7 +1717,7 @@ const ProcessesTab = ({ sessionId, disabled, visible = true }: { sessionId: stri
               onClick={fetchNow}
               disabled={loading || disabled}
               title="Refresh now"
-              className="h-7 px-2 rounded-md flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 transition-all"
+              className="h-7 px-2 rounded-lg flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 transition-all"
             >
               {loading ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
             </button>
@@ -2052,7 +2052,7 @@ const FilterInput = ({ value, onChange, placeholder }: { value: string; onChange
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
-      className="h-7 pl-7 pr-2 text-[10px] bg-black/40 border border-white/10 rounded-md text-zinc-200 placeholder:text-zinc-600 focus:border-primary/50 outline-none w-full"
+      className="h-7 pl-7 pr-2 text-[10px] bg-black/40 border border-white/10 rounded-lg text-zinc-200 placeholder:text-zinc-600 focus:border-primary/50 outline-none w-full"
     />
   </div>
 );
@@ -2060,7 +2060,7 @@ const FilterInput = ({ value, onChange, placeholder }: { value: string; onChange
 const ProtoPill = ({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) => (
   <button
     onClick={onClick}
-    className={`h-9 sm:h-7 px-3 sm:px-2 rounded-md text-[10.5px] font-bold uppercase tracking-wider transition-all border ${active ? "bg-primary/15 text-primary border-primary/30" : "bg-white/[0.04] text-zinc-400 border-white/10 hover:bg-white/[0.08] hover:text-white"}`}
+    className={`h-9 sm:h-7 px-3 sm:px-2 rounded-lg text-[10.5px] font-bold uppercase tracking-wider transition-all border ${active ? "bg-primary/15 text-primary border-primary/30" : "bg-white/[0.04] text-zinc-400 border-white/10 hover:bg-white/[0.08] hover:text-white"}`}
   >
     {children}
   </button>
@@ -2075,7 +2075,7 @@ const CountPill = ({ active, onClick, tone, count, children }: { active: boolean
   return (
     <button
       onClick={onClick}
-      className={`h-9 sm:h-7 px-3 sm:px-2 rounded-md text-[10.5px] font-bold uppercase tracking-wider transition-all border flex items-center gap-1.5 ${baseTone} hover:brightness-110`}
+      className={`h-9 sm:h-7 px-3 sm:px-2 rounded-lg text-[10.5px] font-bold uppercase tracking-wider transition-all border flex items-center gap-1.5 ${baseTone} hover:brightness-110`}
     >
       <span>{children}</span>
       <span className="text-[9.5px] opacity-70">{count}</span>
@@ -2093,7 +2093,7 @@ const ActionBtn = ({ onClick, disabled, title, tone, children }: { onClick: () =
       onClick={onClick}
       disabled={disabled}
       title={title}
-      className={`h-8 w-8 sm:h-7 sm:w-7 rounded-md border bg-white/[0.04] flex items-center justify-center transition-all disabled:opacity-40 disabled:cursor-not-allowed ${cls}`}
+      className={`h-8 w-8 sm:h-7 sm:w-7 rounded-lg border bg-white/[0.04] flex items-center justify-center transition-all disabled:opacity-40 disabled:cursor-not-allowed ${cls}`}
     >
       {children}
     </button>
