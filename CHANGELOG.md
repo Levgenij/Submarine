@@ -7,6 +7,12 @@
 - The phone's key bar is shorter, with every key on screen and no sliding. Ctrl, Esc, Tab and the arrows are always there, and a chevron opens a second row with Alt, Shift and | ~ / -. The row stays open or closed as it was left, and a modifier that's on keeps its row in sight.
 - The key bar works with keyboards that hold a word, such as Samsung's: a key goes after the word, not before it, and Ctrl plus a letter goes out at once.
 - Shift on the key bar now reaches typed letters, and Ctrl or Alt on a character outside ASCII sends its UTF-8 bytes.
+- Closing the first terminal while it is active no longer leaves an empty pane: focus goes to a split partner, or else to the tab that takes its place.
+
+### App
+
+- Corners follow one scale across the app: small things, controls and surfaces each have their own radius, and only what is meant to be round is round.
+- Server and terminal tabs now match. On desktop a terminal tab's close button no longer sits on its title, and on phones the terminal tab and its close button are larger to tap.
 
 ### Dependencies
 
