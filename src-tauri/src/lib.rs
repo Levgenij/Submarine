@@ -6496,6 +6496,8 @@ async fn close_profile(
     monitor_map: tauri::State<'_, MonitorMap>,
     cloud: tauri::State<'_, std::sync::Arc<cloud::CloudState>>,
 ) -> Result<(), String> {
+    // Lock and the idle lock come here; a reload does not (`close_after_reload`).
+    quick_unlock::profile_closed();
     let opened = state.generation_now();
     teardown_profile(&state, &ssh, &monitor_map, &cloud, opened).await?;
     // Here and not in the teardown: after a reload the name may be the one
