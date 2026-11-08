@@ -313,7 +313,8 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
 
   // Ask Windows Hello (or the fingerprint) once, for the profile opened last
   // on this device. Closing that prompt leaves the password.
-  const quickLabel = quick?.method === "android-biometric" ? "Unlock with fingerprint" : "Unlock with Windows Hello";
+  const quickLabel = quick?.method === "android-biometric" ? "Unlock with fingerprint"
+    : quick?.method === "windows-auto" ? "Open on this Windows account" : "Unlock with Windows Hello";
   const quickUnlock = async (name: string) => {
     if (busy) return;
     autoQuickTried.current = true;
@@ -326,7 +327,8 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
       const raw = String(e);
       setBusy(false);
       setQuickBusy(false);
-      if (raw.includes("[QUICK_UNLOCK] CANCELLED")) {
+      // LOCKED: a profile was closed in this run, so only the password opens it now.
+      if (raw.includes("[QUICK_UNLOCK] CANCELLED") || raw.includes("[QUICK_UNLOCK] LOCKED")) {
         requestAnimationFrame(() => passwordInputRef.current?.focus());
         return;
       }
@@ -350,10 +352,13 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
     (async () => {
       try {
         const support = await invoke<{ method: string | null; ready: boolean }>("quick_unlock_support");
-        if (!live || !support.method || !support.ready) return;
-        const on = await invoke<boolean>("quick_unlock_status", { name });
-        if (!live || !on) return;
-        setQuick({ name, method: support.method });
+        const status = await invoke<{ method: string | null; can_open: boolean }>("quick_unlock_status", { name });
+        if (!live || !status.method || !status.can_open) return;
+        // Windows Hello (or the fingerprint) needs the device ready; the
+        // Windows-account key needs nothing. A method not offered here: password.
+        const auto = status.method === "windows-auto";
+        if (!auto && (status.method !== support.method || !support.ready)) return;
+        setQuick({ name, method: status.method });
         if (!autoQuickTried.current && name === lastProfile()) {
           autoQuickTried.current = true;
           void quickUnlock(name);
