@@ -1,16 +1,14 @@
 import { useEffect, useMemo, useRef, useState, forwardRef, useImperativeHandle } from "react";
 import { createPortal } from "react-dom";
-import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { Columns, File as FileIcon, Folder, FolderUp, GitCompare, HardDrive, Rows, Server, Shield, ShieldAlert } from "lucide-react";
 import { useTextPrompt } from "../ui/confirm";
 import FilePanel, { ActiveDrag, FilePanelHandle } from "./FilePanel";
 import type { FileEntry } from "../fs/types";
 import MirrorsPanel from "./MirrorsPanel";
-import TransfersBar, { Transfer } from "./TransfersBar";
+import TransfersBar from "./TransfersBar";
 import { createLocalProvider } from "../fs/localProvider";
 import { createRemoteProvider } from "../fs/remoteProvider";
-import { dropQueued, useQueuedTransfers } from "../fs/transferQueue";
 import { useElementWidth, useIsNarrow } from "../hooks/useViewport";
 import { onRovingKeyDown } from "../ui/rovingKeys";
 import { FOLLOW_SETUP, type ShellFolderState } from "../util/shellFolder";
@@ -31,11 +29,6 @@ const describeSudoError = (raw: string) => {
   const code = Object.keys(SUDO_MESSAGES).find((k) => raw.includes(k));
   return code ? SUDO_MESSAGES[code] : raw.replace(/^\[SUDO\] FAILED:?\s*/, "sudo failed: ");
 };
-
-// Speed is measured over this trailing window of progress samples, so one
-// slow or fast chunk does not make the number jump.
-const SPEED_WINDOW_MS = 3000;
-const SPEED_MIN_SPAN_MS = 500;
 
 // Dual-pane SFTP workspace. Owns the two FilePanels, the cross-pane drag
 // state, and the global mouseup that turns a release over the opposite pane
@@ -422,101 +415,6 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
     markDropHover(overOtherPane ? hit!.closest("[data-fs-drop-path]") ?? pane : null);
   };
 
-  // Live transfer progress, keyed by the backend-assigned id. The Rust
-  // commands stream events at ~10Hz; we replace the entry on each update so
-  // a single growing progress bar shows per transfer. Speed comes from the
-  // (time, bytes) samples of the last few seconds.
-  const [transfers, setTransfers] = useState<Record<string, Transfer>>({});
-  const speedSamplesRef = useRef(new Map<string, { t: number; bytes: number }[]>());
-  const [transfersCollapsed, setTransfersCollapsed] = useState(false);
-  const queued = useQueuedTransfers(sessionId);
-
-  // Bytes/second over the samples of the last SPEED_WINDOW_MS. Every sample
-  // older than the window is dropped, even if only the new one is left, so a
-  // pause (a long folder walk before the first byte) never counts as
-  // transfer time. Undefined until the window spans SPEED_MIN_SPAN_MS.
-  const measureSpeed = (id: string, bytes: number): number | undefined => {
-    const now = performance.now();
-    const samples = speedSamplesRef.current.get(id) ?? [];
-    samples.push({ t: now, bytes });
-    while (now - samples[0].t > SPEED_WINDOW_MS) samples.shift();
-    speedSamplesRef.current.set(id, samples);
-    const span = now - samples[0].t;
-    return span >= SPEED_MIN_SPAN_MS ? ((bytes - samples[0].bytes) * 1000) / span : undefined;
-  };
-
-  useEffect(() => {
-    let alive = true;
-    let unlisten: (() => void) | null = null;
-    listen<Transfer>(`sftp-transfer-${sessionId}`, (event) => {
-      const t = event.payload;
-      if (!t || !t.id) return;
-      const measured = t.status === "progress" ? measureSpeed(t.id, t.bytes) : undefined;
-      if (t.status !== "progress") speedSamplesRef.current.delete(t.id);
-      setTransfers((prev) => {
-        // Until the window spans SPEED_MIN_SPAN_MS again (e.g. right after
-        // a folder walk), keep the last measured speed rather than blank it.
-        const speed = t.status === "progress" ? measured ?? prev[t.id]?.speed : undefined;
-        return { ...prev, [t.id]: { ...t, speed } };
-      });
-      if (t.status === "done" || t.status === "error" || t.status === "cancelled") {
-        // Leave the final state visible briefly before clearing the card so
-        // the user sees the success tick / failure colour / cancel notice.
-        // A cancel that left something behind says so as long as an error.
-        const linger = t.status === "error" || t.error ? 6000 : t.status === "cancelled" ? 3000 : 1800;
-        setTimeout(() => {
-          setTransfers((prev) => {
-            const { [t.id]: _, ...rest } = prev;
-            return rest;
-          });
-        }, linger);
-      }
-    }).then((fn) => {
-      // Unmounted (or session changed) before listen() resolved.
-      if (!alive) {
-        fn();
-        return;
-      }
-      unlisten = fn;
-    });
-    return () => {
-      alive = false;
-      if (unlisten) unlisten();
-    };
-  }, [sessionId]);
-
-  const cancelTransfer = (id: string) => {
-    // Fire-and-forget: the backend emits its own "cancelled" event when the
-    // loop notices the flag, which is what wipes the card.
-    invoke("sftp_cancel_transfer", { transferId: id }).catch(() => {});
-  };
-
-  // Transfers bar. Batch items carry the transfer id they are run with, so
-  // a "starting" item is hidden exactly when events for that id exist (its
-  // live row takes over), including between "done" and the invoke settling.
-  const transferList = Object.values(transfers);
-  const visibleQueued = queued.filter((q) => !(q.id in transfers));
-  // Removing an item from the queue makes the batch skip it; one that is
-  // already starting may have reached the backend, so cancel that id too.
-  // If its command has not registered yet, the backend keeps the cancel in
-  // `early_cancels` and the command starts with its flag set; if it has
-  // already finished, that entry just expires.
-  const cancelQueued = (id: string) => {
-    const wasStarting = queued.some((q) => q.id === id && q.state === "starting");
-    dropQueued(sessionId, [id]);
-    if (wasStarting) cancelTransfer(id);
-  };
-  const transfersBar = transferList.length + visibleQueued.length > 0 ? (
-    <TransfersBar
-      transfers={transferList}
-      queued={visibleQueued}
-      collapsed={transfersCollapsed}
-      onToggleCollapsed={() => setTransfersCollapsed((c) => !c)}
-      onCancel={cancelTransfer}
-      onCancelQueued={cancelQueued}
-    />
-  ) : null;
-
   // Cross-pane drop dispatch: when the user releases the mouse anywhere, look
   // up which pane is under the cursor; if it differs from the source pane and
   // sits inside this workspace, run the transfer and refresh both panels.
@@ -764,7 +662,7 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
       {/* Transfers bar — docked on the workspace root, under both the Files
           and the Mirror view, so a long transfer or an editor save stays
           visible (and cancellable) whichever tab is open. */}
-      {transfersBar}
+      <TransfersBar sessionId={sessionId} />
 
       {/* Cursor-following drag ghost. Self-contained so its per-mousemove
           position updates don't re-render this workspace or the FilePanels. */}

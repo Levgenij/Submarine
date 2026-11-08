@@ -2239,13 +2239,15 @@ function DesktopApp() {
               // or Tab could land in a terminal nobody can see and send what
               // is typed next to its server.
               return (
-                <div inert={!viewIsSession} className={`absolute inset-0 flex flex-col overflow-hidden ${!viewIsSession ? 'opacity-0 pointer-events-none' : ''}`}>
+                <div inert={!viewIsSession} className={`${viewIsSession ? 'absolute inset-0' : 'out-of-view'} flex flex-col overflow-hidden`}>
                   <div className="flex-1 relative bg-black/40">
                     {sessions.map(sess => {
                       const idx = visibleIds.indexOf(sess.id);
                       const isVisible = idx >= 0;
                       const isFocused = activeView === sess.id;
-                      const style: React.CSSProperties = isVisible
+                      // A session that isn't shown waits out of view (.out-of-view
+                      // in App.css), at the size of the area.
+                      const style: React.CSSProperties | undefined = isVisible
                         ? {
                             position: 'absolute',
                             top: 0,
@@ -2253,12 +2255,7 @@ function DesktopApp() {
                             left: `${(idx * 100) / visibleIds.length}%`,
                             width: `${100 / visibleIds.length}%`,
                           }
-                        : {
-                            position: 'absolute',
-                            inset: 0,
-                            opacity: 0,
-                            pointerEvents: 'none',
-                          };
+                        : undefined;
                       return (
                         <div
                           key={sess.id}
@@ -2281,9 +2278,11 @@ function DesktopApp() {
                           // layout collapses to 0 height and the terminal
                           // + tool panels never draw.
                           className={`flex flex-col overflow-hidden ${
-                            isVisible && isTiled
-                              ? `border ${isFocused ? 'border-primary/40 shadow-[inset_0_0_0_1px_rgba(var(--primary),0.15)]' : 'border-white/[0.05]'}`
-                              : ''
+                            !isVisible
+                              ? 'out-of-view'
+                              : isTiled
+                                ? `border ${isFocused ? 'border-primary/40 shadow-[inset_0_0_0_1px_rgba(var(--primary),0.15)]' : 'border-white/[0.05]'}`
+                                : ''
                           }`}
                         >
                           {/* Merged (non-focused) tile header. Only the
@@ -2363,6 +2362,7 @@ function DesktopApp() {
                                 onClose={getCloseHandler(sess.id)}
                                 onStatusChange={handleSessionStatus}
                                 isActiveView={isFocused}
+                                shown={isVisible && viewIsSession}
                                 onPromptChange={handlePromptChange}
                               />
                             ) : (
