@@ -55,6 +55,11 @@ const appWindow = getCurrentWindow();
 // How long Lock waits for the open tabs to disconnect: a stuck mirror holds a
 // disconnect for 2 s (mirror.rs), and an ordinary one takes moments.
 const LOGOUT_DISCONNECT_LIMIT_MS = 3000;
+// The login and key forms with nothing in them.
+const EMPTY_CRED = { id: null, name: "", auth_type: "password", username: "", password: "", key_id: null };
+const EMPTY_KEY = { id: null, name: "", public_key: "", private_key: "", passphrase: "" };
+// How long a slide-over takes to slide out (their duration-500).
+const SLIDE_OUT_MS = 500;
 
 // Sessions can be either DB-backed (saved node, `serverId > 0`) or quick
 // connect (one-shot, `serverId === 0` and `quickAuth` populated). SessionView
@@ -161,6 +166,11 @@ function DesktopApp() {
       return { ...prev, [sid]: terms };
     });
     setSessionActiveTerm(prev => (prev[sid] === activeTermId ? prev : { ...prev, [sid]: activeTermId }));
+    // A terminal that closed leaves no tile behind, with nothing to show.
+    setWallItems(prev => {
+      const next = prev.filter(i => i.sessionId !== sid || terms.some(t => t.id === i.terminalId));
+      return next.length === prev.length ? prev : next;
+    });
   }, []);
   const wallHasTerminal = (terminalId: string) => wallItems.some(i => i.terminalId === terminalId);
   const pinTerminalToWall = (sid: string, terminalId: string) => {
@@ -267,10 +277,10 @@ function DesktopApp() {
   const [libraryTab, setLibraryTab] = useState<"commands" | "notes">("commands");
 
   const [isCredPanelOpen, setIsCredPanelOpen] = useState(false);
-  const [editCredData, setEditCredData] = useState<any>({ id: null, name: "", auth_type: "password", username: "", password: "", key_id: null });
-  
+  const [editCredData, setEditCredData] = useState<any>(EMPTY_CRED);
+
   const [isKeyPanelOpen, setIsKeyPanelOpen] = useState(false);
-  const [editKeyData, setEditKeyData] = useState<any>({ id: null, name: "", public_key: "", private_key: "", passphrase: "" });
+  const [editKeyData, setEditKeyData] = useState<any>(EMPTY_KEY);
   const [formError, setFormError] = useState("");
   const commandPanelRef = useSlideOverFocus(isCommandPanelOpen);
   const notePanelRef = useSlideOverFocus(isNotePanelOpen);
@@ -330,6 +340,25 @@ function DesktopApp() {
   const isMobile = useIsNarrow();
 
   const [newNode, setNewNode] = useState(defaultNode);
+  // A closed panel stays mounted, its fields hidden: what it held goes once it
+  // has slid out, or a revealed password, key or passphrase would stay in the
+  // page after it was put away.
+  useEffect(() => {
+    if (isPanelOpen) return;
+    const t = setTimeout(() => setNewNode(defaultNode), SLIDE_OUT_MS);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPanelOpen]);
+  useEffect(() => {
+    if (isCredPanelOpen) return;
+    const t = setTimeout(() => setEditCredData(EMPTY_CRED), SLIDE_OUT_MS);
+    return () => clearTimeout(t);
+  }, [isCredPanelOpen]);
+  useEffect(() => {
+    if (isKeyPanelOpen) return;
+    const t = setTimeout(() => setEditKeyData(EMPTY_KEY), SLIDE_OUT_MS);
+    return () => clearTimeout(t);
+  }, [isKeyPanelOpen]);
   const [appSettings, setAppSettings] = useState({
     primaryColor: localStorage.getItem('submarine-primary-color') || '#60a5fa',
     backgroundColor: localStorage.getItem('submarine-bg-color') || '#0a0a0c',
@@ -1030,10 +1059,24 @@ function DesktopApp() {
     setIsUnlocked(false);
     setActiveProfile(null);
     setSessions([]);
+    setActiveView("nodes");
+    setServers([]); setCredentials([]); setSshKeys([]); setFolders([]); setCommands([]); setNotes([]);
+    // The next profile numbers its servers from 1 too, so anything kept by
+    // session id would land on its sessions: an armed broadcast most of all.
+    broadcast.disable();
+    broadcast.selectNone();
+    setWallItems([]);
+    setMergedSessionIds([]);
+    setSessionStatuses({});
     setSessionTerminals({});
     setSessionActiveTerm({});
-    setActiveView("nodes");
-    setServers([]); setCredentials([]); setSshKeys([]); setFolders([]); setCommands([]);
+    setPromptSessions(new Set());
+    setLastSyncLabel(null);
+    setActiveFolderId(null);
+    // And no revealed secret stays behind in a form.
+    setNewNode(defaultNode);
+    setEditCredData(EMPTY_CRED);
+    setEditKeyData(EMPTY_KEY);
     addLog("Profile locked.", "info");
   };
 
