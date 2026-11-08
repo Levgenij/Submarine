@@ -1052,21 +1052,22 @@ impl SshState {
         self.resize_txs.lock().await.insert(terminal_id.to_string(), resize_tx);
 
         let opened = async {
-            let channel = session_arc.read().await.channel_open_session().await?;
+            let channel = crate::shell_sftp::open_session_channel(&session_arc).await?;
             let size = *resizes.borrow_and_update();
-            channel.request_pty(false, "xterm-256color", size.cols, size.rows, 0, 0, &[]).await?;
+            channel.request_pty(false, "xterm-256color", size.cols, size.rows, 0, 0, &[]).await.map_err(|e| e.to_string())?;
             match &program {
-                PtyProgram::Shell => channel.request_shell(true).await?,
-                PtyProgram::Exec(cmd) => channel.exec(true, cmd.as_bytes()).await?,
+                PtyProgram::Shell => channel.request_shell(true).await,
+                PtyProgram::Exec(cmd) => channel.exec(true, cmd.as_bytes()).await,
             }
-            Ok::<_, russh::Error>(channel)
+            .map_err(|e| e.to_string())?;
+            Ok::<_, String>(channel)
         }
         .await;
         let channel = match opened {
             Ok(channel) => channel,
             Err(e) => {
                 self.resize_txs.lock().await.remove(terminal_id);
-                return Err(e.to_string());
+                return Err(e);
             }
         };
 
@@ -1108,6 +1109,9 @@ pub struct ConnectAttempt {
     session_id: String,
     generation: u64,
     abandoned: Arc<std::sync::atomic::AtomicBool>,
+    /// This attempt waits on the user or on this device: the time isn't the
+    /// server's.
+    at_prompt: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ConnectAttempt {
@@ -1117,7 +1121,22 @@ impl ConnectAttempt {
             session_id,
             generation,
             abandoned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            at_prompt: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Waits on something that isn't the server (an answer at a prompt, a touch
+    /// on a security key, a key being opened): a login's deadline stands still
+    /// meanwhile (see `drive_login`).
+    pub async fn at_prompt<T>(&self, wait: impl std::future::Future<Output = T>) -> T {
+        self.at_prompt.store(true, std::sync::atomic::Ordering::SeqCst);
+        let out = wait.await;
+        self.at_prompt.store(false, std::sync::atomic::Ordering::SeqCst);
+        out
+    }
+
+    pub fn is_at_prompt(&self) -> bool {
+        self.at_prompt.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// No newer attempt has started, and the session was not disconnected.
