@@ -6534,6 +6534,11 @@ async fn close_profile(
 async fn delete_profile(app_handle: tauri::AppHandle, name: String, state: tauri::State<'_, DbState>) -> Result<(), String> {
     validate_profile_name(&name)?;
     let path = profile_path(&app_handle, &name)?;
+    // Open here (after a page reload, say): its next save would bring the
+    // deleted profile back, and the lock below is the open profile's.
+    if state.has_open(&path)? {
+        return Err("[PROFILE] Lock this profile first.".into());
+    }
     // This window's own lock on it (the page was reloaded with the profile
     // still open) is let go of first, or the probe below would meet it.
     {
