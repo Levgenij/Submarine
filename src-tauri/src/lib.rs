@@ -28,6 +28,7 @@ mod identity;
 mod portable;
 mod fonts;
 mod webkit_sandbox;
+mod sftp_listing;
 mod approvals;
 mod agent_auth;
 mod ssh_config;
@@ -5190,6 +5191,12 @@ async fn close_profile(
         for generation in generations.values_mut() {
             *generation = generation.wrapping_add(1);
         }
+    }
+
+    // 2a. Every transfer and archive job stops. Each holds its own SFTP
+    // session, and would go on moving data for a locked profile.
+    for flag in ssh.transfer_cancels.lock().await.values() {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     // 2b. Collect every active session id, then run the standard
@@ -18065,7 +18072,7 @@ pub(crate) async fn start_sftp(
         return Err(e);
     }
     let handshake =
-        russh_sftp::client::SftpSession::new_with_config(channel.into_stream(), sftp_client_config());
+        russh_sftp::client::SftpSession::new_with_config(sftp_listing::counted(channel.into_stream()), sftp_client_config());
     match tokio::time::timeout(SFTP_START_TIMEOUT, handshake).await {
         Ok(Ok(sftp)) => Ok(sftp),
         Ok(Err(
@@ -18221,7 +18228,7 @@ async fn open_elevated_sftp(
     tokio::time::timeout(std::time::Duration::from_secs(20), wait_ready)
         .await
         .map_err(|_| format!("{}: timed out starting sftp-server via sudo", SUDO_FAILED))??;
-    russh_sftp::client::SftpSession::new_with_config(stream, sftp_client_config())
+    russh_sftp::client::SftpSession::new_with_config(sftp_listing::counted(stream), sftp_client_config())
         .await
         .map_err(|e| format!("{}: {}", SUDO_FAILED, e))
 }
@@ -18514,11 +18521,14 @@ async fn sftp_list_dir(
     let target_path = if path.is_empty() { ".".to_string() } else { path.clone() };
     let canonical_path = sftp.canonicalize(&target_path).await.map_err(|e| e.to_string())?;
     
-    let mut read_dir = sftp.read_dir(&canonical_path).await.map_err(|e| e.to_string())?;
+    let mut read_dir = sftp_listing::read_dir(&sftp, &canonical_path).await.map_err(|e| e.to_string())?;
     let mut entries = Vec::new();
     while let Some(entry) = read_dir.next() {
         let name = entry.file_name();
-        if name == "." || name == ".." {
+        // A name with `/` or NUL can't be a file's: no file system holds one
+        // and no honest server sends one. A hostile server sends `../x`, and
+        // the page joins the name onto the folder a download goes to.
+        if !sftp_listing::is_plain_name(&name) {
             continue;
         }
         let entry_path = if canonical_path.ends_with('/') {
@@ -18996,7 +19006,7 @@ pub(crate) async fn sftp_remove_tree(sftp: &russh_sftp::client::SftpSession, pat
         if gone_is_ok(sftp.remove_dir(&dir).await).is_ok() {
             continue;
         }
-        let read = match sftp.read_dir(&dir).await {
+        let read = match sftp_listing::read_dir(sftp, &dir).await {
             Ok(read) => read,
             Err(e) if is_no_such_file(&e) => continue,
             Err(e) => return Err(format!("read_dir {}: {}", dir, e)),
@@ -19843,8 +19853,11 @@ async fn sftp_download_dir(
     // iteratively with an explicit stack so we don't blow the async-recursion
     // budget on pathological trees.
     let remote_root = remote_path.trim_end_matches('/').to_string();
+    // The tree goes in {local_path}/{folder_name}/.
+    let local_root = std::path::PathBuf::from(&local_path).join(&folder_name);
     let mut files: Vec<(String, String, u64)> = Vec::new(); // (remote, rel, size)
     let mut total_bytes: u64 = 0;
+    let mut path_bytes: usize = 0;
     let mut skipped_names: u64 = 0;
     // (dir, depth). Depth bounds how deep a hostile server can send us, and
     // the file and byte caps bound how much the list below can grow, so a
@@ -19860,7 +19873,7 @@ async fn sftp_download_dir(
             emit_progress(0, total_bytes, "error", Some(msg.clone()));
             return Err(msg);
         }
-        let read = match sftp.read_dir(&dir).await {
+        let read = match sftp_listing::read_dir(&sftp, &dir).await {
             Ok(r) => r,
             Err(e) => {
                 emit_progress(0, total_bytes, "error", Some(format!("read_dir {}: {}", dir, e)));
@@ -19874,7 +19887,9 @@ async fn sftp_download_dir(
                 emit_progress(0, total_bytes, "cancelled", None);
                 return Err("cancelled".into());
             }
-            if let Some(msg) = download_dir_limit_error(files.len(), total_bytes) {
+            // `entries` are the files found and the folders waiting to be
+            // listed, as a tree of only folders must end too.
+            if let Some(msg) = download_walk_too_big(files.len() + stack.len(), total_bytes, path_bytes) {
                 emit_progress(0, total_bytes, "error", Some(msg.clone()));
                 return Err(msg);
             }
@@ -19893,13 +19908,23 @@ async fn sftp_download_dir(
                 continue;
             }
             let full = format!("{}/{}", dir.trim_end_matches('/'), name);
+            let rel = full.strip_prefix(&remote_root)
+                .map(|s| s.trim_start_matches('/').to_string())
+                .unwrap_or_else(|| name.clone());
+            // What the walk keeps is paths, built here from short names.
+            path_bytes = path_bytes.saturating_add(full.len() + rel.len());
             if entry.file_type().is_dir() {
+                // Each folder goes through the path policy, not just the top
+                // one: a remote `.config/autostart` taken into the home folder
+                // lands where the OS runs things at login. What it would refuse
+                // is left out and counted, and the rest of the tree still comes.
+                if check_local_path_policy(local_root.join(&rel)).is_err() {
+                    skipped_names = skipped_names.saturating_add(1);
+                    continue;
+                }
                 stack.push((full, depth + 1));
             } else if entry.file_type().is_file() {
                 let size = entry.metadata().size.unwrap_or(0);
-                let rel = full.strip_prefix(&remote_root)
-                    .map(|s| s.trim_start_matches('/').to_string())
-                    .unwrap_or_else(|| name.clone());
                 total_bytes = total_bytes.saturating_add(size);
                 files.push((full, rel, size));
                 // The check above runs before this entry is counted, so the
@@ -19920,7 +19945,6 @@ async fn sftp_download_dir(
     if files.is_empty() {
         // Still create the (empty) destination folder so the UI sees the
         // shape — otherwise the user sees "done" with nothing to show for it.
-        let local_root = std::path::PathBuf::from(&local_path).join(&folder_name);
         let _ = tokio::fs::create_dir_all(&local_root).await;
         emit_progress(0, 0, "done", skipped_note);
         return Ok(());
@@ -19930,7 +19954,6 @@ async fn sftp_download_dir(
     // {local_path}/{folder_name}/... so multi-level files preserve their
     // structure. Create each parent directory lazily right before we open
     // the file.
-    let local_root = std::path::PathBuf::from(&local_path).join(&folder_name);
     if let Err(e) = tokio::fs::create_dir_all(&local_root).await {
         emit_progress(0, total_bytes, "error", Some(format!("create {}: {}", local_root.display(), e)));
         return Err(format!("create root: {}", e));
@@ -20870,6 +20893,10 @@ const SFTP_INLINE_MAX_BYTES: u64 = 50 * 1024 * 1024;
 const DOWNLOAD_DIR_MAX_DEPTH: usize = 64;
 const DOWNLOAD_DIR_MAX_FILES: usize = 200_000;
 const DOWNLOAD_DIR_MAX_BYTES: u64 = 100 * 1024 * 1024 * 1024;
+/// What the walk may hold in paths. A deep folder of many files costs its whole
+/// path per file, far more than the names the server sent; 200,000 honest files
+/// come to well under this.
+const DOWNLOAD_DIR_MAX_PATH_BYTES: usize = 256 * 1024 * 1024;
 
 /// Random suffix of `app_temp_root`, in bytes. Hex-encoded length is twice this.
 const APP_TEMP_ID_BYTES: usize = 12;
@@ -20899,6 +20926,16 @@ fn download_dir_limit_error(files: usize, bytes: u64) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Why the walk of a folder download stops: `entries` are the files found and
+/// the folders waiting to be listed.
+fn download_walk_too_big(entries: usize, bytes: u64, path_bytes: usize) -> Option<String> {
+    if path_bytes > DOWNLOAD_DIR_MAX_PATH_BYTES {
+        // Same wording as the file cap: that is what the paths come from.
+        return download_dir_limit_error(DOWNLOAD_DIR_MAX_FILES + 1, 0);
+    }
+    download_dir_limit_error(entries, bytes)
 }
 
 fn exceeds_inline_cap(bytes: u64) -> bool {
@@ -21123,7 +21160,9 @@ fn safe_temp_leaf_name(remote_path: &str) -> Result<String, String> {
         .and_then(|n| n.to_str())
         .unwrap_or("");
     let bad = |c: char| matches!(c, '/' | '\\' | ':' | '\0');
-    if raw.is_empty() || raw == "." || raw == ".." || raw.contains(bad) {
+    // is_safe_dir_entry_name adds this OS's own rules: on Windows `COM3` or
+    // `PRN` would open a device, not a file in the temp dir.
+    if raw.is_empty() || raw == "." || raw == ".." || raw.contains(bad) || !is_safe_dir_entry_name(raw) {
         return Err(format!("refusing file with unsafe name: {:?}", raw));
     }
     Ok(raw.to_string())
@@ -22742,6 +22781,11 @@ pub(crate) fn is_safe_dir_entry_name(name: &str) -> bool {
 /// component this OS can store, and really be the last component of
 /// `local_path`. Everything before it is the user's own folder, so a `..` they
 /// typed there is fine. `guard_local_path` resolves that.
+///
+/// The steps before the last of `remote_path` count too. A listing gives clean
+/// paths, so a `.`, `..` or empty step means a "name" that was several steps:
+/// `a/../../x` ends in a harmless `x` while the folder part of `local_path`
+/// has picked up `a/../..`, the server's and not the user's.
 fn validate_download_target(local_path: &str, remote_path: &str) -> Result<(), String> {
     let name = remote_path.rsplit('/').next().unwrap_or("");
     if !is_safe_dir_entry_name(name) {
@@ -22749,6 +22793,10 @@ fn validate_download_target(local_path: &str, remote_path: &str) -> Result<(), S
             "\"{}\" can't be saved here: its name isn't a valid file name on this computer.",
             name
         ));
+    }
+    // A leading `/` is an absolute path, and some servers answer with two.
+    if remote_path.trim_start_matches('/').split('/').any(|step| step.is_empty() || step == "." || step == "..") {
+        return Err(format!("Refusing a download whose remote path has a \".\", \"..\" or empty step: {}", remote_path));
     }
     let last = std::path::Path::new(local_path).file_name().and_then(|n| n.to_str());
     if last != Some(name) {
@@ -22761,13 +22809,14 @@ fn validate_download_target(local_path: &str, remote_path: &str) -> Result<(), S
 }
 
 /// The note on a finished folder download when the walk skipped names this
-/// computer can't store (see `is_safe_dir_entry_name`).
+/// computer can't store (see `is_safe_dir_entry_name`) or folders the path
+/// policy refuses.
 fn skipped_names_note(skipped: u64) -> Option<String> {
     match skipped {
         0 => None,
-        1 => Some("1 item skipped: its name isn't a valid file name on this computer".into()),
+        1 => Some("1 item skipped: its name or place isn't allowed on this computer".into()),
         n => Some(format!(
-            "{} items skipped: their names aren't valid file names on this computer",
+            "{} items skipped: their names or places aren't allowed on this computer",
             n
         )),
     }
@@ -25476,6 +25525,18 @@ mod tests {
         assert!(validate_download_target(&dest(""), "/srv/").is_err());
         assert!(validate_download_target(&dest(".."), "/srv/..").is_err());
 
+        // A "name" of several steps from a hostile listing: the last step
+        // alone looks fine, and the local path climbs out of the folder.
+        for name in ["../x", "/../x", "a/../../x", "../../.ssh/config", "./x", "a/./x", "a//x"] {
+            let remote = format!("/srv/{}", name);
+            assert!(validate_download_target(&dest(name), &remote).is_err(), "{name}");
+        }
+        // Clean paths from any corner of a server.
+        assert!(validate_download_target(&dest("x"), "/x").is_ok());
+        assert!(validate_download_target(&dest("x"), "//srv/x").is_ok());
+        assert!(validate_download_target(&dest("x"), "/C:/Users/me/x").is_ok());
+        assert!(validate_download_target(&dest("x"), "/srv/..a/a../.b/x").is_ok());
+
         // A name that climbs out on Windows is refused there. Off Windows it
         // is one literal file name that stays in the folder.
         let climb = "..\\..\\Startup\\x.bat";
@@ -25485,6 +25546,29 @@ mod tests {
         );
         #[cfg(windows)]
         assert!(validate_download_target(&dest("a:b"), "/srv/a:b").is_err());
+    }
+
+    #[test]
+    fn a_temp_copy_gets_a_plain_file_name() {
+        assert_eq!(safe_temp_leaf_name("/srv/site/index.php").unwrap(), "index.php");
+        assert_eq!(safe_temp_leaf_name("/x/.bashrc").unwrap(), ".bashrc");
+        for bad in ["", "/", "/srv/..", "/srv/a:b", "/srv/x\0y"] {
+            assert!(safe_temp_leaf_name(bad).is_err(), "{bad:?}");
+        }
+        // A device on Windows, an ordinary (odd) name anywhere else.
+        for name in ["COM3", "PRN", "nul.txt", "AUX .c"] {
+            assert_eq!(safe_temp_leaf_name(&format!("/srv/{name}")).is_ok(), !cfg!(windows), "{name}");
+        }
+    }
+
+    // A server that lists only folders grows the list of folders to visit, not
+    // the list of files, and long paths cost more than many short ones.
+    #[test]
+    fn a_folder_download_walk_ends_on_any_of_its_limits() {
+        assert!(download_walk_too_big(DOWNLOAD_DIR_MAX_FILES, DOWNLOAD_DIR_MAX_BYTES, DOWNLOAD_DIR_MAX_PATH_BYTES).is_none());
+        assert!(download_walk_too_big(DOWNLOAD_DIR_MAX_FILES + 1, 0, 0).is_some());
+        assert!(download_walk_too_big(0, DOWNLOAD_DIR_MAX_BYTES + 1, 0).is_some());
+        assert!(download_walk_too_big(0, 0, DOWNLOAD_DIR_MAX_PATH_BYTES + 1).is_some());
     }
 
     #[test]
