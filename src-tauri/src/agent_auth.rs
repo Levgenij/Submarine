@@ -596,12 +596,11 @@ mod tests {
         let (mut session, _) = session_to(Some(&a), true).await;
         let mut agent = agent_holding(&[a], false).await;
         let out = offer_keys(&mut session, "u", &mut agent, Offer::Rest, |_| {}).await.unwrap();
-        // russh's own server (0.63) drops the partial-success flag for public
-        // keys and only lists the methods left - here just a password - so the
-        // answer reads as "public keys no longer offered". A real OpenSSH
-        // server sets the flag; `interpret` handles both (see below).
-        assert!(matches!(out, AgentOutcome::NotAccepted | AgentOutcome::PartialSuccess { .. }));
-        // Either way nothing is left waiting: the password finishes the login.
+        // russh's own server (0.63) dropped the partial-success flag for public
+        // keys; since 0.65 it passes the handler's flag through, so the answer
+        // is a partial success with the password left.
+        assert!(matches!(out, AgentOutcome::PartialSuccess { .. }));
+        // Nothing is left waiting: the password finishes the login.
         assert!(session.authenticate_password("u", "pw").await.unwrap().success());
     }
 
