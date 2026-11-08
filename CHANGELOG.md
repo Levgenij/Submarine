@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.5.3
+
+### Connect
+
+- A server that stops answering after the handshake no longer leaves a tab on Connecting: the login has five minutes of the server's time, and the clock stops while you answer a prompt.
+- Opening a terminal, a file pane, Docker or an RDP forward gives up after a time limit instead of waiting forever.
+- A key file with junk lines or a decoy header can no longer make the app spend minutes on its key derivation; keys are read the way the SSH library reads them.
+- A different key of the same type in your `~/.ssh/known_hosts` now shows the red changed-key warning, as OpenSSH does.
+
+### Terminal
+
+- A flood of control sequences from a server no longer freezes every tab.
+- Opening or closing a split keeps the terminals and their scrollback, and a failed reconnect keeps the tabs under a banner, with a password field when the server refused the login.
+- Answers the terminal sends back to the server are no longer broadcast to other terminals, and a paste with Ctrl+V or from the phone's menu gets the same checks as right-click paste.
+- A terminal whose shell the server ended says so, and closing a terminal closes it on the server too.
+- Hidden terminals stop drawing.
+
+### Library
+
+- Run and Paste go through the terminal's own paste path. A command of several lines, or one the card cuts short, asks "Run these N lines?" first.
+- A note or command that can't be saved says so and keeps its text.
+
+### Files
+
+- A hostile SFTP server can no longer write outside the folder you chose, flood a folder listing, or crash the app with an endless tree. Names with a slash or NUL are dropped from listings.
+- A mirror stops within two seconds, and a mirror scan, a folder download and an upload are faster.
+- Extracting an archive on this computer is limited in size, count and depth.
+- Which program opens a downloaded file is checked for every file type. A few types with nothing to edit, such as .chm and .pyc, are refused; download them instead.
+
+### Servers
+
+- A profile file from another device, a hand-copied backup included, opens with its on-connect commands, autostart, forwards and monitor commands held, and its host keys asked again.
+- In a shared profile, a server moved to another address asks before it connects, and sessions restored on unlock skip it until you open it.
+- A port outside 1 to 65535 is refused, and a double click can't add a server twice.
+- Importing hosts writes the profile once.
+
+### Sync and sharing
+
+- In a shared profile, a change that would empty a saved key or password waits for your OK. A viewer keeps its own secrets.
+- Sharing keeps working after the share's key changes: a new key is taken only with the fingerprint you were shown, and while sharing is locked the profile only pulls and says "Unlock sharing".
+- A cloud copy you deleted is not uploaded again by this device; the profile panel offers "Upload it again".
+- The profile picker lists the copies kept before a sync removed or emptied something, and can put one back.
+- A profile still open in the app can't be removed or replaced by a copy.
+
+### Remote desktop
+
+- Limits against a hostile RDP or VNC server: frames, sizes, channel data and shared-folder handles are capped, and bytes sent before TLS end the connection.
+- In a shared profile, a shared folder, the clipboard and a login without NLA stay with the address they were chosen for, until "Allow here". A saved RDP login follows its server.
+- The server's clipboard reaches yours only while the tab is in front.
+- A VNC server that lets you in without the saved password is noted in the log.
+
+### Profiles
+
+- On Windows a profile can open by itself when Submarine starts, a second switch beside Windows Hello, off by default. Any program running as your Windows account can then open it; after Lock it takes the password until Submarine restarts.
+- A page reload ends the sessions the old page held and saves the profile first.
+
+### App
+
+- Panels no longer crash on odd values from a server: metrics, interface lists, Docker output.
+- On macOS the app icon has the system's tile shape.
+- A drop on a scaled Windows display lands in the right pane.
+
+### Dependencies
+
+- russh 0.65, which bounds a memory allocation a server could make large.
+
+Vault format is unchanged. Two new tables (held changes that empty a secret, and first RDP routes) are created when a profile opens, so no migration step runs and an older build ignores them.
+
 ## 0.5.2
 
 ### Terminal
