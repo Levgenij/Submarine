@@ -829,7 +829,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                     />
                     <SwitchRow
                       label="Share the clipboard"
-                      hint="Text you copy on the server comes to this device. This device's text goes to the server only when you paste it there (a paste key in the tab, or its Paste button)."
+                      hint="Text you copy on the server comes to this device, by itself while the tab is in front. This device's text goes to the server only when you paste it there (a paste key in the tab, or its Paste button)."
                       checked={o.clipboard}
                       onChange={(v) => set({ clipboard: v })}
                     />
@@ -911,7 +911,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                 <div className="space-y-2.5 pt-1">
                   <SwitchRow
                     label="Share the clipboard"
-                    hint="Text you copy on the server comes to this device; this device's goes to the server when you paste it there (a paste key in the tab, or its Paste button). Plain ASCII text only, such as links and commands: a VNC clipboard can't carry other characters."
+                    hint="Text you copy on the server comes to this device, by itself while the tab is in front; this device's goes to the server when you paste it there (a paste key in the tab, or its Paste button). Plain ASCII text only, such as links and commands: a VNC clipboard can't carry other characters."
                     checked={o.clipboard}
                     onChange={(clipboard) => set({ clipboard })}
                   />
