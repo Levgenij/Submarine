@@ -121,6 +121,13 @@ impl DbState {
         self.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
     }
 
+    /// Whether this process has the profile file at `path` open (`db_path` is
+    /// set while a profile is open and cleared by `close_profile`): a page
+    /// reload doesn't lock it, and a save would write over a changed file.
+    fn has_open(&self, path: &Path) -> Result<bool, String> {
+        Ok(self.db_path.lock().map_err(|_| "[STATE] LOCK_FAILED_PATH")?.as_deref() == Some(path))
+    }
+
     /// Before a write that follows an await: is the profile that was open at
     /// `generation` still the one open? Call it while holding `conn`'s lock.
     fn still_open(&self, generation: u64) -> Result<(), String> {
@@ -171,6 +178,19 @@ mod profile_generation_tests {
         let generation = std::sync::Arc::clone(&state.generation);
         assert_ne!(generation.load(std::sync::atomic::Ordering::SeqCst), opened);
         assert_eq!(generation.load(std::sync::atomic::Ordering::SeqCst), replaced);
+    }
+
+    // restore_profile_copy refuses a profile this process has open.
+    #[test]
+    fn only_the_open_profiles_file_counts_as_open() {
+        let state = state();
+        let path = PathBuf::from("p.submarine");
+        assert!(!state.has_open(&path).unwrap());
+        *state.db_path.lock().unwrap() = Some(path.clone());
+        assert!(state.has_open(&path).unwrap());
+        assert!(!state.has_open(Path::new("q.submarine")).unwrap());
+        *state.db_path.lock().unwrap() = None;
+        assert!(!state.has_open(&path).unwrap());
     }
 }
 
@@ -1605,18 +1625,45 @@ fn apply_entity(conn: &Connection, key: &[u8; 32], spec: &EntitySpec, rec: &Sync
 /// `apply_tombstone` does, counted first, so a profile can be kept as it is
 /// before the merge deletes from it (vault_backup.rs).
 fn rows_to_delete(conn: &Connection, records: &[SyncRecord]) -> usize {
-    records
-        .iter()
-        .filter(|r| r.deleted && sane_record(r))
-        .filter(|r| {
-            ENTITIES.iter().find(|s| s.table == r.entity_type).is_some_and(|spec| {
-                conn.query_row(&format!("SELECT updated_at FROM {} WHERE uuid=?1", spec.table), [&r.uuid], |row| {
-                    row.get::<_, Option<String>>(0)
-                })
-                .is_ok_and(|ua| ua.as_deref().unwrap_or("") < r.updated_at.as_str())
+    records.iter().filter(|r| deletes_a_row(conn, r)).count()
+}
+
+fn deletes_a_row(conn: &Connection, r: &SyncRecord) -> bool {
+    r.deleted
+        && sane_record(r)
+        && ENTITIES.iter().find(|s| s.table == r.entity_type).is_some_and(|spec| {
+            conn.query_row(&format!("SELECT updated_at FROM {} WHERE uuid=?1", spec.table), [&r.uuid], |row| {
+                row.get::<_, Option<String>>(0)
             })
+            .is_ok_and(|ua| ua.as_deref().unwrap_or("") < r.updated_at.as_str())
         })
-        .count()
+}
+
+/// The first sync after a kept copy was put back (vault_backup::put_back):
+/// what the server's answer would take away again stays. Each such row gets a
+/// stamp newer than the record, as a kept row does in `resolve_held`, so the
+/// merge leaves it alone and the next push brings it back on every device.
+/// Everything else merges as usual, so what changed elsewhere since the copy
+/// was made isn't undone.
+fn keep_put_back_rows(conn: &Connection, key: &[u8; 32], hlc: &hlc::Hlc, records: &[SyncRecord]) -> Result<usize, String> {
+    conn.execute("INSERT INTO sync_flags(key,val) VALUES('merge',1) ON CONFLICT(key) DO UPDATE SET val=1", [])
+        .map_err(|e| format!("[SYNC] MERGE_ON: {e}"))?;
+    let kept = (|| -> Result<usize, String> {
+        let mut n = 0;
+        // (A viewer's merge keeps their secrets anyway, and lands the rest.)
+        let viewer = approvals::is_viewer(conn);
+        for rec in records.iter().filter(|r| sane_record(r) && (deletes_a_row(conn, r) || (!viewer && empties_a_secret(conn, key, r)))) {
+            n += conn
+                .execute(
+                    &format!("UPDATE {} SET updated_at=?1 WHERE uuid=?2", rec.entity_type),
+                    rusqlite::params![stamp_past(&hlc.tick(), &rec.updated_at), rec.uuid],
+                )
+                .map_err(|e| format!("[SYNC] KEEP: {e}"))?;
+        }
+        Ok(n)
+    })();
+    let _ = conn.execute("UPDATE sync_flags SET val=0 WHERE key='merge'", []);
+    kept
 }
 
 /// One remote deletion. It can write three things (unlink, delete, record the
@@ -2063,8 +2110,19 @@ struct Merged {
 /// Merges a sync's answer into the open vault. A record proves nothing about
 /// who sent it, so before one deletes a row or empties a saved key or password
 /// the profile is kept as it stands (vault_backup.rs); the file on disk is
-/// still the state from before this merge. `vault` is that file.
-fn merge_answer(conn: &Connection, key: &[u8; 32], records: &[SyncRecord], hlc: &hlc::Hlc, vault: Result<&Path, &str>) -> Result<Merged, String> {
+/// still the state from before this merge. `vault` is that file, and
+/// `put_back` that a kept copy has just been made the profile again.
+fn merge_answer(
+    conn: &Connection,
+    key: &[u8; 32],
+    records: &[SyncRecord],
+    hlc: &hlc::Hlc,
+    vault: Result<&Path, &str>,
+    put_back: bool,
+) -> Result<Merged, String> {
+    if put_back {
+        keep_put_back_rows(conn, key, hlc, records)?;
+    }
     let removed = rows_to_delete(conn, records);
     let to_empty = rows_to_empty(conn, key, records);
     let mut backup = None;
@@ -2144,6 +2202,11 @@ async fn sync_round(
             Some((sid, _)) => format!("share:{sid}"),
             None => format!("profile:{cloud_profile}"),
         };
+        // Deleted from the cloud on this device: nothing goes back up until
+        // the user says so (`cloud_delete_profile`).
+        if share.is_none() && is_cloud_deleted(&cloud_deleted_path(app)?, &cloud_deleted_key(session.base(), &cloud_profile)) {
+            return Err("[SYNC] DELETED_FROM_CLOUD: you deleted this profile from the cloud on this device, so it isn't uploaded. To upload it again, use its Profile panel.".into());
+        }
         let cursor: Option<SyncCursor> = if use_cursor {
             db_state
                 .sync_cursor
@@ -2237,13 +2300,14 @@ async fn sync_round(
     // The server couldn't answer from the cursor: start over (`sync_with`).
     let reset = exchange.full && pull_from.is_some();
     let (removed, emptied, backup);
+    let vault = profile_path(app, profile);
+    let put_back = vault.as_ref().is_ok_and(|p| vault_backup::is_put_back(p));
 
     {
         let conn_g = db_state.conn.lock().map_err(|_| "[STATE] LOCK_CONN")?;
         let conn = conn_g.as_ref().ok_or("[STATE] DB_NOT_OPEN")?;
         db_state.still_open(generation)?;
-        let vault = profile_path(app, profile);
-        let merged = merge_answer(conn, &dek, &exchange.records, &hlc, vault.as_deref().map_err(String::as_str))?;
+        let merged = merge_answer(conn, &dek, &exchange.records, &hlc, vault.as_deref().map_err(String::as_str), put_back)?;
         let skipped = merged.skipped;
         (removed, emptied, backup) = (merged.removed, merged.emptied, merged.backup);
         if unlinked {
@@ -2279,6 +2343,12 @@ async fn sync_round(
     }
     // Persist the merged vault so the applied changes survive a restart.
     save_vault_async(db_state).await?;
+    // Only now: if the save failed, the kept rows are still to be kept.
+    if put_back {
+        if let Ok(path) = &vault {
+            vault_backup::clear_put_back(path);
+        }
+    }
     Ok((SyncReport { pushed, pulled, key_change, removed, emptied, backup }, reset))
 }
 
@@ -3366,6 +3436,9 @@ async fn restore_personal_profile(
     if profile_path(&app, &local_name)?.exists() {
         return Err(format!("Profile '{}' already exists", local_name));
     }
+    // Getting a profile from the cloud is wanting it there, whatever was
+    // deleted on this device before.
+    set_cloud_deleted(&cloud_deleted_path(&app)?, &cloud_deleted_key(session.base(), &cloud_profile), false)?;
     *db_state.active_profile.lock().map_err(|_| "[STATE] LOCK_FAILED")? = Some(local_name.clone());
     // `opened` pins the new profile: the writes and the sync below go to it
     // and nowhere else.
@@ -3734,6 +3807,9 @@ struct ProfileShareStatus {
     current_server: String,
     /// Whether that is a self-hosted one, not the default.
     custom_server: bool,
+    /// Deleted from the cloud on this device: it isn't uploaded until the
+    /// user says so (`cloud_resume_profile`).
+    cloud_deleted: bool,
 }
 
 /// Everything the in-app Profile panel needs about the OPEN profile, read in one
@@ -3742,11 +3818,12 @@ struct ProfileShareStatus {
 /// sharing identity are ready. The member roster is fetched separately.
 #[tauri::command]
 async fn profile_share_status(
+    app: tauri::AppHandle,
     db_state: tauri::State<'_, DbState>,
     cloud: tauri::State<'_, std::sync::Arc<cloud::CloudState>>,
 ) -> Result<ProfileShareStatus, String> {
     // Scoped so both std MutexGuards drop before the awaits below.
-    let (profile, share_id, role, cloud_server) = {
+    let (profile, share_id, role, cloud_server, cloud_profile) = {
         let profile = db_state
             .active_profile
             .lock()
@@ -3761,13 +3838,16 @@ async fn profile_share_status(
                 let role: Option<String> = conn
                     .query_row("SELECT value FROM sync_meta WHERE key='share_role'", [], |r| r.get(0))
                     .ok();
-                (profile, sid, role, profile_server(conn))
+                let cloud_profile = profile.as_deref().map(|p| cloud_profile_of(conn, p));
+                (profile, sid, role, profile_server(conn), cloud_profile)
             }
-            None => (profile, None, None, None),
+            None => (profile, None, None, None, None),
         }
     };
     let st = cloud.status().await;
     let current_server = cloud.base().await;
+    let cloud_deleted = share_id.is_none()
+        && cloud_profile.is_some_and(|p| is_cloud_deleted(&cloud_deleted_path(&app).unwrap_or_default(), &cloud_deleted_key(&current_server, &p)));
     Ok(ProfileShareStatus {
         profile,
         share_id,
@@ -3778,6 +3858,7 @@ async fn profile_share_status(
         cloud_server,
         custom_server: current_server != cloud::CLOUD_API_BASE,
         current_server,
+        cloud_deleted,
     })
 }
 
@@ -5460,7 +5541,7 @@ mod sync_engine_tests {
         std::fs::write(&vault, b"the profile as it was").unwrap();
 
         let wipe = with_field(of(&recs, "ssh_keys"), "private_key", serde_json::json!(""));
-        let merged = merge_answer(&p, &KEY, std::slice::from_ref(&wipe), &hp, Ok(&vault)).unwrap();
+        let merged = merge_answer(&p, &KEY, std::slice::from_ref(&wipe), &hp, Ok(&vault), false).unwrap();
         assert_eq!((merged.skipped, merged.removed, merged.emptied), (0, 0, 1));
         let copy = merged.backup.expect("a copy kept first");
         assert_eq!(std::fs::read(dir.join(copy)).unwrap(), b"the profile as it was");
@@ -5482,14 +5563,14 @@ mod sync_engine_tests {
 
         let wipe = with_field(of(&recs, "ssh_keys"), "private_key", serde_json::json!(""));
         let answer = std::slice::from_ref(&wipe);
-        let merged = merge_answer(&b, &KEY, answer, &hb, Ok(&vault)).unwrap();
+        let merged = merge_answer(&b, &KEY, answer, &hb, Ok(&vault), false).unwrap();
         assert_eq!((merged.skipped, merged.emptied), (0, 0), "nothing was skipped or lost");
         assert!(merged.backup.is_some());
         assert_eq!(private_key(&b), "priv");
         let held = approvals::held_deletions(&b);
         assert_eq!((held.len(), held[0].name.as_str(), held[0].emptied), (1, "k", true));
 
-        assert!(merge_answer(&b, &KEY, answer, &hb, Err("no file")).unwrap().backup.is_none());
+        assert!(merge_answer(&b, &KEY, answer, &hb, Err("no file"), false).unwrap().backup.is_none());
         assert_eq!(rows_to_empty(&b, &KEY, answer), 0, "held already");
         assert_eq!(count(&b, "held_wipes"), 1);
         assert_eq!(private_key(&b), "priv");
@@ -5529,7 +5610,7 @@ mod sync_engine_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let vault = dir.join("p.submarine");
         std::fs::write(&vault, b"the profile").unwrap();
-        let merged = merge_answer(&v, &KEY, &from_owner, &hv, Ok(&vault)).unwrap();
+        let merged = merge_answer(&v, &KEY, &from_owner, &hv, Ok(&vault), false).unwrap();
         assert_eq!((merged.skipped, merged.removed, merged.emptied), (0, 0, 0));
         assert_eq!(merged.backup, None, "nothing is lost, so nothing to keep a copy of");
         assert!(approvals::held_deletions(&v).is_empty(), "nothing to review");
@@ -5667,6 +5748,72 @@ mod sync_engine_tests {
         assert!(approvals::held_for(&b, &server.uuid).is_empty(), "nothing of it landed yet");
         resolve_held(&b, &KEY, &hb, true).unwrap();
         assert!(approvals::held_for(&b, &server.uuid).contains(approvals::RUN_ON_CONNECT));
+    }
+
+    // A copy put back: the first sync keeps what its answer would take away
+    // again, and those rows go out with newer stamps. Everything else merges
+    // as usual, so what changed elsewhere since isn't undone.
+    #[test]
+    fn a_copy_put_back_keeps_what_the_next_sync_would_take_again() {
+        let (a, ha) = device("A");
+        a.execute("INSERT INTO servers(name,host,port) VALUES('s1','h',22),('s2','h',22)", []).unwrap();
+        a.execute("INSERT INTO notes(title,body) VALUES('n','old')", []).unwrap();
+        a.execute("INSERT INTO ssh_keys(name,public_key,private_key) VALUES('k','pub','priv')", []).unwrap();
+        // B is the copy, as it was before what happens next.
+        let (b, hb) = device("B");
+        apply_remote_records(&b, &KEY, &collect_local_records(&a, &KEY, "").unwrap(), &hb).unwrap();
+
+        a.execute("DELETE FROM servers WHERE name='s1'", []).unwrap();
+        a.execute("UPDATE ssh_keys SET private_key=''", []).unwrap();
+        a.execute("UPDATE notes SET body='new'", []).unwrap();
+        let answer = collect_local_records(&a, &KEY, "").unwrap();
+
+        let merged = merge_answer(&b, &KEY, &answer, &hb, Err("no file"), true).unwrap();
+        assert_eq!((merged.removed, merged.emptied), (0, 0));
+        assert_eq!(count(&b, "servers"), 2);
+        assert_eq!(private_key(&b), "priv");
+        let body: String = b.query_row("SELECT body FROM notes", [], |r| r.get(0)).unwrap();
+        assert_eq!(body, "new", "an edit from elsewhere still lands");
+
+        apply_remote_records(&a, &KEY, &collect_local_records(&b, &KEY, "").unwrap(), &ha).unwrap();
+        assert_eq!(count(&a, "servers"), 2, "the deleted row is back where it was deleted");
+        assert_eq!(private_key(&a), "priv", "and the key where it was emptied");
+        let merged = merge_answer(&b, &KEY, &answer, &hb, Err("no file"), false).unwrap();
+        assert_eq!((merged.removed, merged.emptied), (0, 0), "the same answer again takes nothing");
+    }
+
+    // "Delete from cloud" has to hold until the user says otherwise: the list
+    // is by server and partition, and survives whatever the file holds.
+    #[test]
+    fn partitions_deleted_here_stay_on_the_list_until_taken_off() {
+        let dir = std::env::temp_dir().join(format!("submarine-cloud-deleted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let list = dir.join("cloud_deleted.json");
+        let one = cloud_deleted_key("https://a.example", "p1");
+        let same_elsewhere = cloud_deleted_key("https://b.example", "p1");
+        let other = cloud_deleted_key("https://a.example", "p2");
+
+        assert!(!is_cloud_deleted(&list, &one));
+        set_cloud_deleted(&list, &one, false).unwrap();
+        assert!(!list.exists(), "nothing to note");
+        set_cloud_deleted(&list, &one, true).unwrap();
+        set_cloud_deleted(&list, &one, true).unwrap();
+        set_cloud_deleted(&list, &other, true).unwrap();
+        assert!(is_cloud_deleted(&list, &one) && is_cloud_deleted(&list, &other));
+        assert!(!is_cloud_deleted(&list, &same_elsewhere), "another server's is another partition");
+        assert_eq!(read_cloud_deleted(&list).len(), 2);
+
+        set_cloud_deleted(&list, &one, false).unwrap();
+        assert!(!is_cloud_deleted(&list, &one) && is_cloud_deleted(&list, &other));
+        set_cloud_deleted(&list, &other, false).unwrap();
+        assert!(!list.exists(), "an empty list leaves no file");
+
+        std::fs::write(&list, b"not json").unwrap();
+        assert!(!is_cloud_deleted(&list, &one));
+        set_cloud_deleted(&list, &one, true).unwrap();
+        assert!(is_cloud_deleted(&list, &one), "a bad file is replaced");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A stamp `ms` ahead of now: newer than anything a test device has
@@ -6096,6 +6243,10 @@ async fn cloud_list_sync_profiles(
 /// caller can only ever delete their own partition. The local vault (if any) is
 /// left alone; the UI offers "remove from this device" as a separate action.
 /// Returns the number of records the server removed.
+///
+/// The partition is noted on this device first: its local copy would otherwise
+/// go straight back up, escrow and all, at its next unlock (`sync_round`).
+/// Marked before the call so a mark that can't be written stops it there.
 #[tauri::command]
 async fn cloud_delete_profile(
     app: tauri::AppHandle,
@@ -6107,7 +6258,80 @@ async fn cloud_delete_profile(
         return Err("[SYNC] NO_PROFILE_NAME".into());
     }
     let session = cloud.session().await?;
-    cloud::delete_sync_profile(&app, &cloud, &session, &profile).await
+    let list = cloud_deleted_path(&app)?;
+    let key = cloud_deleted_key(session.base(), &profile);
+    let already = is_cloud_deleted(&list, &key);
+    set_cloud_deleted(&list, &key, true)?;
+    let deleted = cloud::delete_sync_profile(&app, &cloud, &session, &profile).await;
+    if deleted.is_err() && !already {
+        let _ = set_cloud_deleted(&list, &key, false);
+    }
+    deleted
+}
+
+/// The user's word to upload the open profile again after
+/// `cloud_delete_profile`: the next sync pushes it in full.
+#[tauri::command]
+async fn cloud_resume_profile(
+    app: tauri::AppHandle,
+    db_state: tauri::State<'_, DbState>,
+    cloud: tauri::State<'_, std::sync::Arc<cloud::CloudState>>,
+) -> Result<(), String> {
+    let base = cloud.base().await;
+    let partition = {
+        let profile = db_state.active_profile.lock().map_err(|_| "[SYNC] LOCK_PROFILE")?.clone().ok_or("[SYNC] NO_PROFILE_OPEN")?;
+        let conn_g = db_state.conn.lock().map_err(|_| "[STATE] LOCK_CONN")?;
+        let conn = conn_g.as_ref().ok_or("[STATE] DB_NOT_OPEN")?;
+        cloud_profile_of(conn, &profile)
+    };
+    set_cloud_deleted(&cloud_deleted_path(&app)?, &cloud_deleted_key(&base, &partition), false)
+}
+
+// The partitions deleted from the cloud on this device, which it doesn't upload
+// again until the user says so. Kept on this device and not in the vault: the
+// profile is closed when it's deleted, and may not be here at all.
+
+fn cloud_deleted_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(|e| format!("[SYSTEM] APP_DATA_DIR_NOT_FOUND: {e}"))?;
+    Ok(dir.join("cloud_deleted.json"))
+}
+
+fn cloud_deleted_key(server: &str, partition: &str) -> String {
+    format!("{server}|{partition}")
+}
+
+fn read_cloud_deleted(path: &Path) -> Vec<String> {
+    fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+fn is_cloud_deleted(path: &Path, key: &str) -> bool {
+    read_cloud_deleted(path).iter().any(|k| k == key)
+}
+
+/// Adds `key` to the list, or takes it off. No entries leave no file.
+fn set_cloud_deleted(path: &Path, key: &str, deleted: bool) -> Result<(), String> {
+    let mut list = read_cloud_deleted(path);
+    if list.iter().any(|k| k == key) == deleted {
+        return Ok(());
+    }
+    if deleted {
+        list.push(key.to_string());
+    } else {
+        list.retain(|k| k != key);
+    }
+    if list.is_empty() {
+        return fs::remove_file(path).map_err(|e| format!("[SYNC] CLOUD_DELETED_LIST: {e}"));
+    }
+    let bytes = serde_json::to_vec(&list).map_err(|e| format!("[SYNC] CLOUD_DELETED_LIST: {e}"))?;
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("json.tmp");
+    let written = fs::write(&tmp, bytes).and_then(|_| fs::rename(&tmp, path));
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written.map_err(|e| format!("[SYNC] CLOUD_DELETED_LIST: {e}"))
 }
 
 /// Replace this profile's entire cloud copy with what's on THIS device.
@@ -6151,6 +6375,8 @@ async fn force_push_profile(
     if share_id.is_some() {
         return Err("[SYNC] SHARED_PROFILE: this profile is shared with other people, and replacing the cloud copy would delete their changes too. Stop sharing first if you really want to reset it.".into());
     }
+    // Asking for the cloud copy to be replaced is saying to upload it.
+    set_cloud_deleted(&cloud_deleted_path(&app)?, &cloud_deleted_key(session.base(), &cloud_profile), false)?;
     let removed = cloud::delete_sync_profile(&app, &cloud, &session, &cloud_profile).await?;
     eprintln!("[SYNC] force push: server dropped {removed} record(s) for '{cloud_profile}'");
     // Pushes are always a full set, so the very next sync repopulates the
@@ -6336,11 +6562,42 @@ async fn delete_profile(app_handle: tauri::AppHandle, name: String, state: tauri
     // the profile itself is already gone, so a locked tmp shouldn't fail the
     // delete the user asked for.
     let _ = fs::remove_file(path.with_extension("submarine.tmp"));
-    // Same for the copies a deleting sync kept (`<name>.submarine.bak-*`).
+    // Same for the copies a deleting sync kept (`<name>.submarine.bak-*`), and
+    // the mark of one put back (`<name>.submarine.put-back`).
     vault_backup::forget(&path);
     // This device's quick unlock for the profile, and its Windows Hello key.
     quick_unlock::forget(&app_handle, &name);
     Ok(())
+}
+
+/// The copies kept of a profile (vault_backup.rs), newest first.
+#[tauri::command]
+async fn profile_copies(app_handle: tauri::AppHandle, name: String) -> Result<Vec<vault_backup::KeptCopy>, String> {
+    validate_profile_name(&name)?;
+    Ok(vault_backup::list(&profile_path(&app_handle, &name)?))
+}
+
+/// Makes a kept copy the profile again (vault_backup.rs). The profile has to
+/// be closed: the file changes under it, as with `delete_profile`.
+#[tauri::command]
+async fn restore_profile_copy(app_handle: tauri::AppHandle, name: String, file: String, state: tauri::State<'_, DbState>) -> Result<(), String> {
+    validate_profile_name(&name)?;
+    let path = profile_path(&app_handle, &name)?;
+    // Open here (after a page reload, say): its next save would write the
+    // open state over the copy.
+    if state.has_open(&path)? {
+        return Err("[PROFILE] Lock this profile first.".into());
+    }
+    {
+        let mut held = state.profile_lock.lock().map_err(|_| "[STATE] LOCK_FAILED_PROFILE_LOCK")?;
+        if held.as_ref().is_some_and(|(p, _)| *p == path) {
+            *held = None;
+        }
+    }
+    // Held to the end: no window can open it while the file changes.
+    let _probe = try_lock_file(&path.with_extension("submarine.lock"))?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    vault_backup::put_back(&path, &file, now)
 }
 
 /// Copy a profile's encrypted file to a user-chosen location so it can be
@@ -26231,7 +26488,7 @@ pub fn run() {
             identity_status, setup_identity, reset_identity,
             share_current_profile, invite_to_share, list_shares, share_member_list,
             accept_share, import_shared_profile, restore_personal_profile, share_set_role, share_revoke, share_leave, share_delete,
-            profile_share_status, stop_sharing, profile_sync_stats, share_key_state, accept_share_key, share_replace_key, held_deletions_list, resolve_held_deletions,
+            profile_share_status, stop_sharing, profile_sync_stats, share_key_state, accept_share_key, share_replace_key, held_deletions_list, resolve_held_deletions, cloud_resume_profile, profile_copies, restore_profile_copy,
             set_editor_label,
             add_server, save_quick_connect_node, edit_server, delete_server, add_mirror_to_server, get_servers, allow_held, get_ssh_keys, set_server_color, set_folder_color, set_server_notes, set_server_run_on_connect, set_server_jump_host, set_server_protocol, reorder_servers, clone_server, reveal_server_password, reveal_credential_password, reveal_ssh_key,
             get_credentials, generate_ssh_key,

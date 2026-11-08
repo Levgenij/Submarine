@@ -171,6 +171,9 @@ fn write_stored_token(app: &tauri::AppHandle, tok: &StoredToken) -> Result<(), S
     // portable mode app_data_dir is the user's own `submarine-data` folder,
     // so its ACLs are whatever they made them - the README tells them to keep
     // it private.
+    //
+    // Written next to itself and renamed over: a crash halfway through must
+    // not leave half a token, which signs the user out.
     use std::io::Write;
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
@@ -179,10 +182,18 @@ fn write_stored_token(app: &tauri::AppHandle, tok: &StoredToken) -> Result<(), S
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut f = opts.open(&path).map_err(|e| format!("[CLOUD] TOKEN_OPEN: {}", e))?;
-    f.write_all(&bytes).map_err(|e| format!("[CLOUD] TOKEN_WRITE: {}", e))?;
-    f.sync_all().map_err(|e| format!("[CLOUD] TOKEN_FSYNC: {}", e))?;
-    Ok(())
+    let tmp = path.with_extension("json.tmp");
+    let written = (|| -> Result<(), String> {
+        let mut f = opts.open(&tmp).map_err(|e| format!("[CLOUD] TOKEN_OPEN: {}", e))?;
+        f.write_all(&bytes).map_err(|e| format!("[CLOUD] TOKEN_WRITE: {}", e))?;
+        f.sync_all().map_err(|e| format!("[CLOUD] TOKEN_FSYNC: {}", e))?;
+        drop(f);
+        std::fs::rename(&tmp, &path).map_err(|e| format!("[CLOUD] TOKEN_RENAME: {}", e))
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
 }
 
 fn delete_stored_token(app: &tauri::AppHandle) {

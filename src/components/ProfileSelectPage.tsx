@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   Plus, Trash2, X, AlertTriangle, ArrowRight, Download, Upload,
   CheckCircle2, Cloud, CloudOff, HardDrive, ChevronDown, RefreshCw, ArrowUpCircle,
-  Eye, EyeOff, ArrowBigUp, Check, Fingerprint, Loader2,
+  Eye, EyeOff, ArrowBigUp, Check, Fingerprint, Loader2, History,
 } from "lucide-react";
 import CloudPanel from "./CloudPanel";
 import { bookmarksKeyPrefix } from "./SftpWorkspace";
@@ -33,6 +33,12 @@ interface CloudStatus { signed_in: boolean; email: string | null; }
 // partition key (a name for legacy profiles, a UUID for new ones); `name` is the
 // human-readable label to show and to restore under.
 interface CloudProfile { profile: string; name: string; records: number; live_records: number; last_updated: string; }
+// A copy of a profile kept before a sync deleted or emptied something in it
+// (vault_backup.rs). `when` is in Unix seconds.
+interface KeptCopy { file: string; when: number; }
+// When a kept copy was made, as a person reads it.
+const copyDate = (unix: number) =>
+  new Date(unix * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "medium" });
 // Result of the GitHub release check (backend: about::check_for_updates).
 // `has_update` is true only when `latest` is a strictly newer semver than the
 // running build.
@@ -212,6 +218,17 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
     }
   };
   useEffect(() => { reload(); /* eslint-disable-next-line */ }, []);
+
+  // The copies kept of the expanded local profile, for its actions.
+  const [copies, setCopies] = useState<{ name: string; list: KeptCopy[] }>({ name: "", list: [] });
+  const loadCopies = useCallback(async (name: string) => {
+    const list = await invoke<KeptCopy[]>("profile_copies", { name }).catch(() => []);
+    setCopies({ name, list });
+  }, []);
+  useEffect(() => {
+    if (selected && profiles.includes(selected)) void loadCopies(selected);
+    else setCopies({ name: "", list: [] });
+  }, [selected, profiles, loadCopies]);
 
   // Cloud connection + the account's profile list. Best-effort: a network
   // failure must never block unlocking a local profile, so errors are swallowed
@@ -557,13 +574,38 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
     }
   };
 
+  // Go back to a copy kept before a sync deleted or emptied something. What
+  // the profile holds now is kept too, so the wrong copy can be undone the same
+  // way. Only the backend's put-back works: a file renamed back by hand loses
+  // the same rows again at the next sync.
+  const putBack = async (name: string, copy: KeptCopy) => {
+    if (busy) return;
+    const when = copyDate(copy.when);
+    const ok = await confirm({
+      title: "Put this copy back?",
+      message: `Go back to "${name}" as it was on ${when}?\n\nWhat a sync deleted or emptied since then comes back here and, at the next sync, on your other devices and for anyone you share it with. What the profile holds now is kept as another copy.`,
+      okLabel: "Put it back",
+    });
+    if (!ok) return;
+    setBusy(true); setError(null); setInfo(null);
+    try {
+      await invoke("restore_profile_copy", { name, file: copy.file });
+      setInfo(`"${name}" is back as it was on ${when}. Open it with its password.`);
+    } catch (e: any) {
+      setError(cleanErr(e));
+    } finally {
+      setBusy(false);
+      void loadCopies(name);
+    }
+  };
+
   // Owner-only hard delete of the cloud copy (the /sync store is per-account, so
   // you can only ever delete your own). Local copies are untouched.
   const deleteFromCloud = async (row: Row) => {
     if (!row.cloud) return;
     const ok = await confirm({
       title: "Delete from cloud",
-      message: `Delete "${row.name}" from your cloud?\n\nThis erases its synced copy and its restore key from the cloud. Copies already on your devices are NOT touched. This can't be undone.`,
+      message: `Delete "${row.name}" from your cloud?\n\nThis erases its synced copy and its restore key from the cloud, and can't be undone. Copies on your devices are NOT touched.\n\nThis device won't upload it again until you say so in the profile's Profile panel. Any other device that has it puts it back at its next sync, so remove it there first.`,
       destructive: true,
       okLabel: "Delete from cloud",
     });
@@ -925,6 +967,15 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
                             )}
                             <div className="flex flex-wrap items-center gap-1.5">
                               <RowAction onClick={() => exportProfile(row.name)} disabled={busy} icon={<Download size={12} />} label="Export" />
+                              {(copies.name === row.name ? copies.list : []).map((copy) => (
+                                <RowAction
+                                  key={copy.file}
+                                  onClick={() => putBack(row.name, copy)}
+                                  disabled={busy}
+                                  icon={<History size={12} />}
+                                  label={`Put back the copy of ${copyDate(copy.when)}…`}
+                                />
+                              ))}
                               <RowAction onClick={() => removeLocal(row.name)} disabled={busy} icon={<Trash2 size={12} />} label="Remove local" danger />
                               {row.cloud && (
                                 <RowAction onClick={() => deleteFromCloud(row)} disabled={busy} icon={<CloudOff size={12} />} label="Delete from cloud" danger />

@@ -58,6 +58,8 @@ interface ShareStatus {
   current_server: string;
   /** Whether that is a self-hosted one, not the default. */
   custom_server: boolean;
+  /** Deleted from the cloud on this device: it isn't uploaded until the user says so. */
+  cloud_deleted: boolean;
 }
 
 interface MemberInfo { user_id: number; email: string; role: string; status: string; }
@@ -323,6 +325,16 @@ export default function ProfilePanel({ onSync, syncing, lastSyncLabel, autoSync,
     } catch (e) { fail(e); } finally { setBusy(false); }
   };
 
+  // Deleted from the cloud on this device: the user's word to upload it again.
+  const uploadAgain = async () => {
+    setBusy(true); setErr(null);
+    try {
+      await invoke("cloud_resume_profile");
+      await refresh();
+      await doSync();
+    } catch (e) { fail(e); } finally { setBusy(false); }
+  };
+
   const card = "bg-zinc-900/40 border border-white/5 rounded-xl p-4 space-y-3";
   const label = "text-[11px] font-bold uppercase tracking-wider text-zinc-500";
 
@@ -402,6 +414,26 @@ export default function ProfilePanel({ onSync, syncing, lastSyncLabel, autoSync,
                 className="h-8 px-3 rounded-lg bg-amber-500/20 border border-amber-400/30 text-amber-100 text-[12px] font-bold hover:bg-amber-500/30 disabled:opacity-40"
               >
                 Sync with {hostOf(st.current_server)}
+              </button>
+            )}
+          </div>
+        )}
+        {st?.cloud_deleted && (
+          <div className="px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/25 text-amber-100 text-[12px] space-y-2">
+            <div className="flex items-start gap-2">
+              <AlertTriangle size={13} className="mt-0.5 shrink-0 text-amber-300" />
+              <span className="flex-1 break-words">
+                You deleted this profile from the cloud on this device, so it doesn't sync now. Upload it again if you
+                want it back there.
+              </span>
+            </div>
+            {signedIn && (
+              <button
+                onClick={uploadAgain}
+                disabled={busy}
+                className="h-8 px-3 rounded-lg bg-amber-500/20 border border-amber-400/30 text-amber-100 text-[12px] font-bold hover:bg-amber-500/30 disabled:opacity-40"
+              >
+                Upload it again
               </button>
             )}
           </div>
