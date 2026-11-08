@@ -524,16 +524,21 @@ function DesktopApp() {
   };
 
   // What a shared profile waits on the user for: a new key, as a fingerprint
-  // (until it's accepted a sync only pulls, see note_share_key), and
-  // deletions someone else's sync would have made here (see HeldDeletions).
+  // (until it's accepted a sync only pulls, see note_share_key), a grant the
+  // sync couldn't open ("locked" while sharing is, "checking" until a sync has
+  // tried it since, "unreadable" if that didn't open it; see note_share_grant),
+  // and deletions someone else's sync would have made here (see HeldDeletions).
   const [shareKeyChange, setShareKeyChange] = useState<string | null>(null);
+  const [shareGrant, setShareGrant] = useState<"locked" | "checking" | "unreadable" | null>(null);
   const [heldDeletions, setHeldDeletions] = useState<HeldDeletion[]>([]);
   const refreshSharedState = useCallback(async () => {
     try {
-      const s = await invoke<{ current: string | null; pending: string | null }>("share_key_state");
+      const s = await invoke<{ current: string | null; pending: string | null; grant_unread: boolean; grant_refused: boolean; identity_unlocked: boolean }>("share_key_state");
       setShareKeyChange(s.pending);
+      setShareGrant(!s.grant_unread ? null : s.grant_refused ? "unreadable" : s.identity_unlocked ? "checking" : "locked");
     } catch {
       setShareKeyChange(null);
+      setShareGrant(null);
     }
     try {
       setHeldDeletions(await invoke<HeldDeletion[]>("held_deletions_list"));
@@ -556,7 +561,7 @@ function DesktopApp() {
       addLog(`Cloud sync complete - pushed ${report.pushed}, pulled ${report.pulled}.`, "success");
       logRemoved(report);
       if (report.key_change) {
-        addLog("This shared profile's key has changed. Your changes aren't uploaded until you accept the new key (Servers → Review).", "info");
+        addLog("This shared profile's key has changed. Your changes aren't uploaded until you deal with the notice in Servers.", "info");
       }
     } catch (e) {
       const msg = String(e);
@@ -589,13 +594,14 @@ function DesktopApp() {
   // What a shared profile still waits on from an earlier session shows on unlock.
   useEffect(() => {
     if (isUnlocked) refreshSharedState();
-    else { setShareKeyChange(null); setHeldDeletions([]); }
+    else { setShareKeyChange(null); setShareGrant(null); setHeldDeletions([]); }
   }, [isUnlocked, refreshSharedState]);
   // The user compared the new key's fingerprint with the owner's: use it, and
-  // sync, which uploads again.
-  const acceptShareKey = useCallback(async () => {
+  // sync, which uploads again. `fingerprint` is the one they saw: the backend
+  // refuses if another key has come in since.
+  const acceptShareKey = useCallback(async (fingerprint: string) => {
     try {
-      await invoke("accept_share_key");
+      await invoke("accept_share_key", { fingerprint });
       addLog("This shared profile now uses its new key.", "success");
     } catch (e) {
       addLog(`Couldn't switch to the new key: ${e}`, "error");
@@ -892,6 +898,34 @@ function DesktopApp() {
 
   const confirm = useConfirm();
   const textPrompt = useTextPrompt();
+
+  // A shared profile's grant changed while sharing was locked, so the sync
+  // can't tell whether its key did: unlock sharing, and sync, which opens the
+  // grant. A key that did change then waits for the user's OK as usual. The
+  // same passphrase as ever, so no rule for it here but that it's there.
+  const unlockSharing = async () => {
+    const pass = await textPrompt({
+      title: "Unlock sharing",
+      message:
+        "This shared profile's key may have changed. Enter your sharing passphrase to check. " +
+        "Until then this device can't read what's new, and your changes aren't uploaded. The passphrase never leaves this device.",
+      placeholder: "Sharing passphrase",
+      password: true,
+      okLabel: "Unlock",
+      validate: (v) => (v.length < 1 ? "Enter your sharing passphrase" : null),
+    });
+    if (!pass) return;
+    try {
+      await invoke("setup_identity", { encPassphrase: pass });
+      addLog("Sharing unlocked.", "success");
+    } catch (e) {
+      addLog(`Couldn't unlock sharing: ${String(e).replace(/^\[[A-Z_]+\]\s*/, "")}`, "error");
+      return;
+    }
+    await handleCloudSync();
+    // Also when that sync failed: sharing is unlocked either way.
+    await refreshSharedState();
+  };
 
   // Window-close guard. Keep `sessions` mirrored into a ref so the close
   // handler (which is registered ONCE inside useEffect, capturing snapshot
@@ -1950,6 +1984,8 @@ function DesktopApp() {
                 }}
                 keyChange={shareKeyChange}
                 onAcceptKey={acceptShareKey}
+                shareGrant={shareGrant}
+                onUnlockSharing={unlockSharing}
                 onAllowHeld={allowHeld}
                 heldDeletions={heldDeletions}
                 onResolveDeletions={resolveHeldDeletions}

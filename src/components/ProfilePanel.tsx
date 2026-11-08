@@ -63,6 +63,9 @@ interface ShareStatus {
 interface MemberInfo { user_id: number; email: string; role: string; status: string; }
 // A member who wasn't given a share's new key after a removal, and why.
 interface LeftOut { email: string; reason: string; }
+// What came of replacing a share's key. `first_seen`: members who got the new
+// key with no key of theirs on record here to check against.
+interface KeyResult { left_out: LeftOut[]; first_seen: string[]; }
 const LEFT_OUT_WHY: Record<string, string> = {
   key_changed: "their sharing key changed since you invited them",
   other_account: "the server answered for another account",
@@ -73,6 +76,12 @@ const LEFT_OUT_WHY: Record<string, string> = {
 const leftOutText = (l: LeftOut[]) =>
   "These people didn't get the new key, so they can't see changes from now on until you invite them again: " +
   l.map((x) => `${x.email} (${LEFT_OUT_WHY[x.reason] ?? x.reason})`).join(", ") + ".";
+// The member list comes from the server, so a name it added would get the key
+// too. This device can't tell, but the owner can.
+const firstSeenText = (emails: string[]) =>
+  `The new key also went to ${emails.join(", ")}, with no earlier key on record here to check. If you don't know someone on that list, remove them.`;
+const keyResultText = (r: KeyResult) =>
+  [r.left_out.length > 0 && leftOutText(r.left_out), r.first_seen.length > 0 && firstSeenText(r.first_seen)].filter(Boolean).join(" ");
 
 type Props = {
   onSync: () => Promise<void> | void;
@@ -236,11 +245,11 @@ export default function ProfilePanel({ onSync, syncing, lastSyncLabel, autoSync,
     try {
       // Removing someone replaces the key, which needs the sharing identity.
       if (!(await ensureIdentity())) return;
-      const r = await invoke<{ left_out: LeftOut[] }>("share_revoke", { shareId: st!.share_id, memberUserId: m.user_id });
+      const r = await invoke<KeyResult>("share_revoke", { shareId: st!.share_id, memberUserId: m.user_id });
       setKeyRetry(false);
       await refresh();
       loadStats(); // the removal synced
-      if (r.left_out.length) fail(`${m.email} removed. ${leftOutText(r.left_out)}`);
+      if (keyResultText(r)) fail(`${m.email} removed. ${keyResultText(r)}`);
       else flash(`${m.email} removed.`);
     } catch (e) {
       // Out of the share, but the key wasn't replaced: offer to finish it.
@@ -255,11 +264,11 @@ export default function ProfilePanel({ onSync, syncing, lastSyncLabel, autoSync,
     setBusy(true); setErr(null);
     try {
       if (!(await ensureIdentity())) return;
-      const r = await invoke<{ left_out: LeftOut[] }>("share_replace_key");
+      const r = await invoke<KeyResult>("share_replace_key");
       setKeyRetry(false);
       await refresh();
       loadStats();
-      if (r.left_out.length) fail(`Key replaced. ${leftOutText(r.left_out)}`);
+      if (keyResultText(r)) fail(`Key replaced. ${keyResultText(r)}`);
       else flash("Key replaced.");
     } catch (e) { fail(e); } finally { setBusy(false); }
   };
