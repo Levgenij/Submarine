@@ -31,6 +31,8 @@ export interface Transfer {
   launching?: boolean;
   /** Bytes per second over the last few seconds; unset until there is enough data. */
   speed?: number;
+  /** A folder download still listing its tree: the files found so far. */
+  listed?: number;
 }
 
 interface TransfersViewProps {
@@ -213,7 +215,9 @@ const TransferRow = ({ t, onCancel }: { t: Transfer; onCancel: (id: string) => v
   const launching = t.status === "progress" && t.launching;
   // No byte and no size yet (an open waiting for its lock, a folder walk):
   // an empty bar, so the row does not flash the sweep before the size arrives.
-  const starting = t.status === "progress" && t.bytes === 0 && t.total === 0;
+  // A folder walk that has found files is not starting: it counts them.
+  const listing = t.status === "progress" && t.total === 0 && t.listed !== undefined;
+  const starting = t.status === "progress" && t.bytes === 0 && t.total === 0 && !listing;
   const Icon =
     t.status === "error"     ? AlertTriangle :
     t.status === "done"      ? Check :
@@ -239,7 +243,8 @@ const TransferRow = ({ t, onCancel }: { t: Transfer; onCancel: (id: string) => v
     starting                 ? <span className="text-zinc-400">Starting…</span> :
     pct !== null             ? <span className="text-blue-400">{Math.floor(pct)}%</span> :
                                null;
-  const sizeText = t.total > 0 ? `${formatBytes(t.bytes)} / ${formatBytes(t.total)}` : formatBytes(t.bytes);
+  const sizeText = listing ? `${t.listed!.toLocaleString()} file${t.listed === 1 ? "" : "s"} found`
+    : t.total > 0 ? `${formatBytes(t.bytes)} / ${formatBytes(t.total)}` : formatBytes(t.bytes);
   const rate = t.status === "progress" && !launching && t.speed && t.speed > 0
     ? [formatSpeed(t.speed), t.total > t.bytes ? formatEta((t.total - t.bytes) / t.speed) : null].filter(Boolean).join(" · ")
     : null;
