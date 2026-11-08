@@ -852,8 +852,16 @@ function DesktopApp() {
       // and a telnet or VNC server waits until it is opened.
       const toStart = list.filter((s) => s.autostart && !isHeld(s) && !restoredIds.has(s.id) && (s.protocol ?? "ssh") === "ssh");
       const base = (s: any): Session => ({ id: `session-${s.id}`, serverId: s.id, serverName: s.name, serverUuid: s.uuid ?? null, protocol: s.protocol === "rdp" || s.protocol === "telnet" || s.protocol === "vnc" ? s.protocol : "ssh", mirrors: s.mirrors });
+      // A server whose address someone else changed in a shared profile isn't
+      // reopened by itself: opening it by hand asks first (openServer).
+      const isMoved = (s: any) => (s.held || []).some((i: string) => i.startsWith("moved:"));
+      const movedAway = snap.sessions.filter((r) => isMoved(byId.get(r.serverId)));
+      if (movedAway.length > 0) {
+        addLog(`${movedAway.map((r) => byId.get(r.serverId).name).join(", ")} moved to a new address; open it to confirm.`, "info");
+      }
+      const restorable = snap.sessions.filter((r) => !isMoved(byId.get(r.serverId)));
       const newSessions: Session[] = [
-        ...snap.sessions.map((r) => ({
+        ...restorable.map((r) => ({
           ...base(byId.get(r.serverId)),
           customName: r.customName,
           initialTerminals: r.terminals,
@@ -867,8 +875,8 @@ function DesktopApp() {
         const fresh = newSessions.filter((n) => !seen.has(n.id));
         return [...prev, ...fresh];
       });
-      setActiveView(snap.activeServerId != null ? `session-${snap.activeServerId}` : newSessions[0].id);
-      if (snap.sessions.length > 0) addLog(`Restored ${snap.sessions.length} session${snap.sessions.length === 1 ? "" : "s"}.`, "info");
+      setActiveView(snap.activeServerId != null && !movedAway.some((r) => r.serverId === snap.activeServerId) ? `session-${snap.activeServerId}` : newSessions[0].id);
+      if (restorable.length > 0) addLog(`Restored ${restorable.length} session${restorable.length === 1 ? "" : "s"}.`, "info");
       if (toStart.length > 0) addLog(`Autostart: opened ${toStart.length} node${toStart.length === 1 ? "" : "s"}.`, "info");
     } catch (e) {
       addLog(`AUTOSTART_LOAD_FAILED: ${e}`, "error");
@@ -990,11 +998,25 @@ function DesktopApp() {
     addLog("Profile locked.", "info");
   };
 
-  const openServer = (server: any) => {
+  const openServer = async (server: any) => {
     const sessionId = `session-${server.id}`;
     const existing = sessions.find(s => s.id === sessionId);
     if (!existing) {
-      setSessions([...sessions, {
+      // Someone moved this server and this device hasn't allowed it: it still
+      // connects, but not unasked. Cancel has the focus, as for held commands.
+      const moved: string | undefined = (server.held || []).find((i: string) => i.startsWith("moved:"));
+      if (moved) {
+        const ok = await confirm({
+          title: "Connect to the new address?",
+          message: `${server.name} now connects to ${server.moved_to || "a new address"}. It connected to ${moved.slice("moved:".length)}, and this device hasn't allowed the change.`,
+          okLabel: "Allow and connect",
+          cancelLabel: "Not now",
+          safeDefault: true,
+        });
+        if (!ok) return;
+        await allowHeld(server.id, [moved]);
+      }
+      setSessions((prev: Session[]) => prev.some((s) => s.id === sessionId) ? prev : [...prev, {
         id: sessionId,
         serverId: server.id,
         serverName: server.name,
@@ -1008,8 +1030,8 @@ function DesktopApp() {
         runOnConnect: server.run_on_connect || "",
         // And once into each new terminal of the tab (#256).
         runOnConnectEvery: !!server.run_on_connect_every,
-        // Set or changed by someone this profile is shared with, not allowed
-        // here yet: SessionView asks before typing them.
+        // Set or changed elsewhere, not allowed here yet: SessionView asks
+        // before typing them.
         runOnConnectHeld: (server.held || []).includes("run_on_connect"),
       }]);
     }
