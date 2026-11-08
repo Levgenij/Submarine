@@ -12,7 +12,7 @@ import { BookmarkToggle, NEXT_BOOKMARK_STATE, type BookmarkState } from "./Bookm
 import { FileEntry, FileProvider, LinkInfo } from "../fs/types";
 import { carryLinkState, mergePermissions, permissionOctal, safeLeafName, shellSingleQuote } from "../fs/dirContext";
 import { useConfirm, useOverwritePrompt, OverwriteChoice, OverwritePromptOptions } from "../ui/confirm";
-import { IS_ANDROID } from "../util/platform";
+import { IS_ANDROID, IS_WINDOWS } from "../util/platform";
 import { nameFilterMatcher } from "../util/nameFilter";
 import {
   acquireTransferSlot, dropQueued, enqueueTransfers, getQueued, isQueued, queueSignal, startQueued, waitForTurn,
@@ -1342,7 +1342,11 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         const { paths, position } = event.payload || ({} as any);
         const pane = dropTargetRef.current?.closest("[data-fs-pane]");
         if (!paths?.length || !pane) return;
-        const hit = document.elementFromPoint(position.x, position.y);
+        // Physical pixels on Windows; elementFromPoint takes CSS pixels, which
+        // is what macOS and Linux report. At another scale than 100% this
+        // tested a point further out: the other pane, or another server's.
+        const scale = IS_WINDOWS ? window.devicePixelRatio : 1;
+        const hit = document.elementFromPoint(position.x / scale, position.y / scale);
         if (!hit || !pane.contains(hit)) return;
         setDragOver(false);
         const dir = currentPathRef.current;
@@ -1382,13 +1386,22 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
 
   // ---- modals -----------------------------------------------------------------
 
+  // The dialog stays up until the server answers: a second Enter on a slow
+  // link would run the rename or mkdir again, and report a failure over one
+  // that worked.
+  const submittingRef = useRef(false);
   const submitModal = async () => {
-    if (!modal) return;
+    if (!modal || submittingRef.current) return;
     const { type, entry, v1, v2 } = modal;
     if (type === "archive") {
       // Stays open when the name is rejected; the packing itself runs on
       // after the dialog closes.
-      if (await startArchive(modal.items ?? [], v1 || "", (v2 || "zip") as ArchiveFormat)) setModal(null);
+      submittingRef.current = true;
+      try {
+        if (await startArchive(modal.items ?? [], v1 || "", (v2 || "zip") as ArchiveFormat)) setModal(null);
+      } finally {
+        submittingRef.current = false;
+      }
       return;
     }
     if (type === "mkdir" || type === "newfile" || type === "symlink") {
@@ -1432,6 +1445,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         }
       }
     }
+    // After the checks above, which return with the dialog still open.
+    submittingRef.current = true;
     try {
       if (type === "rename" && entry && v1) {
         const destDir = provider.parentPath(entry.path);
@@ -1516,6 +1531,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     } catch (err: any) {
       notify(`Failed: ${err}`, "error");
     } finally {
+      submittingRef.current = false;
       setModal(null);
     }
   };
@@ -3311,7 +3327,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           <div className="ml-auto flex flex-wrap justify-end items-center gap-1.5">
             {isRemote ? (
               <button
-                onClick={() => downloadItems(sortedEntries.filter(e => selected.has(e.path)))}
+                // The second click of a double click: not a second batch.
+                onClick={(ev) => { if (ev.detail < 2) downloadItems(sortedEntries.filter(e => selected.has(e.path))); }}
                 title={getOppositeDir?.()
                   ? `Download to ${getOppositeDir!()}`
                   : "Pick a destination folder…"}
@@ -3322,7 +3339,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
               </button>
             ) : (
               <button
-                onClick={() => uploadItems(sortedEntries.filter(e => selected.has(e.path)))}
+                onClick={(ev) => { if (ev.detail < 2) uploadItems(sortedEntries.filter(e => selected.has(e.path))); }}
                 title={getOppositeDir?.()
                   ? `Upload to ${getOppositeDir!()}`
                   : "Open a remote directory first…"}

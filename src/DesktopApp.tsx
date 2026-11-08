@@ -35,7 +35,7 @@ import { DEFAULT_VNC_OPTIONS, forgetVncOptions, readVncOptions, writeVncOptions 
 import { Sidebar } from "./components/Sidebar";
 import { NodeGrid } from "./components/NodeGrid";
 import { CommandScope, describeScope, parseCommandScope, scopeToJson } from "./util/commandScope";
-import { parseObjectList } from "./util/serverJson";
+import { normalizeMirror, normalizeTunnel, parseObjectList } from "./util/serverJson";
 import { folderTree } from "./util/folderTree";
 import CommandScopePicker from "./components/CommandScopePicker";
 import type { HeldDeletion } from "./components/HeldDeletions";
@@ -1149,7 +1149,11 @@ function DesktopApp() {
       .catch((e) => addLog(`QUICK_NODE_SAVE_FAILED: ${e}`, "error"));
   };
 
-  const handleEditNode = async (server: any) => {
+  const handleEditNode = async (row: any) => {
+    // The form fills from the table, not from the list on screen: the Ports,
+    // Mirror and Library panels write the row themselves, and Save writes all
+    // of it back.
+    const server = (await invoke<any[]>("get_servers").catch(() => null))?.find((s) => s.id === row.id) ?? row;
     // Servers come back from get_servers with `has_password` (boolean) but
     // no plaintext. Reveal the secret only when the user opens the edit
     // sheet — that way the password never sits in renderer memory during
@@ -1180,9 +1184,9 @@ function DesktopApp() {
       proxyType: server.proxy_type || "none",
       proxyHost: server.proxy_host || "",
       proxyPort: server.proxy_port || 1080,
-      tunnels: parseObjectList(server.tunnels),
+      tunnels: parseObjectList(server.tunnels).map(normalizeTunnel),
       autostart: !!server.autostart,
-      mirrors: parseObjectList(server.mirrors),
+      mirrors: parseObjectList(server.mirrors).map(normalizeMirror),
       color: server.color ?? null,
       notes: server.notes || "",
       runOnConnect: server.run_on_connect || "",
