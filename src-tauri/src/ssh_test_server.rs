@@ -53,6 +53,8 @@ pub(crate) struct TestServer {
     /// Answer every `exec`, whatever the command, with these bytes and then
     /// output that doesn't end until the channel is gone.
     flood_exec: Option<Vec<u8>>,
+    /// Channels the client has closed.
+    pub closed: Arc<AtomicUsize>,
 }
 
 /// How the test server runs `exec` commands with the local `sh` (unix only).
@@ -373,6 +375,7 @@ impl server::Handler for TestServer {
     }
 
     async fn channel_close(&mut self, channel: ChannelId, _session: &mut Session) -> Result<(), Self::Error> {
+        self.closed.fetch_add(1, Ordering::SeqCst);
         self.stdin.remove(&channel);
         if self.shell.as_ref().is_some_and(|s| s.keep_running_on_close) {
             return Ok(());
