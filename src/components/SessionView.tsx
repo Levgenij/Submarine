@@ -361,7 +361,7 @@ function writeFollow(on: boolean) {
   window.dispatchEvent(new CustomEvent<boolean>(FOLLOW_EVENT, { detail: on }));
 }
 
-const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, chromeless = false, onTerminalsChange, isActiveView = false, shown = false, onPromptChange }: any) => {
+const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, chromeless = false, onTerminalsChange, isActiveView = false, shown: sessionShown = false, onPromptChange }: any) => {
   const [status, setStatus] = useState<'connecting' | 'connected' | 'failed' | 'disconnected'>('connecting');
 
   // Bubble every status change up to the parent so the session-tab strip
@@ -2325,8 +2325,8 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
           {/* One flat list under this one parent, whatever the split does: a
               terminal that changed parent would be remounted, which ends its
               shell and wipes its scrollback. Only each terminal's box differs:
-              a pane has its place in the area, the rest lie over all of it,
-              hidden. */}
+              a pane has its place in the area, the rest wait out of view, at
+              the size of all of it. */}
           {terminals.map(t => {
             const slot = splitOn ? splitTerminals.indexOf(t.id) : -1;
             const inSplit = slot >= 0;
@@ -2349,7 +2349,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                           ? "border-primary/40 shadow-[inset_0_0_0_1px_rgba(var(--primary),0.15)]"
                           : "border-white/[0.03]"
                       }`
-                    : `inset-0 ${inView ? 'opacity-100 z-10' : 'opacity-0 z-0 pointer-events-none'}`
+                    : inView ? 'inset-0 opacity-100 z-10' : 'out-of-view z-0'
                 }`}
               >
                 <TerminalView
@@ -2357,7 +2357,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   terminalId={t.id}
                   disabled={status !== 'connected'}
                   isActive={shown && isFocused}
-                  shown={shown}
+                  shown={shown && sessionShown}
                   isActiveView={isActiveView}
                   focusSignal={focusTick}
                   containerExec={t.container ? { container: t.container.name, useSudo: t.container.useSudo } : undefined}
@@ -2570,7 +2570,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
             <InfoPanel
               sessionId={session.id}
               disabled={status !== 'connected'}
-              visible={activeTool === 'info' && shown}
+              visible={activeTool === 'info' && sessionShown}
               onOpenContainerTerminal={openContainerTerminal}
             />
           </div>

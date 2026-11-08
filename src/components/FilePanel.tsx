@@ -3134,7 +3134,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                       <div className="absolute inset-y-0 left-0 -z-10 w-1/3 bg-indigo-400/50 pointer-events-none open-progress-indeterminate" />
                     ) : (
                       <div
-                        className="absolute inset-y-0 left-0 -z-10 bg-indigo-400/45 pointer-events-none transition-[width] duration-150 ease-linear"
+                        className="absolute inset-y-0 left-0 -z-10 bg-indigo-400/45 pointer-events-none"
                         style={{ width: `${openPct === 0 ? 0 : Math.max(openPct, 1.5)}%` }}
                       />
                     )}

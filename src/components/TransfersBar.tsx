@@ -1,10 +1,20 @@
+import { useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { AlertTriangle, Ban, Check, ChevronDown, ChevronUp, Clock, Download, ExternalLink, Upload, X } from "lucide-react";
-import type { QueuedTransfer } from "../fs/transferQueue";
+import { dropQueued, useQueuedTransfers, type QueuedTransfer } from "../fs/transferQueue";
 
 // Docked transfers section at the bottom of the SFTP file card. One row per
 // live upload/download (from `sftp-transfer-<session>` events), then the
-// batch items still waiting their turn. Speed and time left are computed by
-// SftpWorkspace from the progress samples; the backend only sends bytes.
+// batch items still waiting their turn. Speed and time left are computed here
+// from the progress samples; the backend only sends bytes. The events, and the
+// state they fill, live in this component and not in SftpWorkspace: ~10 of
+// them a second then redraw this bar and not the workspace with both file lists.
+
+// Speed is measured over this trailing window of progress samples, so one
+// slow or fast chunk does not make the number jump.
+const SPEED_WINDOW_MS = 3000;
+const SPEED_MIN_SPAN_MS = 500;
 
 export interface Transfer {
   id: string;
@@ -23,7 +33,7 @@ export interface Transfer {
   speed?: number;
 }
 
-interface TransfersBarProps {
+interface TransfersViewProps {
   transfers: Transfer[];
   queued: QueuedTransfer[];
   collapsed: boolean;
@@ -51,7 +61,107 @@ const formatEta = (seconds: number) => {
   return `~${h}h ${String(m % 60).padStart(2, "0")}m left`;
 };
 
-const TransfersBar = ({ transfers, queued, collapsed, onToggleCollapsed, onCancel, onCancelQueued }: TransfersBarProps) => {
+// The bar for one session: owns the live transfers, the queued items it
+// shows, and whether it is collapsed. Renders nothing while both are empty.
+const TransfersBar = ({ sessionId }: { sessionId: string }) => {
+  // Live transfer progress, keyed by the backend-assigned id. The Rust
+  // commands stream events at ~10Hz; we replace the entry on each update so
+  // a single growing progress bar shows per transfer. Speed comes from the
+  // (time, bytes) samples of the last few seconds.
+  const [transfers, setTransfers] = useState<Record<string, Transfer>>({});
+  const speedSamplesRef = useRef(new Map<string, { t: number; bytes: number }[]>());
+  const [collapsed, setCollapsed] = useState(false);
+  const queued = useQueuedTransfers(sessionId);
+
+  // Bytes/second over the samples of the last SPEED_WINDOW_MS. Every sample
+  // older than the window is dropped, even if only the new one is left, so a
+  // pause (a long folder walk before the first byte) never counts as
+  // transfer time. Undefined until the window spans SPEED_MIN_SPAN_MS.
+  const measureSpeed = (id: string, bytes: number): number | undefined => {
+    const now = performance.now();
+    const samples = speedSamplesRef.current.get(id) ?? [];
+    samples.push({ t: now, bytes });
+    while (now - samples[0].t > SPEED_WINDOW_MS) samples.shift();
+    speedSamplesRef.current.set(id, samples);
+    const span = now - samples[0].t;
+    return span >= SPEED_MIN_SPAN_MS ? ((bytes - samples[0].bytes) * 1000) / span : undefined;
+  };
+
+  useEffect(() => {
+    let alive = true;
+    let unlisten: (() => void) | null = null;
+    listen<Transfer>(`sftp-transfer-${sessionId}`, (event) => {
+      const t = event.payload;
+      if (!t || !t.id) return;
+      const measured = t.status === "progress" ? measureSpeed(t.id, t.bytes) : undefined;
+      if (t.status !== "progress") speedSamplesRef.current.delete(t.id);
+      setTransfers((prev) => {
+        // Until the window spans SPEED_MIN_SPAN_MS again (e.g. right after
+        // a folder walk), keep the last measured speed rather than blank it.
+        const speed = t.status === "progress" ? measured ?? prev[t.id]?.speed : undefined;
+        return { ...prev, [t.id]: { ...t, speed } };
+      });
+      if (t.status === "done" || t.status === "error" || t.status === "cancelled") {
+        // Leave the final state visible briefly before clearing the card so
+        // the user sees the success tick / failure colour / cancel notice.
+        // A cancel that left something behind says so as long as an error.
+        const linger = t.status === "error" || t.error ? 6000 : t.status === "cancelled" ? 3000 : 1800;
+        setTimeout(() => {
+          setTransfers((prev) => {
+            const { [t.id]: _, ...rest } = prev;
+            return rest;
+          });
+        }, linger);
+      }
+    }).then((fn) => {
+      // Unmounted (or session changed) before listen() resolved.
+      if (!alive) {
+        fn();
+        return;
+      }
+      unlisten = fn;
+    });
+    return () => {
+      alive = false;
+      if (unlisten) unlisten();
+    };
+  }, [sessionId]);
+
+  const cancelTransfer = (id: string) => {
+    // Fire-and-forget: the backend emits its own "cancelled" event when the
+    // loop notices the flag, which is what wipes the card.
+    invoke("sftp_cancel_transfer", { transferId: id }).catch(() => {});
+  };
+
+  // Batch items carry the transfer id they are run with, so a "starting" item
+  // is hidden exactly when events for that id exist (its live row takes
+  // over), including between "done" and the invoke settling.
+  const transferList = Object.values(transfers);
+  const visibleQueued = queued.filter((q) => !(q.id in transfers));
+  // Removing an item from the queue makes the batch skip it; one that is
+  // already starting may have reached the backend, so cancel that id too.
+  // If its command has not registered yet, the backend keeps the cancel in
+  // `early_cancels` and the command starts with its flag set; if it has
+  // already finished, that entry just expires.
+  const cancelQueued = (id: string) => {
+    const wasStarting = queued.some((q) => q.id === id && q.state === "starting");
+    dropQueued(sessionId, [id]);
+    if (wasStarting) cancelTransfer(id);
+  };
+  if (transferList.length + visibleQueued.length === 0) return null;
+  return (
+    <TransfersView
+      transfers={transferList}
+      queued={visibleQueued}
+      collapsed={collapsed}
+      onToggleCollapsed={() => setCollapsed((c) => !c)}
+      onCancel={cancelTransfer}
+      onCancelQueued={cancelQueued}
+    />
+  );
+};
+
+const TransfersView = ({ transfers, queued, collapsed, onToggleCollapsed, onCancel, onCancelQueued }: TransfersViewProps) => {
   const active = transfers.filter((t) => t.status === "progress" && !t.launching);
   const launching = transfers.filter((t) => t.status === "progress" && t.launching).length;
   const starting = queued.filter((q) => q.state === "starting");
@@ -157,7 +267,7 @@ const TransferRow = ({ t, onCancel }: { t: Transfer; onCancel: (id: string) => v
               <div className="absolute inset-y-0 left-0 w-1/3 bg-blue-500/70 open-progress-indeterminate" />
             ) : (
               <div
-                className={`h-full ${barTone} transition-[width] duration-150 ease-linear`}
+                className={`h-full ${barTone}`}
                 style={{ width: `${t.status === "progress" ? pct ?? 0 : 100}%` }}
               />
             )}
