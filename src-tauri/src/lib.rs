@@ -9046,6 +9046,31 @@ fn normalize_server_identity(
     }
 }
 
+/// A server's port is kept as an i32 and connected to as a u16: 70000 would
+/// reach port 4464 with no word about it.
+fn check_server_port(port: i32) -> Result<(), String> {
+    if (1..=65535).contains(&port) {
+        Ok(())
+    } else {
+        Err("Port must be 1 to 65535".into())
+    }
+}
+
+#[cfg(test)]
+mod server_port_tests {
+    use super::check_server_port;
+
+    #[test]
+    fn a_port_that_would_wrap_is_refused() {
+        for bad in [0, -1, 65536, 70000] {
+            assert!(check_server_port(bad).is_err(), "took {bad}");
+        }
+        for good in [1, 22, 65535] {
+            assert_eq!(check_server_port(good), Ok(()));
+        }
+    }
+}
+
 #[tauri::command]
 async fn add_server(
     state: tauri::State<'_, DbState>,
@@ -9066,6 +9091,7 @@ async fn add_server(
     mirrors: Option<Vec<serde_json::Value>>,
     color: Option<String>,
 ) -> Result<i64, String> {
+    check_server_port(port)?;
     let conn_guard = state.conn.lock().map_err(|_| "[STATE] LOCK_FAILED")?;
     let conn = conn_guard.as_ref().ok_or("[STATE] DATABASE_NOT_INITIALIZED")?;
 
@@ -9208,6 +9234,7 @@ async fn edit_server(
     // COALESCE(?, password) so the existing column survives.
     preserve_password: Option<bool>,
 ) -> Result<(), String> {
+    check_server_port(port)?;
     let tunnels_json = serde_json::to_string(&tunnels).unwrap_or_else(|_| "[]".to_string());
     let mirrors_json = mirrors.as_ref()
         .map(|m| serde_json::to_string(m).unwrap_or_else(|_| "[]".into()))
