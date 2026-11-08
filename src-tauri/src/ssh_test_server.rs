@@ -50,6 +50,9 @@ pub(crate) struct TestServer {
     /// Commands started in all.
     #[cfg_attr(not(unix), allow(dead_code))]
     pub started: Arc<AtomicUsize>,
+    /// Answer every `exec`, whatever the command, with these bytes and then
+    /// output that doesn't end until the channel is gone.
+    flood_exec: Option<Vec<u8>>,
 }
 
 /// How the test server runs `exec` commands with the local `sh` (unix only).
@@ -119,6 +122,12 @@ impl TestServer {
             shell: Some(opts),
             ..Self::default()
         }
+    }
+
+    /// A server that answers every command with `start` and then output
+    /// without end.
+    pub(crate) fn flooding_every_exec(start: Vec<u8>) -> Self {
+        Self { flood_exec: Some(start), ..Self::default() }
     }
 
     /// Run `command` with `sh -c` for the channel: stdin from the client's
@@ -306,6 +315,14 @@ impl server::Handler for TestServer {
         #[cfg(unix)]
         if self.shell.is_some() {
             self.spawn_shell(channel, command, session.handle());
+            return Ok(());
+        }
+        if let Some(start) = self.flood_exec.clone() {
+            let handle = session.handle();
+            tokio::spawn(async move {
+                let _ = handle.data(channel, start).await;
+                while handle.data(channel, vec![b'x'; 16 * 1024]).await.is_ok() {}
+            });
             return Ok(());
         }
         if command == "echo" {
