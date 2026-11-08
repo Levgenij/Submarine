@@ -6491,6 +6491,7 @@ async fn select_profile(
 /// `known_hosts` writes they triggered to the NEXT profile's DB.
 #[tauri::command]
 async fn close_profile(
+    app: tauri::AppHandle,
     state: tauri::State<'_, DbState>,
     ssh: tauri::State<'_, SshState>,
     monitor_map: tauri::State<'_, MonitorMap>,
@@ -6499,11 +6500,32 @@ async fn close_profile(
     // Lock and the idle lock come here; a reload does not (`close_after_reload`).
     quick_unlock::profile_closed();
     let opened = state.generation_now();
+    // Whatever the page didn't close itself (the error screen's "Try to continue"
+    // leaves its sessions running); after a Lock there is nothing left to find.
+    disconnect_all_sessions(&app).await;
     teardown_profile(&state, &ssh, &monitor_map, &cloud, opened).await?;
     // Here and not in the teardown: after a reload the name may be the one
     // the new page has just picked.
     *state.active_profile.lock().map_err(|_| "[STATE] LOCK_FAILED_PROFILE")? = None;
     Ok(())
+}
+
+/// Ends every session still registered (SSH, RDP, VNC, telnet), each as its tab
+/// would close it. A Lock has closed them from the page already, so this finds
+/// nothing then. One session that won't let go doesn't keep the key in memory.
+async fn disconnect_all_sessions(app: &tauri::AppHandle) {
+    let ssh = app.state::<SshState>();
+    let mut sessions: Vec<String> = ssh.connections.lock().await.keys().cloned().collect();
+    sessions.extend(app.state::<rdp::RdpSessions>().lock().await.keys().cloned());
+    sessions.extend(app.state::<vnc_client::VncClients>().lock().await.keys().cloned());
+    sessions.extend(app.state::<RdpClients>().lock().await.keys().cloned());
+    sessions.extend(app.state::<telnet::Pending>().lock().await.keys().cloned());
+    let disconnect_all = async {
+        for session_id in sessions {
+            let _ = disconnect_session(app.clone(), app.state(), app.state(), app.state(), app.state(), app.state(), app.state(), session_id).await;
+        }
+    };
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), disconnect_all).await;
 }
 
 /// The page started anew (a reload, the error screen's button) with a profile
@@ -6521,18 +6543,7 @@ async fn close_after_reload(app: tauri::AppHandle, _closing: tokio::sync::OwnedM
         _ => return,
     };
     let ssh = app.state::<SshState>();
-    let mut sessions: Vec<String> = ssh.connections.lock().await.keys().cloned().collect();
-    sessions.extend(app.state::<rdp::RdpSessions>().lock().await.keys().cloned());
-    sessions.extend(app.state::<vnc_client::VncClients>().lock().await.keys().cloned());
-    sessions.extend(app.state::<RdpClients>().lock().await.keys().cloned());
-    sessions.extend(app.state::<telnet::Pending>().lock().await.keys().cloned());
-    let disconnect_all = async {
-        for session_id in sessions {
-            let _ = disconnect_session(app.clone(), app.state(), app.state(), app.state(), app.state(), app.state(), app.state(), session_id).await;
-        }
-    };
-    // One session that won't let go doesn't keep the key in memory.
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), disconnect_all).await;
+    disconnect_all_sessions(&app).await;
     let monitor_map = app.state::<MonitorMap>();
     let cloud = app.state::<std::sync::Arc<cloud::CloudState>>();
     let teardown = teardown_profile(&db, &ssh, &monitor_map, &cloud, opened);
