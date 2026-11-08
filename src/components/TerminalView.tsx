@@ -1270,8 +1270,10 @@ const TerminalView = ({
       // The toast shows one line, so this note replaces "Pasted" when anything was removed.
       const text = withoutPasteControls(raw);
       const stripped = text !== raw;
-      if (stripped) notify('Control characters left out of the paste');
-      if (!text) return;
+      if (!text) {
+        if (stripped) notify('Control characters left out of the paste');
+        return;
+      }
       // More than one line into a program that hasn't turned bracketed-paste
       // mode on (an older bash, a plain sh): each line would run the moment it
       // lands, so ask first and show what would run. With the mode on, the

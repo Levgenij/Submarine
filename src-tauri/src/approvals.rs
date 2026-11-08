@@ -666,7 +666,7 @@ pub fn clear_foreign_schema(conn: &Connection) -> Result<(), String> {
         conn.execute_batch(&format!("DROP {kind} IF EXISTS \"{}\"", name.replace('"', "\"\"")))
             .map_err(|e| format!("[VAULT] FOREIGN_SCHEMA: {e}"))?;
     }
-    conn.execute_batch("DROP TABLE IF EXISTS held_approvals; DROP TABLE IF EXISTS held_deletions; DROP TABLE IF EXISTS held_wipes").map_err(|e| format!("[VAULT] FOREIGN_SCHEMA: {e}"))
+    conn.execute_batch("DROP TABLE IF EXISTS held_approvals; DROP TABLE IF EXISTS held_deletions; DROP TABLE IF EXISTS held_wipes; DROP TABLE IF EXISTS rdp_first_routes").map_err(|e| format!("[VAULT] FOREIGN_SCHEMA: {e}"))
 }
 
 /// A profile file from somewhere else, at its first unlock: nothing in it has
@@ -1117,6 +1117,7 @@ mod tests {
         conn.execute("INSERT INTO known_hosts(host, port, fingerprint) VALUES('old.example', 22, 'SHA256:theirs')", []).unwrap();
         conn.execute("INSERT INTO held_deletions(uuid, entity_type, updated_at, since) VALUES('fake', 'servers', '2020-01-01', 0)", []).unwrap();
         conn.execute("INSERT INTO held_wipes(uuid, entity_type, updated_at, blob, since) VALUES('fake', 'servers', '2020-01-01', '{}', 0)", []).unwrap();
+        conn.execute_batch("CREATE TABLE rdp_first_routes (node TEXT PRIMARY KEY, route TEXT NOT NULL); INSERT INTO rdp_first_routes VALUES('n', 'theirs')").unwrap();
         conn.execute_batch(
             "DROP TABLE held_approvals;
              CREATE TABLE held_approvals (uuid TEXT NOT NULL, item TEXT NOT NULL, since INTEGER NOT NULL, CHECK (0));
@@ -1141,6 +1142,8 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' OR name = 'keep_hosts'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(strays, 0);
+        let routes: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'rdp_first_routes'", [], |r| r.get(0)).unwrap();
+        assert_eq!(routes, 0, "a foreign file's first routes don't survive");
         // The app's own triggers are back at work.
         conn.execute("DELETE FROM servers WHERE uuid='u1'", []).unwrap();
         assert!(held_for(&conn, "u1").is_empty());
