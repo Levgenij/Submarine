@@ -16585,12 +16585,12 @@ fn screen_frame_sender(
     flow: std::sync::Arc<screen_flow::Flow>,
 ) -> impl Fn(Vec<u8>) -> bool {
     move |bytes: Vec<u8>| {
-        let len = bytes.len();
+        let cost = screen_flow::frame_cost(bytes.len());
         // Counted first: the page can answer before this call returns.
-        flow.sent(len);
+        flow.sent(cost);
         let sent = frames.send(tauri::ipc::InvokeResponseBody::Raw(bytes)).is_ok();
         if !sent {
-            flow.drawn(len as u64);
+            flow.drawn(cost as u64);
         }
         sent
     }
