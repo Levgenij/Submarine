@@ -1190,6 +1190,96 @@ fn sane_record(rec: &SyncRecord) -> bool {
         && hlc::Hlc::valid_remote(&rec.updated_at)
 }
 
+/// The columns that hold what lives nowhere but in vaults. A record that
+/// empties one takes it as surely as a deletion does.
+fn secret_cols(table: &str) -> &'static [&'static str] {
+    match table {
+        "ssh_keys" => &["private_key", "passphrase"],
+        "credentials" | "servers" => &["password"],
+        _ => &[],
+    }
+}
+
+/// What a row of `table` holds now, by `secret_cols`. No such row gives no
+/// values: nothing to lose.
+fn secrets_here(conn: &Connection, table: &str, uuid: &str) -> Vec<Option<String>> {
+    let cols = secret_cols(table);
+    if cols.is_empty() {
+        return Vec::new();
+    }
+    conn.query_row(&format!("SELECT {} FROM {table} WHERE uuid=?1", cols.join(",")), [uuid], |r| {
+        (0..cols.len()).map(|i| r.get(i)).collect()
+    })
+    .unwrap_or_default()
+}
+
+/// A value of only spaces is as empty as none.
+fn is_filled(secret: &str) -> bool {
+    !secret.trim().is_empty()
+}
+
+/// Of what a row holds (`secrets_here`), the secrets a record with this
+/// payload leaves empty. A record that replaces a secret with another one is
+/// an ordinary edit, and so is a new key with no passphrase: the passphrase
+/// went with the key it opened.
+fn emptied_cols(table: &str, here: &[Option<String>], obj: &serde_json::Map<String, serde_json::Value>) -> Vec<&'static str> {
+    use serde_json::Value;
+    let new_key = |col: &str| {
+        col == "passphrase"
+            && obj.get("private_key").and_then(Value::as_str).is_some_and(|k| is_filled(k) && Some(k) != here[0].as_deref())
+    };
+    secret_cols(table)
+        .iter()
+        .zip(here)
+        .filter(|(col, had)| {
+            had.as_deref().is_some_and(is_filled)
+                && !new_key(col)
+                && match obj.get(**col) {
+                    None | Some(Value::Null) => true,
+                    Some(Value::String(s)) => !is_filled(s),
+                    Some(_) => false,
+                }
+        })
+        .map(|(col, _)| *col)
+        .collect()
+}
+
+/// Would `rec`, if it lands, leave a row here without a secret it has now
+/// (`emptied_cols`)?
+fn empties_a_secret(conn: &Connection, key: &[u8; 32], rec: &SyncRecord) -> bool {
+    use serde_json::Value;
+    if secret_cols(&rec.entity_type).is_empty() || rec.deleted || local_wins(conn, &rec.entity_type, rec) {
+        return false;
+    }
+    let here = secrets_here(conn, &rec.entity_type, &rec.uuid);
+    if !here.iter().flatten().any(|v| is_filled(v)) {
+        return false;
+    }
+    // What won't decrypt or parse isn't going to land: the merge deals with it.
+    let payload = rec
+        .blob
+        .as_deref()
+        .filter(|b| b.len() <= MAX_RECORD_BLOB_HEX)
+        .and_then(|b| decrypt_entity(b, key).ok())
+        .and_then(|plain| serde_json::from_slice::<Value>(&plain).ok());
+    payload.as_ref().and_then(Value::as_object).is_some_and(|obj| !emptied_cols(&rec.entity_type, &here, obj).is_empty())
+}
+
+/// How many rows the records in `records` are about to leave without a secret
+/// (`empties_a_secret`): what the merge does, counted first, so a profile can
+/// be kept as it is before it does (vault_backup.rs). What is held already
+/// changes nothing here, however often it comes, and a viewer keeps theirs
+/// (`apply_remote_inner`).
+fn rows_to_empty(conn: &Connection, key: &[u8; 32], records: &[SyncRecord]) -> usize {
+    if approvals::is_viewer(conn) {
+        return 0;
+    }
+    records
+        .iter()
+        .filter(|r| sane_record(r) && !approvals::wipe_is_held(conn, r) && empties_a_secret(conn, key, r))
+        .count()
+}
+
 /// The vault's size as it would be saved: its SQLite image, free pages and all.
 fn vault_bytes(conn: &Connection) -> Result<usize, String> {
     let pages: i64 = conn
@@ -1266,17 +1356,33 @@ fn apply_remote_inner(
     // done once the batch is in: a server's jump host lands in the repair pass.
     let shared = approvals::ready(&tx) && approvals::profile_is_shared(&tx);
     let mut watched = Vec::new();
+    // A viewer's rows go nowhere, so a password they saved here is theirs alone
+    // (each person typing their own is a normal way to share a server list),
+    // and a record with none says nothing about it. The record lands, without
+    // emptying anything (`apply_entity`): held whole, the owner's new address
+    // would stop at this device.
+    let viewer = shared && approvals::is_viewer(&tx);
     for spec in ENTITIES {
         let watch = shared && approvals::watches(spec.table);
         for rec in records.iter().filter(|r| !r.deleted && r.entity_type == spec.table) {
+            // In a shared profile, a record that empties a saved key or
+            // password waits for this device's user, like an SSH key's
+            // deletion (approvals::hold_wipe). A personal profile takes it.
+            if shared && !viewer && empties_a_secret(&tx, key, rec) {
+                approvals::hold_wipe(&tx, rec)?;
+                continue;
+            }
             let before = if watch { approvals::snapshot(&tx, spec.table, &rec.uuid) } else { None };
-            if let Err(e) = apply_entity(&tx, key, spec, rec, &mut fk_fixups) {
+            if let Err(e) = apply_entity(&tx, key, spec, rec, viewer, &mut fk_fixups) {
                 skipped += 1;
                 eprintln!("[SYNC] skipped record uuid={} type={}: {}", rec.uuid, rec.entity_type, e);
                 continue;
             }
             if watch {
                 watched.push((spec.table, &rec.uuid, before));
+            }
+            if shared {
+                approvals::release_wipe(&tx, rec)?;
             }
         }
     }
@@ -1293,21 +1399,7 @@ fn apply_remote_inner(
     }
     // Re-resolve every optional FK against the FINAL state of the batch, now that
     // both the entities and the tombstones have landed.
-    for f in fk_fixups {
-        let id: Option<i64> = tx
-            .query_row(
-                &format!("SELECT id FROM {} WHERE uuid=?1", f.ref_table),
-                [&f.ref_uuid],
-                |r| r.get(0),
-            )
-            .ok();
-        if let Err(e) = tx.execute(
-            &format!("UPDATE {} SET {}=?1 WHERE uuid=?2", f.table, f.fk_col),
-            rusqlite::params![id, f.uuid],
-        ) {
-            eprintln!("[SYNC] fk fixup skipped {}.{} uuid={}: {}", f.table, f.fk_col, f.uuid, e);
-        }
-    }
+    repair_links(&tx, fk_fixups);
     for (table, uuid, before) in &watched {
         approvals::hold_changes(&tx, table, uuid, before.as_ref())?;
     }
@@ -1327,28 +1419,47 @@ fn apply_remote_inner(
     Ok(skipped)
 }
 
-fn apply_entity(conn: &Connection, key: &[u8; 32], spec: &EntitySpec, rec: &SyncRecord, fk_fixups: &mut Vec<FkFixup>) -> Result<(), String> {
-    // LWW: keep local if it's newer-or-equal. A deleted row is hard-deleted, so
-    // its tombstone carries its only surviving stamp — it has to count as the
-    // local side of the comparison. Without it, a batch collected before a
-    // delete (sync drops the lock for the network leg, so the user can delete
-    // mid-flight) comes back still carrying the row as live, finds no live row
-    // to compare against, and re-inserts it — secrets and all.
+/// Re-resolve the links queued by `apply_entity` against what the rows are now.
+fn repair_links(conn: &Connection, fixups: Vec<FkFixup>) {
+    for f in fixups {
+        let id: Option<i64> = conn
+            .query_row(
+                &format!("SELECT id FROM {} WHERE uuid=?1", f.ref_table),
+                [&f.ref_uuid],
+                |r| r.get(0),
+            )
+            .ok();
+        if let Err(e) = conn.execute(
+            &format!("UPDATE {} SET {}=?1 WHERE uuid=?2", f.table, f.fk_col),
+            rusqlite::params![id, f.uuid],
+        ) {
+            eprintln!("[SYNC] fk fixup skipped {}.{} uuid={}: {}", f.table, f.fk_col, f.uuid, e);
+        }
+    }
+}
+
+/// LWW: keep local if it's newer-or-equal. A deleted row is hard-deleted, so
+/// its tombstone carries its only surviving stamp — it has to count as the
+/// local side of the comparison. Without it, a batch collected before a
+/// delete (sync drops the lock for the network leg, so the user can delete
+/// mid-flight) comes back still carrying the row as live, finds no live row
+/// to compare against, and re-inserts it — secrets and all.
+fn local_wins(conn: &Connection, table: &str, rec: &SyncRecord) -> bool {
     let local_ua: Option<String> = conn
-        .query_row(&format!("SELECT updated_at FROM {} WHERE uuid=?1", spec.table), [&rec.uuid], |r| r.get(0))
+        .query_row(&format!("SELECT updated_at FROM {table} WHERE uuid=?1"), [&rec.uuid], |r| r.get(0))
         .ok();
     let tomb_ua: Option<String> = conn
         .query_row(
             "SELECT updated_at FROM sync_tombstones WHERE uuid=?1 AND entity_type=?2",
-            rusqlite::params![&rec.uuid, spec.table],
+            rusqlite::params![&rec.uuid, table],
             |r| r.get(0),
         )
         .ok();
-    if [local_ua.as_deref(), tomb_ua.as_deref()]
-        .into_iter()
-        .flatten()
-        .any(|l| l >= rec.updated_at.as_str())
-    {
+    local_ua.iter().chain(&tomb_ua).any(|l| *l >= rec.updated_at)
+}
+
+fn apply_entity(conn: &Connection, key: &[u8; 32], spec: &EntitySpec, rec: &SyncRecord, keep_own: bool, fk_fixups: &mut Vec<FkFixup>) -> Result<(), String> {
+    if local_wins(conn, spec.table, rec) {
         return Ok(());
     }
     let blob = rec.blob.as_deref().ok_or("[SYNC] ENTITY_NO_BLOB")?;
@@ -1381,6 +1492,9 @@ fn apply_entity(conn: &Connection, key: &[u8; 32], spec: &EntitySpec, rec: &Sync
     // The same for a command's `scope` (#22): a peer from before it would
     // otherwise turn a command for some servers into one for all of them.
     let preserve_local_scope = spec.table == "commands" && !obj.contains_key("scope");
+    // On a viewer, the secrets this record would empty stay as they are (see
+    // `apply_remote_inner`).
+    let keep = if keep_own { emptied_cols(spec.table, &secrets_here(conn, spec.table, &rec.uuid), obj) } else { Vec::new() };
     for c in spec.cols {
         columns.push((*c).into());
         let val = obj.get(*c);
@@ -1467,6 +1581,8 @@ fn apply_entity(conn: &Connection, key: &[u8; 32], spec: &EntitySpec, rec: &Sync
                 format!("run_on_connect_every={}.run_on_connect_every", spec.table)
             } else if c.as_str() == "scope" && preserve_local_scope {
                 format!("scope={}.scope", spec.table)
+            } else if keep.contains(&c.as_str()) {
+                format!("{c}={}.{c}", spec.table)
             } else {
                 format!("{c}=excluded.{c}")
             }
@@ -1568,8 +1684,13 @@ struct SyncReport {
     key_change: bool,
     /// Rows this sync is deleting here, because they were deleted elsewhere.
     removed: usize,
-    /// When it deletes any, the copy of the profile kept first: its file name
-    /// (vault_backup.rs). None when nothing was deleted or no copy could be made.
+    /// Rows of a personal profile this sync leaves without a saved key or
+    /// password, because it was emptied elsewhere (`empties_a_secret`). A
+    /// shared profile holds those instead.
+    emptied: usize,
+    /// When it deletes or empties any, the copy of the profile kept first: its
+    /// file name (vault_backup.rs). None when nothing was deleted or no copy
+    /// could be made.
     backup: Option<String>,
 }
 
@@ -1911,8 +2032,39 @@ async fn sync_with(
         pulled: report.pulled + again.pulled,
         key_change: again.key_change,
         removed: report.removed + again.removed,
+        emptied: report.emptied + again.emptied,
         backup: again.backup.or(report.backup),
     })
+}
+
+/// What a merge did to the open profile.
+struct Merged {
+    /// Records it couldn't apply (see `apply_remote_records`).
+    skipped: usize,
+    removed: usize,
+    emptied: usize,
+    backup: Option<String>,
+}
+
+/// Merges a sync's answer into the open vault. A record proves nothing about
+/// who sent it, so before one deletes a row or empties a saved key or password
+/// the profile is kept as it stands (vault_backup.rs); the file on disk is
+/// still the state from before this merge. `vault` is that file.
+fn merge_answer(conn: &Connection, key: &[u8; 32], records: &[SyncRecord], hlc: &hlc::Hlc, vault: Result<&Path, &str>) -> Result<Merged, String> {
+    let removed = rows_to_delete(conn, records);
+    let to_empty = rows_to_empty(conn, key, records);
+    let mut backup = None;
+    if removed + to_empty > 0 {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        match vault.map_err(str::to_string).and_then(|p| vault_backup::keep(p, now)) {
+            Ok(name) => backup = name,
+            Err(e) => eprintln!("[SYNC] no copy of the profile before a merge that deletes: {e}"),
+        }
+    }
+    let skipped = apply_remote_records(conn, key, records, hlc)?;
+    // A shared profile holds those instead.
+    let emptied = if approvals::profile_is_shared(conn) { 0 } else { to_empty };
+    Ok(Merged { skipped, removed, emptied, backup })
 }
 
 /// One exchange of `sync_with`: from the open profile's `SyncCursor` when
@@ -2066,25 +2218,16 @@ async fn sync_round(
     let pulled = exchange.records.len();
     // The server couldn't answer from the cursor: start over (`sync_with`).
     let reset = exchange.full && pull_from.is_some();
-    let mut removed = 0usize;
-    let mut backup: Option<String> = None;
+    let (removed, emptied, backup);
 
     {
         let conn_g = db_state.conn.lock().map_err(|_| "[STATE] LOCK_CONN")?;
         let conn = conn_g.as_ref().ok_or("[STATE] DB_NOT_OPEN")?;
         db_state.still_open(generation)?;
-        // About to delete rows? A tombstone proves nothing about who sent it, so
-        // the profile is kept as it stands first (vault_backup.rs); the file on
-        // disk is still the state from before this merge.
-        removed = rows_to_delete(conn, &exchange.records);
-        if removed > 0 {
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-            match profile_path(app, profile).and_then(|p| vault_backup::keep(&p, now)) {
-                Ok(name) => backup = name,
-                Err(e) => eprintln!("[SYNC] no copy of the profile before a merge that deletes: {e}"),
-            }
-        }
-        let skipped = apply_remote_records(conn, &dek, &exchange.records, &hlc)?;
+        let vault = profile_path(app, profile);
+        let merged = merge_answer(conn, &dek, &exchange.records, &hlc, vault.as_deref().map_err(String::as_str))?;
+        let skipped = merged.skipped;
+        (removed, emptied, backup) = (merged.removed, merged.emptied, merged.backup);
         if unlinked {
             link_profile_server(conn, session.base())?;
         }
@@ -2118,7 +2261,7 @@ async fn sync_round(
     }
     // Persist the merged vault so the applied changes survive a restart.
     save_vault_async(db_state).await?;
-    Ok((SyncReport { pushed, pulled, key_change, removed, backup }, reset))
+    Ok((SyncReport { pushed, pulled, key_change, removed, emptied, backup }, reset))
 }
 
 #[derive(serde::Serialize)]
@@ -3562,14 +3705,16 @@ async fn stop_sharing(
             .map_err(|e| format!("[SHARE] CLEAR_META: {e}"))?;
         conn.execute("DELETE FROM share_member_keys WHERE share_id=?1", [&share_id])
             .map_err(|e| format!("[SHARE] CLEAR_PINS: {e}"))?;
-        // Deletions held from the share don't come again once it's left.
-        conn.execute("DELETE FROM held_deletions", [])
+        // What was held from the share doesn't come again once it's left.
+        conn.execute_batch("DELETE FROM held_deletions; DELETE FROM held_wipes;")
             .map_err(|e| format!("[SHARE] CLEAR_HELD: {e}"))?;
     }
     save_vault_async(&db_state).await
 }
 
-/// The deletions held in the open shared profile (approvals::hold_deletions).
+/// What is held in the open shared profile: deletions
+/// (approvals::hold_deletions) and records that would empty a secret
+/// (approvals::hold_wipe).
 #[tauri::command]
 async fn held_deletions_list(db_state: tauri::State<'_, DbState>) -> Result<Vec<approvals::HeldDeletion>, String> {
     let conn_g = db_state.conn.lock().map_err(|_| "[STATE] LOCK_CONN")?;
@@ -3577,22 +3722,24 @@ async fn held_deletions_list(db_state: tauri::State<'_, DbState>) -> Result<Vec<
     Ok(approvals::held_deletions(conn))
 }
 
-/// The user's call on the deletions held in a shared profile: `delete_them`
-/// deletes those rows here too. Otherwise they stay, with a stamp newer than
-/// the deletion's, so the next sync brings them back for everyone.
+/// The user's call on what is held in a shared profile: `delete_them` deletes
+/// those rows here too, and empties what was emptied. Otherwise they stay as
+/// they are, with a stamp newer than the deletion's or the record's, so the
+/// next sync brings them back for everyone.
 #[tauri::command]
 async fn resolve_held_deletions(db_state: tauri::State<'_, DbState>, delete_them: bool) -> Result<usize, String> {
     let done = {
         let conn_g = db_state.conn.lock().map_err(|_| "[STATE] LOCK_CONN")?;
         let conn = conn_g.as_ref().ok_or("[STATE] DB_NOT_OPEN")?;
         let hlc = db_state.hlc.lock().map_err(|_| "[STATE] LOCK_HLC")?.as_ref().ok_or("[SYNC] NO_HLC")?.clone();
-        resolve_held(conn, &hlc, delete_them)?
+        let (dek, _) = get_or_create_dek(conn)?;
+        resolve_held(conn, &dek, &hlc, delete_them)?
     };
     save_vault_async(&db_state).await?;
     Ok(done)
 }
 
-fn resolve_held(conn: &Connection, hlc: &hlc::Hlc, delete_them: bool) -> Result<usize, String> {
+fn resolve_held(conn: &Connection, key: &[u8; 32], hlc: &hlc::Hlc, delete_them: bool) -> Result<usize, String> {
     let held: Vec<(String, String, String)> = {
         let mut stmt = conn
             .prepare("SELECT uuid, entity_type, updated_at FROM held_deletions")
@@ -3602,6 +3749,7 @@ fn resolve_held(conn: &Connection, hlc: &hlc::Hlc, delete_them: bool) -> Result<
             .map_err(|e| format!("[SYNC] HELD: {e}"))?;
         rows.filter_map(Result::ok).collect()
     };
+    let wipes = approvals::held_wipes(conn);
     // Like a merge: the triggers stay out of it (no tombstone of our own for a
     // deletion, no stamp for a kept row but the one set here).
     conn.execute("INSERT INTO sync_flags(key,val) VALUES('merge',1) ON CONFLICT(key) DO UPDATE SET val=1", [])
@@ -3631,9 +3779,32 @@ fn resolve_held(conn: &Connection, hlc: &hlc::Hlc, delete_them: bool) -> Result<
                 .map_err(|e| format!("[SYNC] KEEP: {e}"))?;
             }
         }
+        let mut fixups = Vec::new();
+        for rec in &wipes {
+            let Some(spec) = ENTITIES.iter().find(|s| s.table == rec.entity_type) else { continue };
+            if delete_them {
+                // As the merge would have: whatever else the record changes
+                // that runs by itself is still held.
+                let watch = approvals::watches(spec.table);
+                let before = if watch { approvals::snapshot(&tx, spec.table, &rec.uuid) } else { None };
+                match apply_entity(&tx, key, spec, rec, false, &mut fixups) {
+                    Ok(()) if watch => approvals::hold_changes(&tx, spec.table, &rec.uuid, before.as_ref())?,
+                    Ok(()) => {}
+                    Err(e) => eprintln!("[SYNC] held record not applied uuid={}: {e}", rec.uuid),
+                }
+            } else {
+                tx.execute(
+                    &format!("UPDATE {} SET updated_at=?1 WHERE uuid=?2", spec.table),
+                    rusqlite::params![stamp_past(&hlc.tick(), &rec.updated_at), rec.uuid],
+                )
+                .map_err(|e| format!("[SYNC] KEEP: {e}"))?;
+            }
+        }
+        repair_links(&tx, fixups);
         tx.execute("DELETE FROM held_deletions", []).map_err(|e| format!("[SYNC] HELD_CLEAR: {e}"))?;
+        tx.execute("DELETE FROM held_wipes", []).map_err(|e| format!("[SYNC] HELD_CLEAR: {e}"))?;
         tx.commit().map_err(|e| format!("[SYNC] TX_COMMIT: {e}"))?;
-        Ok(held.len())
+        Ok(held.len() + wipes.len())
     })();
     let _ = conn.execute("UPDATE sync_flags SET val=0 WHERE key='merge'", []);
     done
@@ -4689,12 +4860,12 @@ mod sync_engine_tests {
     #[test]
     fn held_deletions_are_deleted_or_kept_by_the_user() {
         let (_a, _ha, b, hb, _batch) = mass_deleted();
-        assert_eq!(resolve_held(&b, &hb, true).unwrap(), 12);
+        assert_eq!(resolve_held(&b, &KEY, &hb, true).unwrap(), 12);
         assert_eq!((count(&b, "servers"), count(&b, "sync_tombstones")), (3, 12));
         assert!(approvals::held_deletions(&b).is_empty());
 
         let (a, ha, b, hb, batch) = mass_deleted();
-        assert_eq!(resolve_held(&b, &hb, false).unwrap(), 12);
+        assert_eq!(resolve_held(&b, &KEY, &hb, false).unwrap(), 12);
         assert_eq!(count(&b, "servers"), 15);
         assert!(approvals::held_deletions(&b).is_empty());
         apply_remote_records(&a, &KEY, &collect_local_records(&b, &KEY, "").unwrap(), &ha).unwrap();
@@ -4709,6 +4880,310 @@ mod sync_engine_tests {
         assert_eq!(stamp_past("000000000000005:00000:me", del), "999999999999990:00008:peer");
         assert_eq!(stamp_past("999999999999999:00000:me", del), "999999999999999:00000:me");
         assert_eq!(stamp_past("000000000000005:00000:me", "999999999999990:99999:peer"), "000000000000005:00000:me");
+    }
+
+    /// A member's device: on a share, with the given role.
+    fn member(node: &str, role: &str) -> (Connection, std::sync::Arc<hlc::Hlc>) {
+        let (c, h) = shared_device(node);
+        c.execute("INSERT INTO sync_meta(key,value) VALUES('share_role',?1)", [role]).unwrap();
+        (c, h)
+    }
+
+    /// `c` holds a key, a login and a server that all have a secret; the
+    /// records they came in.
+    fn with_secrets(c: &Connection, h: &hlc::Hlc) -> Vec<SyncRecord> {
+        let (a, _ha) = device("A");
+        a.execute("INSERT INTO ssh_keys(name,public_key,private_key,passphrase) VALUES('k','pub','priv','phrase')", []).unwrap();
+        a.execute("INSERT INTO credentials(name,auth_type,username,password) VALUES('c','password','root','pw')", []).unwrap();
+        a.execute("INSERT INTO servers(name,host,port,password) VALUES('s','h',22,'pw2')", []).unwrap();
+        let recs = collect_local_records(&a, &KEY, "").unwrap();
+        assert_eq!(apply_remote_records(c, &KEY, &recs, h).unwrap(), 0);
+        recs
+    }
+
+    fn of<'a>(recs: &'a [SyncRecord], table: &str) -> &'a SyncRecord {
+        recs.iter().find(|r| r.entity_type == table).unwrap()
+    }
+
+    /// `rec` with `field` set to `value`, at a newer stamp.
+    fn with_field(rec: &SyncRecord, field: &str, value: serde_json::Value) -> SyncRecord {
+        reworked(rec, |o| {
+            o.insert(field.to_string(), value);
+        })
+    }
+
+    fn private_key(c: &Connection) -> String {
+        c.query_row("SELECT private_key FROM ssh_keys", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn a_record_that_empties_a_secret_is_told_from_an_ordinary_edit() {
+        use serde_json::json;
+        let (p, hp) = device("P");
+        let recs = with_secrets(&p, &hp);
+        let key = of(&recs, "ssh_keys");
+        let empties = |rec: &SyncRecord| empties_a_secret(&p, &KEY, rec);
+
+        assert!(empties(&with_field(key, "private_key", json!(""))));
+        assert!(empties(&with_field(key, "private_key", json!(null))));
+        assert!(empties(&with_field(key, "private_key", json!(" \n "))), "spaces are as empty as nothing");
+        assert!(empties(&with_field(key, "passphrase", json!(""))));
+        assert!(empties(&reworked(key, |o| { o.remove("private_key"); })), "a record without it writes NULL");
+        assert!(empties(&with_field(of(&recs, "credentials"), "password", json!(""))));
+        assert!(empties(&with_field(of(&recs, "servers"), "password", json!(""))));
+
+        assert!(!empties(&with_field(key, "private_key", json!("another key"))), "a secret replaced is an edit");
+        let new_key = |c: &str, passphrase: serde_json::Value| {
+            reworked(key, |o| {
+                o.insert("private_key".into(), json!(c));
+                o.insert("passphrase".into(), passphrase);
+            })
+        };
+        assert!(!empties(&new_key("another key", json!(""))), "a new key with no passphrase took the old one along");
+        assert!(empties(&new_key("", json!(""))), "no key at all is what it looks like");
+        assert!(empties(&new_key(" ", json!(null))), "and so are spaces");
+        assert!(!empties(&with_field(key, "name", json!("renamed"))));
+        assert!(!empties(&with_field(of(&recs, "servers"), "host", json!("h2"))));
+
+        // It doesn't land: older than what's here, no such row, can't be read.
+        let mut older = with_field(key, "private_key", json!(""));
+        older.updated_at = key.updated_at.clone();
+        assert!(!empties(&older));
+        let mut new_row = with_field(key, "private_key", json!(""));
+        new_row.uuid = "0123456789abcdef".into();
+        assert!(!empties(&new_row));
+        let mut sealed_elsewhere = with_field(key, "private_key", json!(""));
+        sealed_elsewhere.blob = Some(encrypt_entity(b"{}", &[9u8; 32]).unwrap());
+        assert!(!empties(&sealed_elsewhere));
+        let mut tombstone = with_field(key, "private_key", json!(""));
+        tombstone.deleted = true;
+        assert!(!empties(&tombstone));
+
+        // Nothing there to lose.
+        let empty = with_field(key, "private_key", json!(""));
+        p.execute("UPDATE ssh_keys SET private_key='', passphrase=NULL", []).unwrap();
+        assert!(!empties(&SyncRecord { updated_at: ahead(120_000), ..empty }));
+    }
+
+    // Personal profiles aren't held (the owner's decision): the record lands,
+    // but not before a copy of the profile is kept, and the report says so.
+    #[test]
+    fn a_personal_profile_takes_an_emptied_secret_after_keeping_a_copy() {
+        let (p, hp) = device("P");
+        let recs = with_secrets(&p, &hp);
+        let dir = std::env::temp_dir().join(format!("submarine-emptied-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vault = dir.join("p.submarine");
+        std::fs::write(&vault, b"the profile as it was").unwrap();
+
+        let wipe = with_field(of(&recs, "ssh_keys"), "private_key", serde_json::json!(""));
+        let merged = merge_answer(&p, &KEY, std::slice::from_ref(&wipe), &hp, Ok(&vault)).unwrap();
+        assert_eq!((merged.skipped, merged.removed, merged.emptied), (0, 0, 1));
+        let copy = merged.backup.expect("a copy kept first");
+        assert_eq!(std::fs::read(dir.join(copy)).unwrap(), b"the profile as it was");
+        assert_eq!(private_key(&p), "");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // In a shared profile it waits for this device's user, as an SSH key's
+    // deletion does: the copy is kept, the row stays, and a sync that brings
+    // the same record again changes nothing.
+    #[test]
+    fn a_shared_profile_holds_a_record_that_empties_a_secret() {
+        let (b, hb) = member("B", "editor");
+        let recs = with_secrets(&b, &hb);
+        let dir = std::env::temp_dir().join(format!("submarine-held-wipe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vault = dir.join("p.submarine");
+        std::fs::write(&vault, b"the profile as it was").unwrap();
+
+        let wipe = with_field(of(&recs, "ssh_keys"), "private_key", serde_json::json!(""));
+        let answer = std::slice::from_ref(&wipe);
+        let merged = merge_answer(&b, &KEY, answer, &hb, Ok(&vault)).unwrap();
+        assert_eq!((merged.skipped, merged.emptied), (0, 0), "nothing was skipped or lost");
+        assert!(merged.backup.is_some());
+        assert_eq!(private_key(&b), "priv");
+        let held = approvals::held_deletions(&b);
+        assert_eq!((held.len(), held[0].name.as_str(), held[0].emptied), (1, "k", true));
+
+        assert!(merge_answer(&b, &KEY, answer, &hb, Err("no file")).unwrap().backup.is_none());
+        assert_eq!(rows_to_empty(&b, &KEY, answer), 0, "held already");
+        assert_eq!(count(&b, "held_wipes"), 1);
+        assert_eq!(private_key(&b), "priv");
+
+        // A newer record that leaves the key alone: nothing is left to decide.
+        let mut renamed = with_field(of(&recs, "ssh_keys"), "name", serde_json::json!("k2"));
+        renamed.updated_at = ahead(120_000);
+        assert_eq!(apply_remote_records(&b, &KEY, &[renamed], &hb).unwrap(), 0);
+        assert_eq!(count(&b, "held_wipes"), 0);
+        assert_eq!(private_key(&b), "priv");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Each person typing their own password is a normal way to share a server
+    // list, and "Save password" is on by default. On a viewer that password goes
+    // nowhere, so the owner's next edit has none. It's no wipe: the edit lands
+    // whole but for that, with nothing held and nothing to review.
+    #[test]
+    fn a_viewers_own_password_stays_and_the_owners_edit_lands() {
+        let (o, _ho) = device("O");
+        o.execute("INSERT INTO servers(name,host,port,username,auth_type) VALUES('s','old.example',22,'root','custom_pass')", []).unwrap();
+        o.execute("INSERT INTO credentials(name,auth_type,username) VALUES('c','password','root')", []).unwrap();
+        let as_shared = collect_local_records(&o, &KEY, "").unwrap();
+        let (v, hv) = member("V", "user");
+        apply_remote_records(&v, &KEY, &as_shared, &hv).unwrap();
+        let id: i32 = v.query_row("SELECT id FROM servers", [], |r| r.get(0)).unwrap();
+        store_prompted_password(&v, id, "own password").unwrap();
+        v.execute("UPDATE credentials SET password='own login'", []).unwrap();
+
+        o.execute("UPDATE servers SET host='new.example', notes='moved', color='red', position=5", []).unwrap();
+        o.execute("UPDATE credentials SET username='ops'", []).unwrap();
+        let mut from_owner = collect_local_records(&o, &KEY, "").unwrap();
+        for r in &mut from_owner {
+            r.updated_at = ahead(60_000);
+        }
+        let dir = std::env::temp_dir().join(format!("submarine-viewer-own-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vault = dir.join("p.submarine");
+        std::fs::write(&vault, b"the profile").unwrap();
+        let merged = merge_answer(&v, &KEY, &from_owner, &hv, Ok(&vault)).unwrap();
+        assert_eq!((merged.skipped, merged.removed, merged.emptied), (0, 0, 0));
+        assert_eq!(merged.backup, None, "nothing is lost, so nothing to keep a copy of");
+        assert!(approvals::held_deletions(&v).is_empty(), "nothing to review");
+
+        let server = |c: &str| -> Option<String> { v.query_row(&format!("SELECT {c} FROM servers"), [], |r| r.get(0)).unwrap() };
+        assert_eq!(server("host").as_deref(), Some("new.example"));
+        assert_eq!(server("notes").as_deref(), Some("moved"));
+        assert_eq!(server("color").as_deref(), Some("red"));
+        let position: i64 = v.query_row("SELECT position FROM servers", [], |r| r.get(0)).unwrap();
+        assert_eq!(position, 5);
+        assert_eq!(server("password").as_deref(), Some("own password"));
+        assert_eq!(server("auth_type").as_deref(), Some("custom_pass"), "so it's the one the next connect uses");
+        assert_eq!(server("updated_at"), Some(of(&from_owner, "servers").updated_at.clone()), "in step with the server");
+        let (user, pw): (String, String) = v.query_row("SELECT username, password FROM credentials", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((user.as_str(), pw.as_str()), ("ops", "own login"));
+
+        // A password the owner does give out still arrives.
+        let mut shared_one = with_field(of(&from_owner, "servers"), "password", serde_json::json!("from the owner"));
+        shared_one.updated_at = ahead(120_000);
+        apply_remote_records(&v, &KEY, &[shared_one], &hv).unwrap();
+        assert_eq!(server("password").as_deref(), Some("from the owner"));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The same record on an editor is held: the hold is for them.
+        let (e, he) = member("E", "editor");
+        apply_remote_records(&e, &KEY, &as_shared, &he).unwrap();
+        e.execute("UPDATE servers SET password='saved here'", []).unwrap();
+        assert_eq!(apply_remote_records(&e, &KEY, &from_owner, &he).unwrap(), 0);
+        assert_eq!(approvals::held_wipes(&e).len(), 1);
+        let (host, pw): (String, String) = e.query_row("SELECT host, password FROM servers", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((host.as_str(), pw.as_str()), ("old.example", "saved here"));
+    }
+
+    // A viewer keeps what the record would empty, column by column, and the
+    // rest lands: the secret a record replaces, or a new key that needs no
+    // passphrase. An SSH key an editor really wipes stays on a viewer too:
+    // nothing they hold spreads from there. And a role that's missing counts
+    // as viewer, as it does for the push.
+    #[test]
+    fn a_viewer_keeps_only_what_the_record_would_empty() {
+        use serde_json::json;
+        let (v, hv) = member("V", "user");
+        let recs = with_secrets(&v, &hv);
+        let key = of(&recs, "ssh_keys");
+        let passphrase = |c: &Connection| -> Option<String> { c.query_row("SELECT passphrase FROM ssh_keys", [], |r| r.get(0)).unwrap() };
+
+        let wipe = reworked(key, |o| {
+            o.insert("name".into(), json!("renamed"));
+            o.insert("private_key".into(), json!(""));
+            o.insert("passphrase".into(), json!(""));
+        });
+        assert_eq!(rows_to_empty(&v, &KEY, std::slice::from_ref(&wipe)), 0);
+        assert_eq!(apply_remote_records(&v, &KEY, std::slice::from_ref(&wipe), &hv).unwrap(), 0);
+        assert_eq!((private_key(&v).as_str(), passphrase(&v).as_deref()), ("priv", Some("phrase")));
+        let name: String = v.query_row("SELECT name FROM ssh_keys", [], |r| r.get(0)).unwrap();
+        assert_eq!(name, "renamed");
+
+        let mut replaced = reworked(key, |o| {
+            o.insert("private_key".into(), json!("another key"));
+            o.insert("passphrase".into(), json!(""));
+        });
+        replaced.updated_at = ahead(120_000);
+        assert_eq!(apply_remote_records(&v, &KEY, &[replaced], &hv).unwrap(), 0);
+        assert_eq!(private_key(&v), "another key");
+        assert_eq!(passphrase(&v).as_deref(), Some(""), "the old key's passphrase went with it");
+
+        // A personal profile and an editor aren't viewers. No role row is.
+        let (p, _hp) = device("P");
+        assert!(!approvals::is_viewer(&p));
+        let (e, _he) = member("E", "editor");
+        assert!(!approvals::is_viewer(&e));
+        let (o, _ho) = member("O", "owner");
+        assert!(!approvals::is_viewer(&o));
+        let (n, _hn) = shared_device("N");
+        assert!(approvals::is_viewer(&n));
+    }
+
+    // Two held in a row: the newest for the row is the one that stays.
+    #[test]
+    fn the_newest_held_record_for_a_row_stays() {
+        let (b, hb) = member("B", "editor");
+        let recs = with_secrets(&b, &hb);
+        let first = with_field(of(&recs, "ssh_keys"), "private_key", serde_json::json!(""));
+        let mut second = with_field(of(&recs, "ssh_keys"), "passphrase", serde_json::json!(""));
+        second.updated_at = ahead(120_000);
+        apply_remote_records(&b, &KEY, std::slice::from_ref(&second), &hb).unwrap();
+        apply_remote_records(&b, &KEY, std::slice::from_ref(&first), &hb).unwrap();
+        let held = approvals::held_wipes(&b);
+        assert_eq!((held.len(), held[0].updated_at.as_str()), (1, second.updated_at.as_str()));
+    }
+
+    // The user's call. Yes: the record lands, as it would have. No: the row
+    // stays, stamped past the record, so it comes back wherever the record landed.
+    #[test]
+    fn a_held_record_is_applied_or_kept_by_the_user() {
+        let (b, hb) = member("B", "editor");
+        let recs = with_secrets(&b, &hb);
+        let wipe = with_field(of(&recs, "ssh_keys"), "private_key", serde_json::json!(""));
+        apply_remote_records(&b, &KEY, std::slice::from_ref(&wipe), &hb).unwrap();
+        assert_eq!(resolve_held(&b, &KEY, &hb, true).unwrap(), 1);
+        assert_eq!(private_key(&b), "");
+        assert!(approvals::held_deletions(&b).is_empty());
+        let stamp: String = b.query_row("SELECT updated_at FROM ssh_keys", [], |r| r.get(0)).unwrap();
+        assert_eq!(stamp, wipe.updated_at, "the same row as everywhere else");
+
+        let (b, hb) = member("B", "editor");
+        let recs = with_secrets(&b, &hb);
+        let (other, ho) = device("O");
+        apply_remote_records(&other, &KEY, &recs, &ho).unwrap();
+        let wipe = with_field(of(&recs, "ssh_keys"), "private_key", serde_json::json!(""));
+        apply_remote_records(&other, &KEY, std::slice::from_ref(&wipe), &ho).unwrap();
+        assert_eq!(private_key(&other), "", "a device where it landed");
+        apply_remote_records(&b, &KEY, std::slice::from_ref(&wipe), &hb).unwrap();
+        assert_eq!(resolve_held(&b, &KEY, &hb, false).unwrap(), 1);
+        assert_eq!(private_key(&b), "priv");
+        assert_eq!(count(&b, "held_wipes"), 0);
+        apply_remote_records(&b, &KEY, std::slice::from_ref(&wipe), &hb).unwrap();
+        assert_eq!((private_key(&b).as_str(), count(&b, "held_wipes")), ("priv", 0), "the same record doesn't take it");
+        apply_remote_records(&other, &KEY, &collect_local_records(&b, &KEY, "").unwrap(), &ho).unwrap();
+        assert_eq!(private_key(&other), "priv", "it comes back for everyone");
+    }
+
+    // A yes to the emptied password is no yes to anything else in the record:
+    // on-connect commands in it are held like any others.
+    #[test]
+    fn a_yes_to_a_held_record_allows_only_that() {
+        let (b, hb) = member("B", "editor");
+        let recs = with_secrets(&b, &hb);
+        let server = of(&recs, "servers");
+        let wipe = reworked(server, |o| {
+            o.insert("password".into(), serde_json::json!(""));
+            o.insert("run_on_connect".into(), serde_json::json!("curl x | sh"));
+        });
+        apply_remote_records(&b, &KEY, std::slice::from_ref(&wipe), &hb).unwrap();
+        assert!(approvals::held_for(&b, &server.uuid).is_empty(), "nothing of it landed yet");
+        resolve_held(&b, &KEY, &hb, true).unwrap();
+        assert!(approvals::held_for(&b, &server.uuid).contains(approvals::RUN_ON_CONNECT));
     }
 
     /// A stamp `ms` ahead of now: newer than anything a test device has

@@ -686,8 +686,8 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
         <div role="status" className="max-w-xl w-full mx-auto -mt-3 mb-5 shrink-0 flex items-center gap-3 rounded-lg border border-amber-400/25 bg-amber-400/[0.06] px-3 py-2 text-[12px] text-amber-100/90">
           <Trash2 size={14} className="text-amber-400 shrink-0" />
           <span className="flex-1 min-w-0">
-            {deletionCount === 1 ? "An item was" : `${deletionCount} items were`} deleted by someone you share this
-            profile with. {deletionCount === 1 ? "It stays" : "They stay"} here until you decide.
+            {deletionCount === 1 ? "An item was" : `${deletionCount} items were`} {(heldDeletions || []).some((d: any) => d.emptied) ? "deleted or emptied" : "deleted"} by
+            someone you share this profile with. {deletionCount === 1 ? "It stays" : "They stay"} here until you decide.
           </span>
           <button
             onClick={() => setDeletionsOpen(true)}

@@ -450,14 +450,19 @@ function DesktopApp() {
     setLogs(prev => [...prev.slice(-99), { id, msg, type, time: new Date().toLocaleTimeString() }]);
   }, []);
 
-  // A sync that deleted rows (deleted on another device, or by whoever sent
-  // the server's answer) says so, and where the profile as it was is kept.
-  const logRemoved = useCallback((report: { removed?: number; backup?: string | null }) => {
-    const n = report.removed ?? 0;
-    if (n <= 0) return;
+  // A sync that deleted rows or emptied a saved key or password (done on
+  // another device, or by whoever sent the server's answer) says so, and where
+  // the profile as it was is kept.
+  const logRemoved = useCallback((report: { removed?: number; emptied?: number; backup?: string | null }) => {
+    const removed = report.removed ?? 0;
+    const emptied = report.emptied ?? 0;
+    if (removed <= 0 && emptied <= 0) return;
     addLog(
-      `Sync removed ${n} item${n === 1 ? "" : "s"} from this profile (deleted elsewhere).` +
-        (report.backup ? ` The profile as it was is kept next to its file as ${report.backup}. To restore it, turn off Auto-sync before opening the restored copy: the server still has those rows as deleted, so the next sync removes them again.` : ""),
+      [
+        removed > 0 && `Sync removed ${removed} item${removed === 1 ? "" : "s"} from this profile (deleted elsewhere).`,
+        emptied > 0 && `Sync emptied a saved key or password in ${emptied} item${emptied === 1 ? "" : "s"} (done elsewhere).`,
+        report.backup && `The profile as it was is kept next to its file as ${report.backup}. To restore it, turn off Auto-sync before opening the restored copy: the server still has those rows as deleted or emptied, so the next sync does it again.`,
+      ].filter(Boolean).join(" "),
       "info",
     );
   }, [addLog]);
@@ -544,7 +549,7 @@ function DesktopApp() {
   const handleCloudSync = useCallback(async () => {
     setCloudSyncing(true);
     try {
-      const report = await invoke<{ pushed: number; pulled: number; key_change: boolean; removed?: number; backup?: string | null }>("sync_now");
+      const report = await invoke<{ pushed: number; pulled: number; key_change: boolean; removed?: number; emptied?: number; backup?: string | null }>("sync_now");
       await refreshAll();
       refreshSharedState();
       setLastSyncLabel(`Last synced ${new Date().toLocaleTimeString()}`);
@@ -619,7 +624,7 @@ function DesktopApp() {
     autoSyncBusy.current = true;
     setCloudSyncing(true);
     try {
-      const report = await invoke<{ pushed: number; pulled: number; key_change: boolean; removed?: number; backup?: string | null }>("sync_now");
+      const report = await invoke<{ pushed: number; pulled: number; key_change: boolean; removed?: number; emptied?: number; backup?: string | null }>("sync_now");
       if (report.pulled > 0) await refreshAllRef.current();
       refreshSharedState();
       setLastSyncLabel(`Last synced ${new Date().toLocaleTimeString()}`);
@@ -646,7 +651,7 @@ function DesktopApp() {
     try {
       const n = await invoke<number>("resolve_held_deletions", { deleteThem });
       const s = n === 1 ? "" : "s";
-      addLog(deleteThem ? `Deleted ${n} item${s} here too.` : `Kept ${n} item${s}.`, "success");
+      addLog(deleteThem ? `Done here too: ${n} item${s}.` : `Kept ${n} item${s}.`, "success");
     } catch (e) {
       addLog(`HELD_DELETIONS: ${e}`, "error");
     }
