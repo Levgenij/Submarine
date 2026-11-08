@@ -31,6 +31,9 @@ const MAX_ZOOM = 5;
  *  `rdp_builtin_input`). */
 const MAX_EVENTS = 512;
 
+/** The least one frame counts for, as in the backend (screen_flow.rs). */
+const MIN_FRAME = 4096;
+
 function desktopFor(w: number, h: number, scale: number): { width: number; height: number } {
   let k = scale;
   if (IS_ANDROID) {
@@ -164,7 +167,7 @@ const RemoteScreen = forwardRef<RemoteScreenHandle, Props>(
           if (gen !== channelGen.current) return;
           // Every frame of this session is told to the backend, whatever it
           // turns out to hold: it counts the bytes it sent.
-          ack(raw instanceof ArrayBuffer ? raw.byteLength : Array.isArray(raw) ? raw.length : 0);
+          ack(Math.max(MIN_FRAME, raw instanceof ArrayBuffer ? raw.byteLength : Array.isArray(raw) ? raw.length : 0));
           // Bytes, or a list of numbers when Tauri had to fall back from its
           // binary IPC (slower, still drawn).
           const buf = raw instanceof ArrayBuffer ? raw : Array.isArray(raw) ? new Uint8Array(raw).buffer : null;

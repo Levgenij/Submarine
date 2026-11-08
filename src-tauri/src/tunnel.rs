@@ -645,7 +645,7 @@ pub(crate) fn apply_tunnel_sockopts(sock: &tokio::net::TcpStream) {
 /// way a "permanent" tunnel must NEVER tear its listener down over one accept
 /// error — that was itself a silent-death path: a momentary EMFILE would return
 /// from the loop, unbind the port, and kill the tunnel.
-fn transient_accept_error(e: &std::io::Error) -> bool {
+pub(crate) fn transient_accept_error(e: &std::io::Error) -> bool {
     use std::io::ErrorKind::*;
     matches!(e.kind(), ConnectionAborted | ConnectionReset | Interrupted | WouldBlock)
 }

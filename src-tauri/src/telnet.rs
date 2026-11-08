@@ -16,7 +16,7 @@
 //! for garbage), as the classic telnet client does: it only answers.
 
 use crate::ssh_manager::{
-    emit_terminal_batch, page_end, page_start, ClientHandler, Outflow, PtySize, TerminalCommand,
+    emit_terminal_batch, page_end, ClientHandler, Outflow, PageDrawn, PtySize, TerminalCommand,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -414,6 +414,7 @@ pub async fn run_pump(
     app: AppHandle,
     session_id: String,
     terminal_id: String,
+    page: Arc<PageDrawn>,
     conn: Conn,
     mut rx: mpsc::Receiver<TerminalCommand>,
     mut resize_rx: watch::Receiver<PtySize>,
@@ -435,8 +436,6 @@ pub async fn run_pump(
 
     let first = telnet.lock().map(|mut t| opening_request(&mut t, telnet_port)).unwrap_or_default();
     let writer_telnet = Arc::clone(&telnet);
-    // What the page has drawn: what it hasn't stays bounded (ssh_manager::Outflow).
-    let page = page_start(&terminal_id);
     let writer_page = Arc::clone(&page);
     let writer = tokio::spawn(async move {
         let mut ok = first.is_empty() || write_half.write_all(&first).await.is_ok();
@@ -550,7 +549,7 @@ pub async fn run_pump(
     writer.abort();
     // A reconnect already claimed this terminal. Its close is not this pump's.
     let current = pump_gens().lock().await.get(&terminal_id).copied() == Some(generation);
-    if current {
+    if current && !page.superseded() {
         let _ = app.emit(&format!("terminal-closed-{terminal_id}"), serde_json::json!({}));
         if server_ended {
             let reason = if route.iter().any(|h| h.is_closed()) {
