@@ -1,18 +1,37 @@
-import { Search, Plus, Server, Globe, Folder, FolderPlus, ChevronLeft, ChevronRight, Trash2, Edit2, Zap, Check, X, Copy, GripVertical, KeyRound, ShieldAlert } from "lucide-react";
-import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from "react";
+import { Search, Plus, Server, Globe, Folder, FolderPlus, ChevronLeft, ChevronRight, ChevronDown, Trash2, Edit2, Zap, Check, X, Copy, GripVertical, KeyRound, ShieldAlert, ArrowUp, ArrowDown, LayoutGrid, ListTree, ArrowDownAZ, FolderTree } from "lucide-react";
+import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, useId } from "react";
 import { createPortal } from "react-dom";
 import { useConfirm } from "../ui/confirm";
 import { HeldReview } from "./HeldReview";
 import { HeldDeletions } from "./HeldDeletions";
 import { folderTree } from "../util/folderTree";
+import { readStoredJson, writeStoredJson } from "../util/storedJson";
+import { SORT_KEYS, sortServers, groupByLetter, type SortKey, type SortDir } from "../util/serverOrder";
+import { useLastConnected } from "../util/lastConnected";
+import { onRovingKeyDown } from "../ui/rovingKeys";
+import { ServerTree, protocolTag } from "./ServerTree";
 
-function vncListTitle(jumpHostId: unknown): string {
-  return jumpHostId
-    ? "Only the hop after the SSH server isn't encrypted"
-    : "VNC server (not encrypted)";
-}
+// How the list is shown, per device: Cards or Tree, the order, and whether
+// Cards split a name-sorted list into lettered groups.
+// `foldersFirst`: whether each Tree level lists its folders before its servers
+// (and top-level servers under "Ungrouped"), or sorts them all together.
+type ViewPrefs = { view: "cards" | "tree"; sort: SortKey; dir: SortDir; group: boolean; foldersFirst: boolean };
+const VIEW_KEY = "submarine-servers-view";
+const readViewPrefs = (): ViewPrefs => {
+  const v: any = readStoredJson(VIEW_KEY) ?? {};
+  return {
+    view: v.view === "tree" ? "tree" : "cards",
+    sort: SORT_KEYS.includes(v.sort) ? v.sort : "manual",
+    dir: v.dir === "desc" ? "desc" : "asc",
+    group: v.group !== false,
+    foldersFirst: v.foldersFirst !== false,
+  };
+};
+const SORT_LABELS: Record<SortKey, string> = { manual: "Manual order", name: "Name", host: "Host", recent: "Last connected" };
 
-export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp, onActiveFolderChange, onOpenServer, onEditServer, onAddClick, onQuickConnect, onRemoveServer, onRemoveFolder, onRenameFolder, onCreateFolder, onMoveServer, onMoveFolder, onCloneServer, onReorderServers, keyChange, onAcceptKey, onAllowHeld, shareGrant, onUnlockSharing, heldDeletions, onResolveDeletions, isMobile }: any) => {
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp, onActiveFolderChange, onOpenServer, onEditServer, onAddClick, onQuickConnect, onRemoveServer, onRemoveFolder, onRenameFolder, onCreateFolder, onMoveServer, onMoveFolder, onCloneServer, onReorderServers, profile, keyChange, onAcceptKey, onAllowHeld, shareGrant, onUnlockSharing, heldDeletions, onResolveDeletions, isMobile }: any) => {
   const [search, setSearch] = useState("");
   // Changes someone else made in a shared profile that this device holds
   // back until its user allows them (see HeldReview).
@@ -29,6 +48,18 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
   // silently did nothing on Android after v0.2.32 made the action cluster
   // always-visible on mobile. Route through the themed useConfirm hook.
   const confirm = useConfirm();
+  const [prefs, setPrefsState] = useState(readViewPrefs);
+  const setPrefs = (patch: Partial<ViewPrefs>) => {
+    const next = { ...prefs, ...patch };
+    setPrefsState(next);
+    writeStoredJson(VIEW_KEY, next);
+  };
+  // A column header click: the same key reverses, a new one starts ascending.
+  const sortBy = (key: SortKey) => setPrefs(prefs.sort === key ? { dir: prefs.dir === "asc" ? "desc" : "asc" } : { sort: key, dir: "asc" });
+  const lastSeen = useLastConnected(profile);
+  const isTree = prefs.view === "tree";
+  const grouped = !isTree && prefs.group && prefs.sort === "name";
+  const uid = useId();
   // A shared profile's new key, waiting for the user's OK: they compare its
   // fingerprint with the one in the owner's Profile panel first. Cancel has
   // the focus, so a stray Enter doesn't accept it. The answer goes with the
@@ -68,6 +99,29 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
     }
     setRenaming(null);
   };
+  // The rename field and its OK / Cancel, for a folder card or a tree row.
+  const renameControls = () => renaming && (
+    <>
+      <input
+        autoFocus
+        aria-label="Folder name"
+        value={renaming.draft}
+        onChange={(e) => setRenaming({ id: renaming.id, draft: e.target.value })}
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); commitRename(); }
+          if (e.key === "Escape") { e.preventDefault(); setRenaming(null); }
+        }}
+        className="min-w-0 flex-1 h-7 px-2 bg-black/40 border border-primary/40 rounded-lg text-[13px] font-bold text-white outline-none"
+      />
+      <button onClick={(e) => { e.stopPropagation(); commitRename(); }} title="Save name" aria-label="Save name" className="p-1.5 text-emerald-400 hover:bg-white/10 rounded-lg shrink-0">
+        <Check size={14} />
+      </button>
+      <button onClick={(e) => { e.stopPropagation(); setRenaming(null); }} title="Cancel" aria-label="Cancel rename" className="p-1.5 text-zinc-400 hover:text-rose-400 hover:bg-white/10 rounded-lg shrink-0">
+        <X size={14} />
+      </button>
+    </>
+  );
 
   // Folders nest (see util/folderTree): the grid shows the folders and
   // servers directly inside the open folder (or the top level).
@@ -77,33 +131,75 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
     if (activeFolderId !== null && folders && !tree.has(activeFolderId)) setActiveFolderId(null);
   }, [activeFolderId, folders]);
 
-  // "Add folder": the name of the folder being made inside the open folder,
-  // typed into a draft card at the head of the grid. null when none is open;
-  // closed when another folder is opened.
-  const [newFolder, setNewFolder] = useState<string | null>(null);
-  useEffect(() => { setNewFolder(null); }, [activeFolderId]);
+  // "Add folder": the folder being made and where, typed into a draft card at
+  // the head of the grid (or a draft row in the tree). null when none is
+  // open; closed when another folder is opened or the view changes.
+  const [newFolder, setNewFolder] = useState<{ parent: number | null; name: string } | null>(null);
+  useEffect(() => { setNewFolder(null); }, [activeFolderId, prefs.view]);
+  const startNewFolder = (parent: number | null) => setNewFolder((v) => (v && v.parent === parent ? v : { parent, name: "" }));
   const commitNewFolder = async () => {
-    const name = (newFolder ?? "").trim();
-    if (!name || !onCreateFolder) { setNewFolder(null); return; }
+    const name = (newFolder?.name ?? "").trim();
+    if (!name || !onCreateFolder || !newFolder) { setNewFolder(null); return; }
     try {
-      await onCreateFolder(name, activeFolderId);
+      await onCreateFolder(name, newFolder.parent);
       setNewFolder(null);
     } catch { /* parent logs it; the input stays open for a retry */ }
   };
+  // The new folder's name field and its OK / Cancel. Plain JSX, not a nested
+  // component, so typing keeps focus.
+  const newFolderControls = () => newFolder && (
+    <>
+      <input
+        autoFocus
+        aria-label="New folder name"
+        placeholder="Folder name…"
+        value={newFolder.name}
+        onChange={(e) => setNewFolder({ ...newFolder, name: e.target.value })}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); commitNewFolder(); }
+          if (e.key === "Escape") { e.preventDefault(); setNewFolder(null); }
+        }}
+        className="min-w-0 flex-1 h-7 px-2 bg-black/40 border border-primary/40 rounded-lg text-[13px] font-bold text-white outline-none placeholder:text-zinc-600 placeholder:font-normal"
+      />
+      <div className="flex items-center gap-0.5 shrink-0">
+        <button
+          onClick={commitNewFolder}
+          disabled={!newFolder.name.trim()}
+          title="Create folder"
+          aria-label="Create folder"
+          className="p-1.5 text-emerald-400 hover:bg-white/10 rounded-lg disabled:opacity-40 disabled:hover:bg-transparent"
+        >
+          <Check size={14} />
+        </button>
+        <button
+          onClick={() => setNewFolder(null)}
+          title="Cancel"
+          aria-label="Cancel new folder"
+          className="p-1.5 text-zinc-400 hover:text-rose-400 hover:bg-white/10 rounded-lg"
+        >
+          <X size={14} />
+        </button>
+      </div>
+    </>
+  );
 
-  const filteredServers = servers?.filter((s: any) =>
-    s.name.toLowerCase().includes(search.toLowerCase()) ||
-    s.host.includes(search)
-  ) || [];
+  // Search matches a server's name, host, or the path of its folder.
+  const query = search.trim().toLowerCase();
+  const isSearching = query !== "";
+  const filteredServers: any[] = (servers || []).filter((s: any) => {
+    if (!isSearching) return true;
+    const f = tree.serverFolder(s);
+    return (s.name || "").toLowerCase().includes(query)
+      || (s.host || "").toLowerCase().includes(query)
+      || (f !== null && tree.label(f).toLowerCase().includes(query));
+  });
 
-  // If search is active, we might want to just show all matching servers flat,
-  // or still respect the folder. Let's just show them flat if searching.
-  const isSearching = search.trim() !== "";
-
-  const displayedServers = isSearching
-    ? filteredServers
-    : filteredServers.filter((s: any) => tree.serverFolder(s) === activeFolderId);
-  const displayedFolders = isSearching ? [] : tree.childrenOf(activeFolderId);
+  // Cards show search results flat, across folders.
+  const displayedServers: any[] = sortServers(
+    isSearching ? filteredServers : filteredServers.filter((s: any) => tree.serverFolder(s) === activeFolderId),
+    prefs.sort, prefs.dir, lastSeen,
+  );
+  const displayedFolders: any[] = isSearching ? [] : tree.childrenOf(activeFolderId);
 
   // Drag a server or a folder onto a folder card (into it) or onto a step of
   // the path above the grid (up to it). The target under the pointer: a
@@ -130,8 +226,9 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
   // the placeholder tracks the pointer's insertion point. Drag it back and the
   // order returns; on release the final order is persisted via onReorderServers
   // and held until the props catch up so there's no flash of the old order.
-  // Disabled while searching (results aren't the stored order).
-  const canReorder = !!onReorderServers && !isSearching;
+  // Only in the stored (manual) order, and not while searching: any other
+  // list isn't the order a drop would save.
+  const canReorder = !!onReorderServers && !isSearching && prefs.sort === "manual" && !isTree;
   const [dragId, setDragId] = useState<number | null>(null);
   // Live id order during a drag (null when not dragging). Rendered from when set.
   const [order, setOrder] = useState<number[] | null>(null);
@@ -395,6 +492,29 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
   const draggedFolder = folderDragId != null ? folders?.find((f: any) => f.id === folderDragId) : null;
   const dragging = dragId !== null || folderDragId !== null;
 
+  // Delete, once the user agrees: shared by the cards and the tree.
+  const askRemoveServer = async (s: any) => {
+    if (await confirm({ title: 'Delete server?', message: `“${s.name}” will be removed from this profile.`, destructive: true })) {
+      onRemoveServer(s.id);
+    }
+  };
+  const askRemoveFolder = async (f: any) => {
+    // Everything below goes too: say how much.
+    const inside = tree.subtreeOf(f.id);
+    const subfolders = inside.size - 1;
+    const allServers = servers?.filter((s: any) => inside.has(tree.serverFolder(s) as number)).length || 0;
+    const what = [
+      subfolders > 0 ? (subfolders === 1 ? '1 folder' : `${subfolders} folders`) : null,
+      allServers === 1 ? '1 server' : `${allServers} servers`,
+    ].filter(Boolean).join(' and ');
+    const message = subfolders > 0
+      ? `“${f.name}” and everything inside it (${what}) will be removed.`
+      : `“${f.name}” and every server inside it (${what}) will be removed.`;
+    if (await confirm({ title: 'Delete folder?', message, destructive: true })) {
+      onRemoveFolder(f.id);
+    }
+  };
+
   // Compact horizontal node card: a monogram avatar carries identity, the
   // server projects its own colour as a left accent bar. Kept short (h-16) so
   // name + host read clearly. Rendered as a plain keyed <div> (not a nested
@@ -456,13 +576,7 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
             <button type="button" className="max-w-full truncate text-left rounded outline-none focus-visible:ring-2 focus-visible:ring-primary/60">{s.name}</button>
           </h3>
           <div className="flex items-center gap-1 mt-0.5">
-            {s.protocol === "rdp"
-              ? <span title="RDP server" className="shrink-0 px-1 rounded text-[9px] font-bold tracking-wider leading-[14px] text-sky-300 bg-sky-500/10 border border-sky-500/20">RDP</span>
-              : s.protocol === "telnet"
-                ? <span title="Telnet server (not encrypted)" className="shrink-0 px-1 rounded text-[9px] font-bold tracking-wider leading-[14px] text-amber-300 bg-amber-500/10 border border-amber-500/20">TELNET</span>
-                : s.protocol === "vnc"
-                  ? <span title={vncListTitle(s.jump_host_id)} className="shrink-0 px-1 rounded text-[9px] font-bold tracking-wider leading-[14px] text-violet-300 bg-violet-500/10 border border-violet-500/20">VNC</span>
-                  : <Globe size={10} className="text-zinc-400 shrink-0" />}
+            {protocolTag(s) ?? <Globe size={10} className="text-zinc-400 shrink-0" />}
             <span className="text-[10.5px] text-zinc-300 font-mono truncate">{s.host}</span>
           </div>
         </div>
@@ -487,12 +601,7 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
             <Edit2 size={13} />
           </button>
           <button
-            onClick={async (e) => {
-              e.stopPropagation();
-              if (await confirm({ title: 'Delete server?', message: `“${s.name}” will be removed from this profile.`, destructive: true })) {
-                onRemoveServer(s.id);
-              }
-            }}
+            onClick={(e) => { e.stopPropagation(); askRemoveServer(s); }}
             title="Delete"
             className="p-1.5 rounded-lg text-zinc-500 hover:text-red-500 hover:bg-white/5 transition-all"
           >
@@ -555,17 +664,7 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
         {/* Name (inline-editable) + count. */}
         <div className="min-w-0 flex-1">
           {isRenaming ? (
-            <input
-              autoFocus
-              value={renaming!.draft}
-              onChange={(e) => setRenaming({ id: f.id, draft: e.target.value })}
-              onClick={(e) => e.stopPropagation()}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") { e.preventDefault(); commitRename(); }
-                if (e.key === "Escape") { e.preventDefault(); setRenaming(null); }
-              }}
-              className="w-full h-7 px-2 bg-black/40 border border-primary/40 rounded-lg text-[13px] font-bold text-white outline-none"
-            />
+            <div className="flex items-center gap-0.5">{renameControls()}</div>
           ) : (
             <>
               <h3 className="font-bold text-zinc-100 text-[13px] truncate tracking-tight leading-tight">
@@ -579,24 +678,7 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
         </div>
 
         {/* Right cluster: count badge (idle) that swaps to actions on hover. */}
-        {isRenaming ? (
-          <div className="flex items-center gap-0.5 shrink-0">
-            <button
-              onClick={(e) => { e.stopPropagation(); commitRename(); }}
-              title="Save name"
-              className="p-1.5 text-emerald-400 hover:bg-white/10 rounded-lg"
-            >
-              <Check size={14} />
-            </button>
-            <button
-              onClick={(e) => { e.stopPropagation(); setRenaming(null); }}
-              title="Cancel"
-              className="p-1.5 text-zinc-400 hover:text-rose-400 hover:bg-white/10 rounded-lg"
-            >
-              <X size={14} />
-            </button>
-          </div>
-        ) : (
+        {isRenaming ? null : (
           <div className="relative flex items-center shrink-0">
             <span className="text-[10px] bg-black/60 text-zinc-400 px-1.5 py-0.5 rounded font-mono group-hover:opacity-0 group-has-[:focus-visible]:opacity-0 transition-opacity">{serverCount}</span>
             <div className="absolute right-0 flex items-center gap-0.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-has-[:focus-visible]:opacity-100 [@media(hover:none)]:!opacity-100 transition-all bg-gradient-to-l from-[#16161b] via-[#16161b] to-transparent pl-6">
@@ -608,23 +690,7 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
                 <Edit2 size={13} />
               </button>
               <button
-                onClick={async (e) => {
-                  e.stopPropagation();
-                  // Everything below goes too: say how much.
-                  const inside = tree.subtreeOf(f.id);
-                  const subfolders = inside.size - 1;
-                  const allServers = servers?.filter((s: any) => inside.has(tree.serverFolder(s) as number)).length || 0;
-                  const what = [
-                    subfolders > 0 ? (subfolders === 1 ? '1 folder' : `${subfolders} folders`) : null,
-                    allServers === 1 ? '1 server' : `${allServers} servers`,
-                  ].filter(Boolean).join(' and ');
-                  const message = subfolders > 0
-                    ? `“${f.name}” and everything inside it (${what}) will be removed.`
-                    : `“${f.name}” and every server inside it (${what}) will be removed.`;
-                  if (await confirm({ title: 'Delete folder?', message, destructive: true })) {
-                    onRemoveFolder(f.id);
-                  }
-                }}
+                onClick={(e) => { e.stopPropagation(); askRemoveFolder(f); }}
                 title="Delete folder"
                 className="p-1.5 rounded-lg text-zinc-500 hover:text-red-500 hover:bg-white/5 transition-all"
               >
@@ -637,20 +703,192 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
     );
   };
 
+  // Cards and Tree add things where the user is: the open folder in Cards,
+  // the top level in Tree.
+  const here = isTree ? null : activeFolderId;
+  const dirLabel = prefs.sort === "recent"
+    ? (prefs.dir === "asc" ? "newest first" : "oldest first")
+    : (prefs.dir === "asc" ? "A to Z" : "Z to A");
+  const gridClass = `grid ${isMobile ? 'grid-cols-1' : 'grid-cols-2 lg:grid-cols-3 xl:grid-cols-4'} gap-3`;
+  // The folders and servers of this level are one list, sorted together: a
+  // folder has no host and is never connected, so it sorts as empty / never.
+  // Manual order keeps the folders first, having no stored place among servers.
+  const cardItems = sortServers(
+    [
+      ...displayedFolders.map((f: any) => ({ folder: f, server: null, name: f.name, uuid: f.uuid })),
+      ...orderedServers.map((s: any) => ({ folder: null, server: s, name: s.name, host: s.host, uuid: s.uuid })),
+    ],
+    prefs.sort, prefs.dir, lastSeen,
+  );
+  const renderItem = (it: { folder: any; server: any }) => (it.folder ? renderFolder(it.folder) : renderServer(it.server));
+  const letterGroups = grouped ? groupByLetter(cardItems) : [];
+  const showJump = letterGroups.length >= 4;
+
+  // The folder being made with "Add folder": a card to name it.
+  const draftCard = !isSearching && newFolder !== null && (
+    <div className="relative flex items-center gap-3 h-16 pl-3.5 pr-2 rounded-xl bg-gradient-to-br from-[#1c1c22] to-[#141418] border border-primary/40 overflow-hidden">
+      <span aria-hidden className="absolute left-0 top-0 bottom-0 w-[3px] bg-primary" />
+      <div className="w-9 h-9 rounded-lg bg-black/40 border border-white/10 flex items-center justify-center shadow-inner shrink-0">
+        <FolderPlus size={16} className="text-primary" />
+      </div>
+      {newFolderControls()}
+    </div>
+  );
+
+  const emptyNote = !isSearching
+    ? activeFolderId !== null && displayedServers.length === 0 && displayedFolders.length === 0 && newFolder === null && (
+        <div className="col-span-full py-10 text-center text-zinc-600 text-xs italic">
+          Nothing in this folder yet. Add a server or folder here, or drag a server onto this folder from the level above.
+        </div>
+      )
+    : displayedServers.length === 0 && (
+        <div className="col-span-full py-10 text-center text-zinc-600 text-xs italic">
+          No matches.
+        </div>
+      );
+
   return (
     <div className="flex-1 flex flex-col h-full p-6 overflow-hidden bg-transparent">
-      <div className="relative max-w-sm w-full mx-auto mb-6 shrink-0">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" size={14} />
-        {/* The grid mounts each time the Servers tab opens, so typing goes
-            straight to search. Not on a phone: it would pop the keyboard. */}
-        <input
-          type="text"
-          autoFocus={!isMobile}
-          placeholder="Search servers…"
-          className="w-full h-9 bg-[#1c1c21] border border-white/10 rounded-lg pl-9 pr-4 text-[13px] text-zinc-100 outline-none focus:border-primary/50 focus:bg-[#16161a] transition-all placeholder:text-zinc-600 shadow-inner"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
+      {/* Title and the main actions. "Add …" works where the user is: the
+          open folder in Cards, the top level in Tree. */}
+      <header className="shrink-0 mb-4 flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
+        <div className="min-w-0">
+          <h1 className="text-[22px] font-bold tracking-tight text-zinc-50 leading-tight">Servers</h1>
+          <p className="mt-0.5 text-[12.5px] text-zinc-500">
+            {plural(servers?.length || 0, "server")} <span aria-hidden>·</span> {plural(folders?.length || 0, "folder")}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {onQuickConnect && (
+            <button
+              onClick={onQuickConnect}
+              aria-label="Quick connect"
+              title="Connect without saving a server"
+              className="inline-flex items-center gap-2 h-9 px-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[12.5px] font-semibold hover:bg-amber-500/20 hover:text-amber-200 transition-colors"
+            >
+              <Zap size={15} /> <span className="hidden sm:inline">Quick connect</span>
+            </button>
+          )}
+          {onCreateFolder && (
+            <button
+              onClick={() => { setSearch(""); startNewFolder(here); }}
+              aria-label="Add folder"
+              title={here !== null ? "Make a folder inside this one" : "Group servers in a folder"}
+              className="inline-flex items-center gap-2 h-9 px-3 rounded-lg border border-primary/40 text-primary text-[12.5px] font-semibold hover:bg-primary/10 transition-colors"
+            >
+              <FolderPlus size={15} /> <span className="hidden sm:inline">Add folder</span>
+            </button>
+          )}
+          {/* From inside a folder the new server goes into it, so the user
+              doesn't repeat the choice they just clicked into. */}
+          <button
+            onClick={() => onAddClick(here)}
+            aria-label="Add server"
+            className="inline-flex items-center gap-2 h-9 px-3.5 rounded-lg bg-primary text-[#0a0a0c] text-[12.5px] font-bold hover:bg-primary/90 transition-colors shadow-[0_0_20px_rgba(var(--primary),0.15)]"
+          >
+            <Plus size={16} /> <span className="hidden sm:inline">Add server</span>
+          </button>
+        </div>
+      </header>
+
+      <div className="shrink-0 mb-6 flex flex-wrap items-center gap-2">
+        <div className="relative flex-1 min-w-[min(100%,14rem)]">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" size={15} />
+          {/* The grid mounts each time the Servers tab opens, so typing goes
+              straight to search. Not on a phone: it would pop the keyboard. */}
+          <input
+            type="text"
+            autoFocus={!isMobile}
+            aria-label="Search servers"
+            placeholder="Search name, host or folder…"
+            className="w-full h-9 bg-[#1c1c21] border border-white/10 rounded-lg pl-9 pr-9 text-[13px] text-zinc-100 outline-none focus:border-primary/50 focus:bg-[#16161a] transition-all placeholder:text-zinc-600 shadow-inner"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Escape" && search) { e.preventDefault(); setSearch(""); } }}
+          />
+          {search && (
+            <button
+              onClick={() => setSearch("")}
+              aria-label="Clear search"
+              title="Clear search"
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 rounded text-zinc-500 hover:text-zinc-200 hover:bg-white/5"
+            >
+              <X size={14} />
+            </button>
+          )}
+        </div>
+
+        <label className="relative flex items-center h-9 rounded-lg bg-[#1c1c21] border border-white/10 focus-within:border-primary/50 transition-colors">
+          <span className="pl-3 text-[12.5px] text-zinc-500">Sort:</span>
+          <select
+            value={prefs.sort}
+            onChange={(e) => setPrefs({ sort: e.target.value as SortKey, dir: "asc" })}
+            className="appearance-none bg-transparent h-full pl-1.5 pr-8 text-[12.5px] text-zinc-100 outline-none cursor-pointer"
+          >
+            {SORT_KEYS.map((k) => <option key={k} value={k}>{SORT_LABELS[k]}</option>)}
+          </select>
+          <ChevronDown size={14} className="pointer-events-none absolute right-2.5 text-zinc-400" />
+        </label>
+
+        <button
+          onClick={() => setPrefs({ dir: prefs.dir === "asc" ? "desc" : "asc" })}
+          disabled={prefs.sort === "manual"}
+          aria-label={`Reverse the order (now ${dirLabel})`}
+          title={prefs.sort === "manual" ? "Manual order has no direction" : `${dirLabel}: click to reverse`}
+          className="h-9 w-9 shrink-0 inline-flex items-center justify-center rounded-lg bg-[#1c1c21] border border-white/10 text-zinc-300 hover:text-white hover:border-white/20 disabled:opacity-40 disabled:hover:text-zinc-300 disabled:hover:border-white/10 transition-colors"
+        >
+          {prefs.dir === "desc" ? <ArrowDown size={16} /> : <ArrowUp size={16} />}
+        </button>
+
+        {/* Lettered groups need a name sort, so turning them on picks it. */}
+        {!isTree && (
+          <button
+            onClick={() => setPrefs(grouped ? { group: false } : { group: true, sort: "name" })}
+            aria-pressed={grouped}
+            aria-label="Group by first letter"
+            title={grouped ? "Stop grouping by first letter" : "Group by first letter (sorts by name)"}
+            className={`h-9 px-2.5 shrink-0 inline-flex items-center gap-2 rounded-lg border text-[12.5px] transition-colors ${
+              grouped ? "bg-primary/15 border-primary/40 text-primary" : "bg-[#1c1c21] border-white/10 text-zinc-300 hover:text-white hover:border-white/20"
+            }`}
+          >
+            <ArrowDownAZ size={16} /> <span className="hidden md:inline">Group A–Z</span>
+          </button>
+        )}
+
+        {isTree && (
+          <button
+            onClick={() => setPrefs({ foldersFirst: !prefs.foldersFirst })}
+            aria-pressed={prefs.foldersFirst}
+            aria-label="Folders first"
+            title={prefs.foldersFirst ? "Sort folders and servers together" : "List folders before servers"}
+            className={`h-9 px-2.5 shrink-0 inline-flex items-center gap-2 rounded-lg border text-[12.5px] transition-colors ${
+              prefs.foldersFirst ? "bg-primary/15 border-primary/40 text-primary" : "bg-[#1c1c21] border-white/10 text-zinc-300 hover:text-white hover:border-white/20"
+            }`}
+          >
+            <FolderTree size={16} /> <span className="hidden md:inline">Folders first</span>
+          </button>
+        )}
+
+        <div role="radiogroup" aria-label="View" onKeyDown={(e) => onRovingKeyDown(e)} className="flex h-9 p-0.5 gap-0.5 shrink-0 rounded-lg bg-[#1c1c21] border border-white/10">
+          {([["cards", "Cards", LayoutGrid], ["tree", "Tree", ListTree]] as const).map(([v, label, Icon]) => {
+            const on = prefs.view === v;
+            return (
+              <button
+                key={v}
+                role="radio"
+                aria-checked={on}
+                aria-label={label}
+                tabIndex={on ? 0 : -1}
+                onClick={() => setPrefs({ view: v })}
+                className={`inline-flex items-center gap-2 px-2.5 rounded-md text-[12.5px] outline-none focus-visible:ring-2 focus-visible:ring-primary/60 transition-colors ${
+                  on ? "bg-primary/15 text-primary ring-1 ring-inset ring-primary/40" : "text-zinc-400 hover:text-zinc-100"
+                }`}
+              >
+                <Icon size={15} /> <span className="hidden sm:inline">{label}</span>
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {keyChange && onAcceptKey && (
@@ -732,7 +970,7 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
       <div className="flex-1 overflow-y-auto custom-scrollbar pr-1 pb-10">
 
         {/* Header navigation if in folder */}
-        {!isSearching && activeFolderId !== null && (
+        {!isTree && !isSearching && activeFolderId !== null && (
           <div className="flex items-center gap-3 mb-6 flex-wrap">
             <button
               aria-label="Back"
@@ -773,31 +1011,13 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
                 );
               })}
             </nav>
-            {onCreateFolder && (
-              <button
-                onClick={() => setNewFolder((v) => v ?? "")}
-                title="Make a folder inside this one"
-                className="h-8 px-3 bg-primary/10 text-primary border border-primary/25 hover:bg-primary/20 rounded-lg flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider shrink-0"
-              >
-                <FolderPlus size={13} /> Add folder
-              </button>
-            )}
-            {/* Adding a server from inside a folder pre-selects this folder
-                in the new-node panel, so the user doesn't have to repeat
-                the choice they just clicked into. */}
-            <button
-              onClick={() => onAddClick(activeFolderId)}
-              className="h-8 px-3 bg-primary/15 text-primary border border-primary/30 hover:bg-primary/25 rounded-lg flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider shrink-0"
-            >
-              <Plus size={13} /> Add server
-            </button>
           </div>
         )}
 
-        {servers?.length === 0 && folders?.length === 0 ? (
+        {servers?.length === 0 && folders?.length === 0 && newFolder === null ? (
           <div className="h-full flex items-center justify-center">
             <button
-              onClick={onAddClick}
+              onClick={() => onAddClick(null)}
               className="flex flex-col items-center gap-4 p-12 rounded-xl border-2 border-dashed border-zinc-800 hover:border-primary/40 hover:bg-primary/5 transition-all group"
             >
               <div className="w-14 h-14 bg-primary/10 rounded-xl flex items-center justify-center text-primary shadow-[0_0_15px_rgba(var(--primary),0.1)] transition-transform">
@@ -809,104 +1029,82 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
               </div>
             </button>
           </div>
-        ) : (
-          <>
-            {/* Compact action toolbar (root only) — sized to its own content
-                rather than filling a full grid cell like the cards. */}
-            {(!isSearching && activeFolderId === null) && (
-              <div className="flex items-center gap-2 mb-4 flex-wrap">
-                <button
-                  onClick={onAddClick}
-                  className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-primary/10 border border-primary/25 text-primary text-[11px] font-bold uppercase tracking-wider hover:bg-primary/20 transition-colors"
+        ) : isTree ? (
+          <ServerTree
+            servers={filteredServers}
+            allServers={servers || []}
+            mixed={!prefs.foldersFirst}
+            tree={tree}
+            isSearching={isSearching}
+            sort={prefs.sort}
+            dir={prefs.dir}
+            onSort={sortBy}
+            lastSeen={lastSeen}
+            profile={profile}
+            isMobile={isMobile}
+            onOpenServer={onOpenServer}
+            onEditServer={onEditServer}
+            onCloneServer={onCloneServer}
+            onAddClick={onAddClick}
+            askRemoveServer={askRemoveServer}
+            askRemoveFolder={askRemoveFolder}
+            canCreateFolder={!!onCreateFolder}
+            newFolder={newFolder}
+            startNewFolder={startNewFolder}
+            newFolderControls={newFolderControls}
+            canRename={!!onRenameFolder}
+            renamingId={renaming?.id ?? null}
+            startRename={(f: any) => setRenaming({ id: f.id, draft: f.name || "" })}
+            renameControls={renameControls}
+            onMoveServer={onMoveServer}
+            onMoveFolder={onMoveFolder}
+            onReorderServers={onReorderServers}
+          />
+        ) : grouped ? (
+          // Name-sorted cards in lettered sections, folders and servers alike:
+          // a sticky heading per letter, and a jump bar once there are enough
+          // letters to be worth jumping between.
+          <div className="flex flex-col gap-5">
+            {draftCard && <div className={gridClass}>{draftCard}</div>}
+            {showJump && (
+              <nav aria-label="Jump to letter" className="sticky top-0 z-20 -mx-1 px-1 h-10 flex items-center gap-0.5 overflow-x-auto bg-[#0a0a0c]/90 backdrop-blur-sm border-b border-white/5">
+                {letterGroups.map((g, i) => (
+                  <button
+                    key={g.letter}
+                    onClick={() => document.getElementById(`${uid}-S${i}`)?.scrollIntoView({ block: "start", behavior: "smooth" })}
+                    aria-label={`Jump to ${g.letter}`}
+                    className="shrink-0 min-w-7 h-7 px-1.5 rounded-md text-[12px] font-bold text-zinc-400 hover:text-primary hover:bg-primary/10 outline-none focus-visible:ring-2 focus-visible:ring-primary/60 transition-colors"
+                  >
+                    {g.letter}
+                  </button>
+                ))}
+              </nav>
+            )}
+            {letterGroups.map((g, i) => (
+              <section key={g.letter} id={`${uid}-S${i}`} aria-labelledby={`${uid}-L${i}`} className={showJump ? "scroll-mt-10" : ""}>
+                <h2
+                  id={`${uid}-L${i}`}
+                  className={`sticky ${showJump ? "top-10" : "top-0"} z-10 -mx-1 px-1 py-2 mb-1 flex items-center gap-2 bg-[#0a0a0c]/90 backdrop-blur-sm`}
                 >
-                  <Plus size={13} /> Add server
-                </button>
-                {onCreateFolder && (
-                  <button
-                    onClick={() => setNewFolder((v) => v ?? "")}
-                    title="Group servers in a folder"
-                    className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-primary/10 border border-primary/25 text-primary text-[11px] font-bold uppercase tracking-wider hover:bg-primary/20 transition-colors"
-                  >
-                    <FolderPlus size={13} /> Add folder
-                  </button>
-                )}
-                {onQuickConnect && (
-                  <button
-                    onClick={onQuickConnect}
-                    className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-amber-500/10 border border-amber-500/25 text-amber-300/90 text-[11px] font-bold uppercase tracking-wider hover:bg-amber-500/20 hover:text-amber-200 transition-colors"
-                  >
-                    <Zap size={13} /> Quick connect
-                  </button>
-                )}
-              </div>
-            )}
-
-          <div ref={gridRef} className={`grid ${isMobile ? 'grid-cols-1' : 'grid-cols-2 lg:grid-cols-3 xl:grid-cols-4'} gap-3`}>
-
-            {/* The folder being made with "Add folder": a card to name it.
-                Plain JSX, not a nested component, so typing keeps focus. */}
-            {!isSearching && newFolder !== null && (
-              <div className="relative flex items-center gap-3 h-16 pl-3.5 pr-2 rounded-xl bg-gradient-to-br from-[#1c1c22] to-[#141418] border border-primary/40 overflow-hidden">
-                <span aria-hidden className="absolute left-0 top-0 bottom-0 w-[3px] bg-primary" />
-                <div className="w-9 h-9 rounded-lg bg-black/40 border border-white/10 flex items-center justify-center shadow-inner shrink-0">
-                  <FolderPlus size={16} className="text-primary" />
-                </div>
-                <input
-                  autoFocus
-                  aria-label="New folder name"
-                  placeholder="Folder name…"
-                  value={newFolder}
-                  onChange={(e) => setNewFolder(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") { e.preventDefault(); commitNewFolder(); }
-                    if (e.key === "Escape") { e.preventDefault(); setNewFolder(null); }
-                  }}
-                  className="min-w-0 flex-1 h-7 px-2 bg-black/40 border border-primary/40 rounded-lg text-[13px] font-bold text-white outline-none placeholder:text-zinc-600 placeholder:font-normal"
-                />
-                <div className="flex items-center gap-0.5 shrink-0">
-                  <button
-                    onClick={commitNewFolder}
-                    disabled={!newFolder.trim()}
-                    title="Create folder"
-                    aria-label="Create folder"
-                    className="p-1.5 text-emerald-400 hover:bg-white/10 rounded-lg disabled:opacity-40 disabled:hover:bg-transparent"
-                  >
-                    <Check size={14} />
-                  </button>
-                  <button
-                    onClick={() => setNewFolder(null)}
-                    title="Cancel"
-                    aria-label="Cancel new folder"
-                    className="p-1.5 text-zinc-400 hover:text-rose-400 hover:bg-white/10 rounded-lg"
-                  >
-                    <X size={14} />
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* The folders inside the open one (or the top level); none while searching. */}
-            {displayedFolders.map((f: any) => renderFolder(f))}
-
-            {/* Render Servers — honours the live drag order while reordering. */}
-            {orderedServers.map((s: any) => renderServer(s))}
-
-            {/* Empty Folder State */}
-            {!isSearching && activeFolderId !== null && displayedServers.length === 0 && displayedFolders.length === 0 && newFolder === null && (
-              <div className="col-span-full py-10 text-center text-zinc-600 text-xs italic">
-                Nothing in this folder yet. Add a server or folder here, or drag a server onto this folder from the level above.
-              </div>
-            )}
-
-            {/* Empty Search State */}
-            {isSearching && displayedServers.length === 0 && (
-              <div className="col-span-full py-10 text-center text-zinc-600 text-xs italic">
-                No matches.
-              </div>
-            )}
-
+                  <span className="text-[15px] font-black text-primary leading-none">{g.letter}</span>
+                  <span className="text-[11px] text-zinc-500">{g.items.length}</span>
+                  <span aria-hidden className="flex-1 h-px bg-white/5" />
+                </h2>
+                <div className={gridClass}>{g.items.map(renderItem)}</div>
+              </section>
+            ))}
+            {emptyNote}
           </div>
-          </>
+        ) : (
+          <div ref={gridRef} className={gridClass}>
+            {draftCard}
+
+            {/* Folders and servers in one sorted list; servers honour the live
+                drag order while reordering. */}
+            {cardItems.map(renderItem)}
+
+            {emptyNote}
+          </div>
         )}
       </div>
 
@@ -932,13 +1130,7 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
             <div className="min-w-0 flex-1">
               <h3 className="font-bold text-zinc-100 text-[13px] truncate tracking-tight leading-tight">{draggedServer.name}</h3>
               <div className="flex items-center gap-1 mt-0.5">
-                {draggedServer.protocol === "rdp"
-                  ? <span title="RDP server" className="shrink-0 px-1 rounded text-[9px] font-bold tracking-wider leading-[14px] text-sky-300 bg-sky-500/10 border border-sky-500/20">RDP</span>
-                  : draggedServer.protocol === "telnet"
-                    ? <span title="Telnet server (not encrypted)" className="shrink-0 px-1 rounded text-[9px] font-bold tracking-wider leading-[14px] text-amber-300 bg-amber-500/10 border border-amber-500/20">TELNET</span>
-                    : draggedServer.protocol === "vnc"
-                      ? <span title={vncListTitle(draggedServer.jump_host_id)} className="shrink-0 px-1 rounded text-[9px] font-bold tracking-wider leading-[14px] text-violet-300 bg-violet-500/10 border border-violet-500/20">VNC</span>
-                      : <Globe size={10} className="text-zinc-400 shrink-0" />}
+                {protocolTag(draggedServer) ?? <Globe size={10} className="text-zinc-400 shrink-0" />}
                 <span className="text-[10.5px] text-zinc-300 font-mono truncate">{draggedServer.host}</span>
               </div>
             </div>

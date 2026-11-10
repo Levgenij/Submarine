@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Servers
+
+- The server list sorts by name, host or last connected, besides your own order, and remembers the choice on this device. Search also finds a server by its folder.
+- Cards show folders and servers as one list, and can group it by first letter, with a bar to jump between letters.
+- A new Tree view shows every folder and server at once, with host and last connected columns. Folders open and close, rows move with the arrow keys, and right-click opens a menu. "Folders first" lists each level's folders before its servers; switched off, they sort together.
+- In the Tree, drag a server by its grip into a folder, to the top level or, in your own order, to a new place; drag a folder into another one.
+- "Last connected" is kept on this device only.
+- "Add folder" works in an empty profile and while searching.
+
 ## 0.5.3
 
 ### Connect

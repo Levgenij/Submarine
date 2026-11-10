@@ -49,6 +49,7 @@ import TelnetSessionView from "./components/TelnetSessionView";
 import VncSessionView from "./components/VncSessionView";
 import MonitoringPanel from "./components/MonitoringPanel";
 import { ErrorBoundary } from "./ui/ErrorBoundary";
+import { markConnected } from "./util/lastConnected";
 
 const appWindow = getCurrentWindow();
 
@@ -1116,6 +1117,7 @@ function DesktopApp() {
         // before typing them.
         runOnConnectHeld: (server.held || []).includes("run_on_connect"),
       }]);
+      markConnected(activeProfile, server.uuid);
     }
 
     setActiveView(sessionId);
@@ -1999,6 +2001,7 @@ function DesktopApp() {
                 folders={folders}
                 activeFolderId={activeFolderId}
                 onActiveFolderChange={setActiveFolderId}
+                profile={activeProfile}
                 onOpenServer={openServer}
                 onEditServer={handleEditNode}
                 onAddClick={(folderId?: number | null) => {
