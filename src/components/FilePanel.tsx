@@ -374,6 +374,10 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   // Set for the tick after a drag ends, so the `click` that the same
   // mouseup produces doesn't replace or clear the selection.
   const dragJustEndedRef = useRef(false);
+  // The rubber-band box, in the row area's own coordinates (so it scrolls with
+  // the rows). Moved through its style, not state, so a drag does not
+  // re-render every row on each mouse move.
+  const marqueeRef = useRef<HTMLDivElement | null>(null);
   // An in-pane move is running (or waiting for the transfer slot). A second
   // one would work from rows whose paths the first is about to change, so
   // it is refused with a notice.
@@ -1223,6 +1227,89 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
 
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
+  };
+
+  // Rubber-band selection: a drag that starts on the bare list background
+  // selects every row the box crosses. Ctrl/⌘/Shift adds to the selection.
+  // Rows span the full width, so only the vertical overlap matters.
+  const startMarquee = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || e.target !== e.currentTarget) return;
+    e.preventDefault(); // no text selection while dragging; the list still takes focus
+    const area = e.currentTarget;
+    const scroller = dropTargetRef.current;
+    const box0 = area.getBoundingClientRect();
+    const x0 = e.clientX - box0.left;
+    const y0 = e.clientY - box0.top;
+    const base = e.ctrlKey || e.metaKey || e.shiftKey ? new Set(selectedRef.current) : new Set<string>();
+    const pointer = { x: e.clientX, y: e.clientY };
+    let started = false;
+    let anchor: string | null = null;
+    let lastHits: string | null = null; // null: the base selection is not applied yet
+
+    const update = () => {
+      const box = area.getBoundingClientRect();
+      const x1 = Math.min(Math.max(pointer.x - box.left, 0), box.width);
+      const y1 = Math.min(Math.max(pointer.y - box.top, 0), box.height);
+      if (!started) {
+        if (Math.abs(x1 - x0) < DRAG_START_THRESHOLD && Math.abs(y1 - y0) < DRAG_START_THRESHOLD) return;
+        started = true;
+        setKeyNav(false);
+      }
+      const top = Math.min(y0, y1);
+      const bottom = Math.max(y0, y1);
+      const hits: string[] = [];
+      area.querySelectorAll<HTMLElement>("[data-fs-row-path]").forEach((row) => {
+        const r = row.getBoundingClientRect();
+        if (r.bottom - box.top > top && r.top - box.top < bottom) hits.push(row.dataset.fsRowPath!);
+      });
+      // Written after the reads above, so they do not force an extra layout.
+      const band = marqueeRef.current;
+      if (band) Object.assign(band.style, {
+        display: "block",
+        left: `${Math.min(x0, x1)}px`,
+        top: `${top}px`,
+        width: `${Math.abs(x1 - x0)}px`,
+        height: `${bottom - top}px`,
+      });
+      // The anchor is the hit row nearest where the drag began, so a later
+      // Shift+click extends from there.
+      anchor = (y1 >= y0 ? hits[0] : hits[hits.length - 1]) ?? null;
+      const key = hits.join("\n");
+      if (key === lastHits) return;
+      lastHits = key;
+      setSelected(new Set([...base, ...hits]));
+    };
+
+    // Holding the pointer near the top or bottom edge scrolls the list.
+    const autoScroll = window.setInterval(() => {
+      if (!started || !scroller) return;
+      const s = scroller.getBoundingClientRect();
+      const dy = pointer.y < s.top + 40 ? -12 : pointer.y > s.bottom - 16 ? 12 : 0;
+      if (dy) scroller.scrollTop += dy;
+    }, 16);
+
+    const onMove = (ev: MouseEvent) => {
+      pointer.x = ev.clientX;
+      pointer.y = ev.clientY;
+      update();
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      scroller?.removeEventListener("scroll", update);
+      window.clearInterval(autoScroll);
+      if (marqueeRef.current) marqueeRef.current.style.display = "none";
+      if (!started) return; // a plain click: the background onClick clears the selection
+      // Swallow the click that follows, so it does not clear what was just selected.
+      dragJustEndedRef.current = true;
+      window.setTimeout(() => { dragJustEndedRef.current = false; }, 0);
+      setAnchor(anchor);
+      if (anchor) setCursor(anchor);
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    scroller?.addEventListener("scroll", update);
   };
 
   // Live-edit toast. `sftp_open_remote_file` downloads the file to a temp
@@ -3040,7 +3127,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           )}
         </div>
 
-        <div className="min-w-full flex-1 p-1 font-mono text-[11px]"
+        <div className="relative min-w-full flex-1 p-1 font-mono text-[11px]"
+             onMouseDown={startMarquee}
              onContextMenu={onListBackgroundMenu}
              onClick={(e) => {
                // Click landed on the bare list background (not on a row, since
@@ -3053,6 +3141,11 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                  setKeyNav(false);
                }
              }}>
+          <div
+            ref={marqueeRef}
+            className="absolute z-[5] pointer-events-none border border-indigo-400/70 bg-indigo-400/15 rounded-sm"
+            style={{ display: "none" }}
+          />
           {loading && sortedEntries.length === 0 ? (
             <div className="text-center py-14 text-zinc-400">Loading…</div>
           ) : (

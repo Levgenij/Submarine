@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.5.4
+
+### Files
+
+- Drag on empty space in a file list to select files with a box. Hold Ctrl, ⌘ or Shift to add them to what is already selected; near the top or bottom edge the list scrolls on its own.
+
+## 0.5.3
 
 ### Servers
 
@@ -10,8 +16,6 @@
 - In the Tree, drag a server by its grip into a folder, to the top level or, in your own order, to a new place; drag a folder into another one.
 - "Last connected" is kept on this device only.
 - "Add folder" works in an empty profile and while searching.
-
-## 0.5.3
 
 ### Connect
 
