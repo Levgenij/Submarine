@@ -1273,7 +1273,10 @@ const TerminalView = ({
       // A selection that runs past the last line ends in empty rows: Ctrl+Shift+A
       // takes the whole buffer, the blank rows under the prompt included.
       const text = buildSelectedText().replace(/\n+$/, '');
-      if (!text) return;
+      // Selections of only blank padding (easy to grab when dragging across
+      // a TUI screen) must neither clobber the clipboard with invisible
+      // spaces nor toast a lie.
+      if (!text.trim()) return;
       const ok = await writeClipboard(text);
       if (ok) notify('Copied');
     };
@@ -1290,6 +1293,14 @@ const TerminalView = ({
     // when there's no real selection — so a plain click (which clears the
     // selection) still can't clobber it. The selection end is set by the last
     // mousemove, so it's final by the time we read it on mouseup.
+    //
+    // A drag that a mouse-tracking program takes (vi with mouse=a, mc, htop)
+    // can't copy stale text here: xterm clears its own selection when the
+    // program turns mouse tracking on, and again when it sends the program a
+    // mouse report. No snapshot of the selection at mousedown is kept: xterm
+    // makes a double- or triple-click's word or line in its own mousedown
+    // handler, which runs before this one, so such a snapshot would already
+    // hold the new selection and the release would copy nothing.
     let selectionArmed = false;
     const onMouseDown = (ev: MouseEvent) => {
       // Assign (not just set-true) so a non-left mousedown re-disarms a flag
