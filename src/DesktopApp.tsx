@@ -31,7 +31,7 @@ import { AUTO_RECONNECT_KEY, DEFAULT_SESSION_KEEP, SEND_KEEPALIVES_KEY, forgetSe
 import { USE_SSH_CONFIG_KEY, readUseSshConfig } from "./util/sshConfig";
 import { DEFAULT_RDP_OPTIONS, forgetRdpOptions, readRdpOptions, writeRdpOptions } from "./util/rdpOptions";
 import { useIsNarrow } from "./hooks/useViewport";
-import { IS_ANDROID } from "./util/platform";
+import { IS_ANDROID, IS_MOBILE } from "./util/platform";
 import { DEFAULT_VNC_OPTIONS, forgetVncOptions, readVncOptions, writeVncOptions } from "./util/vncOptions";
 import { Sidebar } from "./components/Sidebar";
 import { NodeGrid } from "./components/NodeGrid";
@@ -52,6 +52,7 @@ import { isFtp, serverProtocol, type ServerProtocol } from "./util/serverProtoco
 import VncSessionView from "./components/VncSessionView";
 import MonitoringPanel from "./components/MonitoringPanel";
 import { AiPage } from "./components/ai/AiPage";
+import { AgentsPanel } from "./components/agents/AgentsPanel";
 import { clearUrlCache } from "./components/ai/markdownParse";
 import { ai, errText, AI_OPEN_EVENT, AI_OPEN_SERVER_EVENT, type AiOpenServerDetail } from "./util/aiApi";
 import { clearAiFocus, clearFeeds, requestAiFocus } from "./util/aiEvents";
@@ -1264,8 +1265,16 @@ function DesktopApp() {
     return m;
   }, [sessions, sessionStatuses]);
   const aiServerNames = useMemo(() => Object.fromEntries(servers.filter((s: any) => s.uuid).map((s: any) => [s.uuid, s.name])), [servers]);
-  // The agent gateway's state for the rail, and its "open this server" hook,
-  // go here (not ported yet).
+  // The agent gateway, for the rail: how much waits on the Agents page, and
+  // whether it is on at all (the page reports both).
+  const [agentsState, setAgentsState] = useState({ waiting: 0, enabled: false });
+  const onAgentsState = useCallback((waiting: number, enabled: boolean) => {
+    setAgentsState((a) => (a.waiting === waiting && a.enabled === enabled ? a : { waiting, enabled }));
+  }, []);
+  const openServerForAgent = useCallback((uuid: string) => {
+    const server = serversRef.current.find((s) => s.uuid === uuid);
+    if (server) void openServerRef.current(server);
+  }, []);
 
   // Spawn a session from inline Quick Connect auth AND leave behind a reusable
   // node in the root directory so the target can be reconnected later without
@@ -2348,7 +2357,7 @@ function DesktopApp() {
         // tab-order stays intuitive and <main> grabs the full screen width
         // (terminal gains the ~50px the vertical rail used to eat).
         <div inert={overlayOpen} className={`flex-1 flex ${isMobile ? 'flex-col-reverse' : ''} overflow-hidden pt-10`}>
-          <Sidebar activeTab={activeView.startsWith('session-') ? 'nodes' : activeView} setActiveTab={setActiveView} isMobile={isMobile} onLogout={handleLogout} profileName={activeProfile} syncing={cloudSyncing} />
+          <Sidebar activeTab={activeView.startsWith('session-') ? 'nodes' : activeView} setActiveTab={setActiveView} isMobile={isMobile} onLogout={handleLogout} profileName={activeProfile} syncing={cloudSyncing} agentsOn={agentsState.enabled} agentsWaiting={agentsState.waiting} />
 
           <main className="flex-1 flex flex-col min-w-0 min-h-0 bg-transparent relative">
             {activeView === "nodes" && (
@@ -2419,6 +2428,7 @@ function DesktopApp() {
                 isMobile={isMobile}
                 onOpenLogs={() => setActiveView("logs")}
                 onOpenAiChats={() => setActiveView("ai")}
+                onOpenAgents={() => setActiveView("agents")}
               />
             )}
 
@@ -3205,7 +3215,23 @@ function DesktopApp() {
               </ErrorBoundary>
             </div>
 
-            {/* The agent gateway's Agents page goes here (not ported yet). */}
+            {/* The Agents page (desktop) stays mounted as well: it hears a new
+                request while another view is open, and the rail counts it. */}
+            {!IS_MOBILE && (
+              <div className={`flex-1 flex flex-col overflow-hidden ${activeView === "agents" ? "" : "hidden"}`}>
+                <ErrorBoundary label="Agents">
+                  <AgentsPanel
+                    active={activeView === "agents"}
+                    servers={servers}
+                    openSessions={aiSessions}
+                    serverNames={aiServerNames}
+                    onOpenServer={openServerForAgent}
+                    onOpenSettings={() => setActiveView("settings")}
+                    onState={onAgentsState}
+                  />
+                </ErrorBoundary>
+              </div>
+            )}
 
             {/* Compare workspace — pick any subset of open sessions and
                 tile their currently-visible terminals in one canvas.

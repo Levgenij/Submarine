@@ -1,4 +1,4 @@
-import { Server, KeyRound, Library, Activity, Settings, LogOut, UserCircle, Sparkles } from "lucide-react";
+import { Server, KeyRound, Library, Activity, Settings, LogOut, UserCircle, Sparkles, Bot } from "lucide-react";
 
 // Vertical rail on desktop, horizontal bottom dock on mobile. Layout swap is
 // driven by `isMobile` so the terminal/session views can use the full screen
@@ -6,7 +6,7 @@ import { Server, KeyRound, Library, Activity, Settings, LogOut, UserCircle, Spar
 // a 360px-wide viewport. The parent in DesktopApp uses `flex-col-reverse` on
 // mobile so this component visually lands at the bottom while staying first
 // in DOM order (keyboard tab-order stays intuitive).
-export const Sidebar = ({ activeTab, setActiveTab, isMobile, onLogout, profileName, syncing }: any) => {
+export const Sidebar = ({ activeTab, setActiveTab, isMobile, onLogout, profileName, syncing, agentsOn, agentsWaiting = 0 }: any) => {
   // The profile rail is deliberately apart from the content rails below. Those
   // switch what you're looking at INSIDE the open profile; this one is about the
   // profile itself — its cloud sync and who else can get into it. It used to
@@ -119,8 +119,9 @@ export const Sidebar = ({ activeTab, setActiveTab, isMobile, onLogout, profileNa
       <nav className="flex flex-col gap-3 w-full px-2 shrink-0">
         {/* The AI page is a desktop rail item only: the phone dock has no
             room for another icon. */}
-        {/* The agent gateway's Agents item goes here (not ported yet). */}
-        {[...items, { id: 'ai', icon: Sparkles, label: 'AI assistant' }].map((item) => (
+        {/* The Agents page shows only while the gateway is on (Settings → AI
+            agents), or while something still waits there. */}
+        {[...items, { id: 'ai', icon: Sparkles, label: 'AI assistant' }, ...(agentsOn || agentsWaiting > 0 ? [{ id: 'agents', icon: Bot, label: agentsWaiting > 0 ? `AI agents — ${agentsWaiting} waiting` : 'AI agents' }] : [])].map((item) => (
           <button
             key={item.id}
             onClick={() => setActiveTab(item.id)}
