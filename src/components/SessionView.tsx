@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import { TerminalSquare, Folder, Network, AlertTriangle, Check, X, Play, Library, Info, Container, Plus, ChevronDown, SplitSquareHorizontal, Columns, Rows, RotateCw, CloudUpload, Loader2, Maximize2, Minimize2, PanelRight, PanelLeft, PanelBottom, PanelTop, LogIn } from "lucide-react";
 import TerminalView from "./TerminalView";
+import { ANIMATED_ATTEMPTS, AttemptDots, Elapsed, ReconnectBar, ReconnectIcon, StageSteps, connectStage } from "./ReconnectStatus";
 import { AuthPrompts } from "./AuthPrompts";
 import SftpWorkspace from "./SftpWorkspace";
 import { readAutoReconnect, readSendKeepalives } from "../util/sessionKeep";
@@ -1813,6 +1814,23 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
             )}
           </div>
 
+          {/* The steps of the attempt (reaching the server, the handshake,
+              logging in), lit up as the connect log reports them, and a bar
+              that sweeps while it runs and fills up to the next try. */}
+          <div className="mb-3 sm:mb-4 space-y-2 text-primary">
+            <div className="flex items-center gap-3">
+              <StageSteps stage={connectStage(logs)} running={status === 'connecting'} animate={sessionShown} compact={isCompact} />
+              {reconnectAttempt > 0 && <span className="ml-auto text-zinc-500"><AttemptDots attempt={reconnectAttempt} running={status === 'connecting'} animate={sessionShown} /></span>}
+            </div>
+            <ReconnectBar
+              key={`${reconnectAttempt}-${status}-${nextReconnectAt ?? 0}`}
+              running={status === 'connecting'}
+              until={retryWaiting ? nextReconnectAt : null}
+              total={RECONNECT_INTERVAL_MS}
+              animate={sessionShown && reconnectAttempt <= ANIMATED_ATTEMPTS}
+            />
+          </div>
+
           {/* Log Window. `min-h-0` is what makes it actually scroll: a flex
               child defaults to min-height:auto (its content height), so without
               this the box grows to fit every line and the parent's
@@ -2321,15 +2339,27 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
             isWaiting    ? <>Auto-reconnect in {secs}s · attempt {reconnectAttempt}</> :
             gaveUp       ? "Reconnect failed" :
                            "Session disconnected";
+          // While it is trying: the steps of the attempt, the attempts so far,
+          // the time this one has taken, and a bar that sweeps or fills. The
+          // motion stops after the first attempts of a long outage, and for a
+          // session that isn't on screen; the numbers go on changing.
+          const trying = isAttempting || isWaiting;
+          const animate = sessionShown && reconnectAttempt <= ANIMATED_ATTEMPTS;
+          // Before the first attempt the log's last attempt is the connect
+          // that worked, all steps done: no steps until one runs or fails.
+          const stage = connectStage(logs);
+          const showSteps = (trying || (gaveUp && everConnected)) && (isAttempting || stage < 3);
           return (
             <div inert={shellInert} className={`shrink-0 border-b animate-in fade-in ${tone}`}>
               <div className="px-4 py-2 flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider">
-                  <AlertTriangle size={14} />
+                  {trying ? <ReconnectIcon running={isAttempting} animate={animate} /> : <AlertTriangle size={14} />}
                   <span>{heading}</span>
+                  {isAttempting && <span className="opacity-70 font-normal tracking-normal">· <Elapsed key={reconnectAttempt} /></span>}
                   {disconnectReason && (
                     <span className="opacity-70 normal-case font-normal tracking-normal">— {disconnectReason}</span>
                   )}
+                  {trying && <span className="hidden sm:flex"><AttemptDots attempt={reconnectAttempt} running={isAttempting} animate={animate} /></span>}
                 </div>
                 <div className="flex items-center gap-2">
                   {isWaiting && (
@@ -2345,6 +2375,20 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   </button>
                 </div>
               </div>
+              {showSteps && (
+                <div className="px-4 pb-2 -mt-0.5">
+                  <StageSteps stage={stage} running={isAttempting} animate={animate} compact={isCompact} />
+                </div>
+              )}
+              {trying && (
+                <ReconnectBar
+                  key={`${reconnectAttempt}-${isAttempting ? 'run' : 'wait'}-${nextReconnectAt ?? 0}`}
+                  running={isAttempting}
+                  until={isWaiting ? nextReconnectAt : null}
+                  total={RECONNECT_INTERVAL_MS}
+                  animate={animate}
+                />
+              )}
               {/* The password box when the login was refused. The reason, a
                   server's goodbye included, is in the line above at every
                   width, so a phone sees why a session that stays down dropped. */}
@@ -2418,6 +2462,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   sessionId={session.id}
                   terminalId={t.id}
                   disabled={status !== 'connected'}
+                  reconnecting={reconnectAttempt > 0 && (status === 'connecting' || nextReconnectAt !== null)}
                   isActive={shown && isFocused}
                   shown={shown && sessionShown}
                   isActiveView={isActiveView}
