@@ -4,7 +4,7 @@ import {
   RefreshCw, AlertTriangle, Loader2, Server, Network as NetIcon,
   Cog, Cpu, MemoryStick, HardDrive, Clock, Activity, Wifi,
   AlertCircle, Search, ShieldAlert, Plug, Play, Square, RotateCw, Box,
-  Shield, Globe,
+  Shield, Globe, Link2, KeyRound, Eye, EyeOff, Copy, Check,
 } from "lucide-react";
 import DockerTab from "./DockerTab";
 import { ScrollableTabs } from "./ScrollableTabs";
@@ -1017,6 +1017,7 @@ const InfoPanel = ({ sessionId, disabled, visible = true, onOpenContainerTermina
           </div>
         )}
 
+        {tab === "overview" && <ConnectionCard sessionId={sessionId} disabled={disabled} />}
         {tab === "overview" && overview.data && <OverviewTab data={overview.data} />}
         {tab === "network"  && network.data  && <NetworkTab sessionId={sessionId} data={network.data} />}
         {tab === "ports"    && ports.data    && <PortsTab data={ports.data} sessionId={sessionId} onRefresh={() => fetchSection("ports")} />}
@@ -1041,6 +1042,85 @@ const InfoPanel = ({ sessionId, disabled, visible = true, onOpenContainerTermina
 };
 
 // ============== Sub-tabs ==============
+
+// What the live connection logged in with (SessionInfo in ssh_manager.rs).
+interface SessionInfo {
+  host: string; port: number; user: string;
+  auth: string; route: string; quick: boolean; has_password: boolean;
+}
+
+// Connection card: read from the backend, not the saved server, because
+// ~/.ssh/config, vault logins and prompts can change what was actually used.
+// The password crosses IPC only when the user asks to see or copy it, and is
+// dropped from state again on hide.
+const ConnectionCard = ({ sessionId, disabled }: { sessionId: string; disabled?: boolean }) => {
+  const [info, setInfo] = useState<SessionInfo | null>(null);
+  const [password, setPassword] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  // Re-read after every (re)connect: the login may have changed.
+  useEffect(() => {
+    if (disabled) return;
+    setPassword(null);
+    invoke<SessionInfo | null>("get_session_info", { sessionId }).then(setInfo).catch(() => setInfo(null));
+  }, [sessionId, disabled]);
+
+  if (!info) return null;
+
+  const reveal = () => invoke<string | null>("reveal_session_password", { sessionId }).catch(() => null);
+  const toggle = async () => setPassword(password !== null ? null : await reveal());
+  const copy = async () => {
+    const pw = password ?? await reveal();
+    if (pw === null) return;
+    await navigator.clipboard.writeText(pw);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  const iconBtn = "p-0.5 rounded hover:bg-white/10 text-zinc-400 hover:text-white shrink-0";
+
+  return (
+    <div className="[container-type:inline-size]">
+      <InfoCard
+        title="Connection"
+        icon={<Link2 size={12} />}
+        actions={info.quick ? <StatusBadge tone="zinc">Quick connect</StatusBadge> : undefined}
+        bodyClassName="!p-4"
+      >
+        <div className="grid gap-x-4 grid-cols-1 [@container(min-width:480px)]:grid-cols-2">
+          <div className="space-y-1">
+            <KV label="Host" value={info.host || "—"} copyable />
+            <KV label="Port" value={String(info.port)} copyable />
+            <KV label="User" value={info.user || "—"} copyable />
+          </div>
+          <div className="space-y-1">
+            <KV label="Auth" value={info.auth} />
+            <KV label="Route" value={info.route} icon={<Globe size={11} />} />
+            {info.has_password && (
+              <div className="py-1 last:pb-0">
+                <div className="text-[9.5px] font-semibold uppercase tracking-wider text-zinc-500 flex items-center gap-1 mb-0.5">
+                  <KeyRound size={11} />Password
+                </div>
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="text-[11px] font-mono text-zinc-200 select-text break-all min-w-0">
+                    {password ?? "••••••••"}
+                  </span>
+                  <button type="button" onClick={toggle} className={iconBtn}
+                    aria-label={password !== null ? "Hide password" : "Show password"}
+                    title={password !== null ? "Hide password" : "Show password"}>
+                    {password !== null ? <EyeOff size={11} /> : <Eye size={11} />}
+                  </button>
+                  <button type="button" onClick={copy} className={iconBtn} aria-label="Copy password" title="Copy password">
+                    {copied ? <Check size={11} className="text-emerald-400" /> : <Copy size={11} />}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </InfoCard>
+    </div>
+  );
+};
 
 // Overview pairs its cards 2-per-row ONLY when the panel itself is wide enough
 // (≥480px), collapsing to 1-per-row (each card a full row) otherwise. The

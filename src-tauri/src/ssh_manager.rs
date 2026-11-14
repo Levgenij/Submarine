@@ -988,6 +988,29 @@ pub struct SshState {
     /// answers, and the prompt takes it with the answer. The password is saved
     /// only once the login with it worked.
     pub kbi_save: Arc<Mutex<HashMap<String, bool>>>,
+    /// What the primary connection of each tab actually logged in with, for
+    /// the Info panel's Connection card. Replaced on every successful connect,
+    /// dropped on disconnect and profile close.
+    pub session_info: Arc<Mutex<HashMap<String, SessionInfo>>>,
+}
+
+/// The resolved parameters of a tab's live connection (after ~/.ssh/config,
+/// vault credentials and prompts). The password never crosses IPC with it:
+/// `reveal_session_password` hands it out on request, like `reveal_server_password`.
+#[derive(Clone, serde::Serialize)]
+pub struct SessionInfo {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    /// "Password", "Key <name>", "Vault login · <method>", "No password (…)".
+    pub auth: String,
+    /// "Direct", "SOCKS5 proxy h:p", "HTTP proxy h:p", "Jump host <name>",
+    /// "ProxyJump <spec>", "ProxyCommand <program>".
+    pub route: String,
+    pub quick: bool,
+    pub has_password: bool,
+    #[serde(skip)]
+    pub password: Option<zeroize::Zeroizing<String>>,
 }
 
 /// How an elevated SFTP channel is started. The sudo password (if any) lives
@@ -1106,6 +1129,7 @@ impl SshState {
             sftp_elevation: Arc::new(Mutex::new(HashMap::new())),
             sftp_shell: Arc::new(Mutex::new(std::collections::HashSet::new())),
             kbi_save: Arc::new(Mutex::new(HashMap::new())),
+            session_info: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

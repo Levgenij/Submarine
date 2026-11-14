@@ -6648,6 +6648,7 @@ async fn teardown_profile(
     ssh.jump_connections.lock().await.clear();
     // Wipe every connect-time secret the user typed in this profile.
     ssh.prompted_secrets.lock().await.clear();
+    ssh.session_info.lock().await.clear();
     ssh.fp_txs.lock().await.clear();
     ssh.kbi_txs.lock().await.clear();
 
@@ -9451,6 +9452,20 @@ async fn add_mirror_to_server(
     Ok(())
 }
 
+/// What the tab's live connection logged in with (Info → Connection card).
+/// `None` until it connects and after it disconnects. No password in it.
+#[tauri::command]
+async fn get_session_info(state: tauri::State<'_, SshState>, session_id: String) -> Result<Option<ssh_manager::SessionInfo>, String> {
+    Ok(state.session_info.lock().await.get(&session_id).cloned())
+}
+
+/// The password the tab's live connection logged in with, when the user asks
+/// to see or copy it on the Connection card.
+#[tauri::command]
+async fn reveal_session_password(state: tauri::State<'_, SshState>, session_id: String) -> Result<Option<String>, String> {
+    Ok(state.session_info.lock().await.get(&session_id).and_then(|i| i.password.as_ref().map(|p| p.as_str().to_string())))
+}
+
 /// Reveal the plaintext password for a single server row. Used by the edit
 /// panel — only the row the user is editing has its secret crossing IPC.
 /// Returns `Ok(None)` if the server uses a vault credential (no inline
@@ -10987,6 +11002,30 @@ struct ConfigIdentities {
     only: bool,
 }
 
+/// The Connection card's "Route" line, in the precedence `initiate_connection`
+/// routes by: saved jump host, then ~/.ssh/config ProxyJump / ProxyCommand,
+/// then the saved SOCKS5 / HTTP proxy (with the same default ports), else direct.
+fn route_label(
+    jump_host: Option<String>,
+    config_proxy: Option<&ssh_config::Proxy>,
+    proxy_type: &str,
+    proxy_host: Option<&str>,
+    proxy_port: Option<i32>,
+) -> String {
+    if let Some(name) = jump_host {
+        return format!("Jump host {name}");
+    }
+    match config_proxy {
+        Some(ssh_config::Proxy::Jump(spec)) => format!("ProxyJump {spec} (~/.ssh/config)"),
+        Some(ssh_config::Proxy::Command(c)) => format!("ProxyCommand {} (~/.ssh/config)", proxy_command::program_name(c)),
+        _ => match proxy_type {
+            "socks5" => format!("SOCKS5 proxy {}:{}", proxy_host.unwrap_or(""), proxy_port.unwrap_or(1080)),
+            "http" => format!("HTTP proxy {}:{}", proxy_host.unwrap_or(""), proxy_port.unwrap_or(8080)),
+            _ => "Direct".to_string(),
+        },
+    }
+}
+
 /// A node's display name. An imported node keeps its `~/.ssh/config` alias as
 /// its name, so `Host` patterns are matched against it as well as the address.
 fn server_display_name(conn: &rusqlite::Connection, server_id: i32) -> Option<String> {
@@ -12192,6 +12231,18 @@ mod secret_prompt_tests {
         // Secondaries reuse the tab's typed name.
         let base = base_session_id("tab::fwd");
         assert_eq!(plain(cache_get_secret(&cache, base, SecretSlot::Username).await), Some("alice".into()));
+    }
+
+    #[test]
+    fn route_label_follows_connect_precedence_and_default_ports() {
+        use crate::ssh_config::Proxy;
+        assert_eq!(route_label(None, None, "none", None, None), "Direct");
+        assert_eq!(route_label(None, Some(&Proxy::Disabled), "none", None, None), "Direct");
+        assert_eq!(route_label(None, None, "socks5", Some("p"), None), "SOCKS5 proxy p:1080");
+        assert_eq!(route_label(None, None, "http", Some("p"), None), "HTTP proxy p:8080");
+        assert_eq!(route_label(None, None, "http", Some("p"), Some(3128)), "HTTP proxy p:3128");
+        assert_eq!(route_label(None, Some(&Proxy::Jump("b@j:22".into())), "none", None, None), "ProxyJump b@j:22 (~/.ssh/config)");
+        assert_eq!(route_label(Some("bastion".into()), Some(&Proxy::Jump("x".into())), "socks5", Some("p"), None), "Jump host bastion");
     }
 
     #[test]
@@ -14714,6 +14765,30 @@ async fn initiate_connection(
         }
     };
     let config_proxy = config_target.proxy(own_route);
+    // Labels for the Info panel's Connection card (SessionInfo), in the same
+    // precedence the route below uses.
+    let route_label = route_label(
+        jump_host_id.map(|jid| {
+            db_state.conn.lock().ok()
+                .and_then(|g| g.as_ref().and_then(|c| server_display_name(c, jid)))
+                .unwrap_or_else(|| format!("#{jid}"))
+        }),
+        config_proxy.as_ref(),
+        &proxy_type,
+        proxy_host.as_deref(),
+        proxy_port,
+    );
+    let auth_label = {
+        let method = match &key_data {
+            Some((_, _, Some(name))) if !name.trim().is_empty() => format!("Key {name}"),
+            Some(_) => "Key".to_string(),
+            None => "Password".to_string(),
+        };
+        if server_auth_type == "vault" { format!("Vault login · {method}") } else { method }
+    };
+    let is_quick = quick_auth.is_some();
+    let auth_is_key = key_data.is_some();
+    let state_session_info = Arc::clone(&state.session_info);
     let identity_agent = config_target.identity_agent();
     let login_user = config_target.user.clone();
     let identities = config_target.identities(&login_user);
@@ -15351,6 +15426,39 @@ async fn initiate_connection(
                             return;
                         }
                         emit_log("Authentication successful. Session ready.", "success");
+                        if !is_secondary {
+                            // A password that worked is in the tab's cache unless it
+                            // was the failed-screen override (tried first, never cached).
+                            // shortcut: a stale cached password wins over an override that
+                            // worked; return the accepted secret from
+                            // authenticate_password_prompting if that ever matters.
+                            let password = if auth_is_key {
+                                None
+                            } else {
+                                cache_get_secret(&prompted_secrets_clone, &base_id, SecretSlot::Password)
+                                    .await
+                                    .or_else(|| kbi_password.clone())
+                            };
+                            state_session_info.lock().await.insert(
+                                session_id_clone.clone(),
+                                ssh_manager::SessionInfo {
+                                    host: host.clone(),
+                                    port: port as u16,
+                                    user: effective_user.as_str().to_string(),
+                                    // No saved key and no password: the agent, a ~/.ssh
+                                    // key, a keyboard-interactive code or "none" auth.
+                                    auth: if !auth_is_key && password.is_none() {
+                                        "No password (ssh-agent, ~/.ssh key or verification code)".to_string()
+                                    } else {
+                                        auth_label.clone()
+                                    },
+                                    route: route_label.clone(),
+                                    quick: is_quick,
+                                    has_password: password.is_some(),
+                                    password,
+                                },
+                            );
+                        }
                         // A dedicated `::sftp` transport just came up — drop the
                         // base session's cached SFTP subsystem (it rides the
                         // primary). The next file operation re-opens on this
@@ -18687,6 +18795,7 @@ async fn disconnect_session(
     state.sftp_elevation.lock().await.remove(&session_id);
     state.sftp_shell.lock().await.remove(&session_id);
     state.connections.lock().await.remove(&session_id);
+    state.session_info.lock().await.remove(&session_id);
     // Drop any ProxyJump bastion handle for this session — closes the jump
     // connection once the target it was carrying is gone.
     state.jump_connections.lock().await.remove(&session_id);
@@ -27014,7 +27123,7 @@ pub fn run() {
             accept_share, import_shared_profile, restore_personal_profile, share_set_role, share_revoke, share_leave, share_delete,
             profile_share_status, stop_sharing, profile_sync_stats, share_key_state, accept_share_key, share_replace_key, held_deletions_list, resolve_held_deletions, cloud_resume_profile, profile_copies, restore_profile_copy,
             set_editor_label,
-            add_server, save_quick_connect_node, edit_server, delete_server, add_mirror_to_server, get_servers, allow_held, get_ssh_keys, set_server_color, set_folder_color, set_server_notes, set_server_run_on_connect, set_server_jump_host, set_server_protocol, reorder_servers, clone_server, reveal_server_password, reveal_credential_password, reveal_ssh_key,
+            add_server, save_quick_connect_node, edit_server, delete_server, add_mirror_to_server, get_servers, allow_held, get_ssh_keys, set_server_color, set_folder_color, set_server_notes, set_server_run_on_connect, set_server_jump_host, set_server_protocol, reorder_servers, clone_server, reveal_server_password, reveal_credential_password, reveal_ssh_key, get_session_info, reveal_session_password,
             get_credentials, generate_ssh_key,
             add_folder, rename_folder, delete_folder, get_folders, move_folder, move_server_to_folder,
             add_command, edit_command, set_command_scope, delete_command, get_commands,
