@@ -15,6 +15,7 @@ import { readScrollback } from '../util/terminalScrollback';
 import { TERMINAL_PASTE, withoutPasteControls, type TerminalPaste } from '../util/pasteText';
 import { READABLE_CONTRAST, readBoldBright, readMinContrast, readScheme } from '../util/terminalTheme';
 import { readUseLocalShell } from '../util/terminalShell';
+import { holdTerminalInput, writeTerminal } from '../util/terminalWrite';
 import { readUseSshAgent } from '../util/sshAgent';
 import { IS_ANDROID, IS_LINUX } from '../util/platform';
 import { httpLinkPrompt, multilinePastePrompt } from '../util/terminalLinkPaste';
@@ -43,6 +44,14 @@ const looksLikePasswordPrompt = (out: string): boolean => {
 // text. F3 with a modifier looks like a cursor position (ESC [ 1 ; 2 R), so
 // that key stays on its own server too.
 const TERMINAL_REPLY = /^\x1b(?:\[[?>]?[0-9;]*[cnRt]|\[\??[0-9;]*\$y|\[[IO]|\[<[0-9;]+[Mm]|\][0-9]+;[^\x07\x1b]*(?:\x07|\x1b\\)|P[01]\$r[^\x1b]*\x1b\\)$/;
+// What a program turns on to hear from the terminal: mouse reports (9, 1000,
+// 1002, 1003, and their encodings 1005, 1006, 1015, 1016), focus reports (1004)
+// and pastes marked as such (2004). A reconnect turns them off: the program that
+// asked for them is gone, the new shell would take the reports for typed text,
+// and with 2004 left on a paste of several lines isn't asked about. A program
+// that wants them turns them on again (bash 5.1 and later, and zsh, do 2004 at
+// each prompt).
+const RESET_INPUT_MODES = '\x1b[?9;1000;1002;1003;1004;1005;1006;1015;1016;2004l';
 
 // The characters Ctrl turns into ^_ (0x1F), the undo key of emacs, zsh and
 // readline (#296). xterm only does this for "_", and not on a layout where "_"
@@ -112,6 +121,12 @@ const resendPtySize = (terminalId: string, cols: number, rows: number) => {
   sendPtySize(terminalId, size.cols, size.rows);
 };
 const WALL_TILE_CLOSED = 'submarine-wall-tile-closed';
+// The view each terminal's shell is opened for; a Wall tile opens none. A shell
+// done opening after its view has gone (the terminal or its tab was closed
+// meanwhile) is closed again: nobody would see it, and with its tab gone it
+// would keep the connection up. Not when a newer view has the terminal by then:
+// a server tab closed and opened again has the same first terminal.
+const shellViews = new Map<string, object>();
 // How long a terminal's size must hold before its PTY gets it. A layout
 // change passes through sizes for a few frames: the narrow and the wide
 // layout swap at 640 px (the terminal is 2 columns wide for a frame) and
@@ -322,6 +337,11 @@ const TerminalView = ({
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const openedRef = useRef(false);
+  // Lets go of what's typed while the shell is opening (util/terminalWrite), the
+  // first time or again after a reconnect. A view that goes away first drops it.
+  const releaseInputRef = useRef<((opened: boolean) => void) | null>(null);
+  // This view, for shellViews.
+  const viewRef = useRef({});
   // The xterm `onData` callback is bound once and persists for the life of the
   // component. We read this ref inside the callback so the latest `disabled`
   // state is observed without having to tear down and rebuild xterm.
@@ -355,6 +375,10 @@ const TerminalView = ({
   // the main effect, so we should NOT re-open on the first run of the
   // reconnect effect — only on subsequent value changes.
   const lastEpochRef = useRef(connectionEpoch);
+  // Set by a reconnect until xterm has read the RESET_INPUT_MODES it wrote.
+  // Until then the old program's modes are still on, and what xterm reports
+  // or answers is for that program: handleData drops it.
+  const staleModesRef = useRef<object | null>(null);
 
   // Mobile-only sticky modifiers (Ctrl / Alt / Shift) for the on-screen
   // key bar. State doubles as render input (highlighting) and is mirrored
@@ -428,13 +452,8 @@ const TerminalView = ({
         if (targetSid === sessionId) continue; // skip source; already written
         const targetTid = bcast.sessionTerminalMap[targetSid];
         if (!targetTid) continue; // target has no live terminal — silently skip
-        invoke('write_terminal_data', {
-          terminalId: targetTid,
-          data: bytes,
-        }).catch(() => {
-          // Dead target — do NOT surface. The user asked for fire-and-forget
-          // fan-out; failures here would spam their console every keystroke.
-        });
+        // Fire-and-forget fan-out: a dead target just drops it.
+        writeTerminal(targetTid, bytes);
       }
     }
   };
@@ -548,9 +567,17 @@ const TerminalView = ({
         bytes = [0x09];
       }
     }
-    invoke('write_terminal_data', { terminalId, data: bytes }).catch(console.error);
+    writeTerminal(terminalId, bytes);
     broadcastInput(bytes);
     if (consumes) consumeArmedModifiers();
+  };
+
+  // A shell is done opening: whether this view still has it. When no view
+  // does (it went away meanwhile, see shellViews), the shell is closed again.
+  const keepShell = () => {
+    if (shellViews.get(terminalId) === viewRef.current) return true;
+    if (!shellViews.has(terminalId)) invoke('close_terminal', { terminalId }).catch(() => {});
+    return false;
   };
 
   // Reconnect handler: when the parent bumps connectionEpoch we re-open
@@ -564,16 +591,31 @@ const TerminalView = ({
     lastEpochRef.current = connectionEpoch;
     const term = xtermRef.current;
     if (!term) return;
-    // Visible separator. \x1b[33m = yellow, \x1b[0m = reset.
-    term.write('\r\n\x1b[33m── reconnected ──\x1b[0m\r\n');
+    // Visible separator. \x1b[33m = yellow, \x1b[0m = reset. The modes the
+    // old program turned on go with it (RESET_INPUT_MODES). xterm reads a
+    // write a little later, in a timer, and the terminal can get the focus
+    // back first: a focus report made before then is the old program's
+    // (staleModesRef). What the new shell sends comes after this write, so
+    // what it asks is still answered.
+    const reset = {};
+    staleModesRef.current = reset;
+    term.write('\r\n\x1b[33m── reconnected ──\x1b[0m\r\n' + RESET_INPUT_MODES, () => {
+      if (staleModesRef.current === reset) staleModesRef.current = null;
+    });
     // Attach-only viewers piggyback on someone else's PTY, so they
     // must not re-open the PTY on reconnect either — the owner
     // already did it and this instance just needs to keep reading
     // events off the same terminal_id.
     if (attachOnly) return;
+    const releaseInput = holdTerminalInput(terminalId);
+    releaseInputRef.current = releaseInput;
     // The backend drops resizes while a shell is starting, so send the size
     // again once the reopen succeeds. An open Wall tile keeps its own size.
-    const syncSize = () => resendPtySize(terminalId, term.cols, term.rows);
+    const syncSize = () => {
+      if (!keepShell()) return;
+      releaseInput(true);
+      resendPtySize(terminalId, term.cols, term.rows);
+    };
     const ce = containerExecRef.current;
     if (telnet) {
       invoke('telnet_open_terminal', {
@@ -582,6 +624,7 @@ const TerminalView = ({
         cols: term.cols || 80,
         rows: term.rows || 24,
       }).then(syncSize, e => {
+        releaseInput(false);
         term.writeln(`\x1b[31mReconnect failed: ${e}\x1b[0m`);
       });
     } else if (ce) {
@@ -593,6 +636,7 @@ const TerminalView = ({
         rows: term.rows || 24,
         useSudo: ce.useSudo,
       }).then(syncSize, e => {
+        releaseInput(false);
         term.writeln(`\x1b[31mReconnect into container failed: ${e}\x1b[0m`);
       });
     } else {
@@ -609,7 +653,8 @@ const TerminalView = ({
             useLocalShell: readUseLocalShell(),
           }).then(() => true);
         })
-        .then((opened) => { if (opened) syncSize(); }, e => {
+        .then((opened) => { if (opened) syncSize(); else releaseInput(false); }, e => {
+          releaseInput(false);
           term.writeln(`\x1b[31mReconnect failed: ${e}\x1b[0m`);
         });
     }
@@ -1004,7 +1049,14 @@ const TerminalView = ({
       }, PTY_SIZE_SETTLE_MS);
     };
 
-    setTimeout(() => {
+    // Its shell is this view's (shellViews).
+    if (!attachOnly) shellViews.set(terminalId, viewRef.current);
+    // Keys are taken from now on, the shell comes a little later.
+    if (!openedRef.current && !attachOnly && !releaseInputRef.current) {
+      releaseInputRef.current = holdTerminalInput(terminalId);
+    }
+
+    const openTimer = window.setTimeout(() => {
       fitAddon.fit();
       // A Wall tile sets the size while it's open, also when fit() kept
       // xterm's default size and so fired no resize. Same settle as onResize:
@@ -1024,7 +1076,14 @@ const TerminalView = ({
         // notice the difference.
         // The backend drops resizes while a shell is starting, so send the
         // fitted size again once the open succeeds.
-        const syncSize = () => resendPtySize(terminalId, term.cols, term.rows);
+        // syncSize says false when this view has gone by then (keepShell).
+        const releaseInput = releaseInputRef.current ?? (() => {});
+        const syncSize = () => {
+          if (!keepShell()) return false;
+          releaseInput(true);
+          resendPtySize(terminalId, term.cols, term.rows);
+          return true;
+        };
         if (telnet) {
           invoke('telnet_open_terminal', {
             sessionId,
@@ -1032,6 +1091,7 @@ const TerminalView = ({
             cols: term.cols || 80,
             rows: term.rows || 24,
           }).then(syncSize, e => {
+            releaseInput(false);
             term.writeln(`\x1b[31mFailed to open terminal: ${e}\x1b[0m`);
           });
         } else if (containerExec) {
@@ -1043,6 +1103,7 @@ const TerminalView = ({
             rows: term.rows || 24,
             useSudo: containerExec.useSudo,
           }).then(syncSize, e => {
+            releaseInput(false);
             term.writeln(`\x1b[31mFailed to attach to container: ${e}\x1b[0m`);
           });
         } else {
@@ -1058,12 +1119,16 @@ const TerminalView = ({
               useLocalShell: readUseLocalShell(),
             }).then(() => true);
           }).then((opened) => {
-            if (!opened) return;
-            syncSize();
+            if (!opened) {
+              releaseInput(false);
+              return;
+            }
+            if (!syncSize()) return;
             // Its shell takes input from now on: SessionView types a server's
             // on-connect commands once this arrives for its first terminal.
             window.dispatchEvent(new CustomEvent('submarine-terminal-opened', { detail: terminalId }));
           }, e => {
+            releaseInput(false);
             term.writeln(`\x1b[31mFailed to open terminal: ${e}\x1b[0m`);
           });
         }
@@ -1080,6 +1145,9 @@ const TerminalView = ({
     // forwarded verbatim because we can't sensibly "Ctrl" a phrase.
     const handleData = (data: string) => {
       if (disabledRef.current) return;
+      // A report or answer for the program that went with the old connection
+      // (staleModesRef): the new shell would take it for typed text.
+      if (staleModesRef.current && TERMINAL_REPLY.test(data)) return;
       markUsed();
       showPasswordButtonRef.current(false);
       // From the Library: one write, to this terminal only. Enter in a call of
@@ -1088,10 +1156,7 @@ const TerminalView = ({
       // command can be for this server alone.
       const request = pasteRequestRef.current;
       if (request) {
-        invoke('write_terminal_data', {
-          terminalId,
-          data: Array.from(new TextEncoder().encode(request.enter ? `${data}\r` : data)),
-        }).catch(console.error);
+        writeTerminal(terminalId, Array.from(new TextEncoder().encode(request.enter ? `${data}\r` : data)));
         commandBufRef.current = "";
         commandBufPastedRef.current = !request.enter;
         return;
@@ -1132,10 +1197,7 @@ const TerminalView = ({
       } else {
         bytes = Array.from(new TextEncoder().encode(data));
       }
-      invoke('write_terminal_data', {
-        terminalId,
-        data: bytes,
-      }).catch(console.error);
+      writeTerminal(terminalId, bytes);
       if (!TERMINAL_REPLY.test(data)) broadcastInput(bytes);
 
       // ── Command history capture (best-effort) ────────────────────────────
@@ -1729,6 +1791,8 @@ const TerminalView = ({
       term.textarea?.removeEventListener('focus', onTextareaFocus);
       if (inputRef.current === handleData) inputRef.current = null;
       onResizeDisposable.dispose();
+      // Gone before its shell was asked for: none is opened.
+      window.clearTimeout(openTimer);
       window.clearTimeout(sizeTimer);
       sizeTimer = 0;
       window.clearTimeout(drawnTimer);
@@ -1751,6 +1815,11 @@ const TerminalView = ({
       // Attach-only viewers unmount without closing so the primary
       // xterm (in the session tab) keeps working.
       if (!attachOnly) {
+        // Keys kept for a shell still opening go nowhere: it opens for no
+        // one, and what they do there would go unseen. That shell is closed
+        // once it's open (keepShell): the close below comes too early for it.
+        releaseInputRef.current?.(false);
+        if (shellViews.get(terminalId) === viewRef.current) shellViews.delete(terminalId);
         invoke('close_terminal', { terminalId }).catch(console.error);
         closeOwn();
         window.removeEventListener(WALL_TILE_CLOSED, onWallTileClosed);
@@ -1897,7 +1966,7 @@ const TerminalView = ({
           if (disabledRef.current) return;
           const payload = execute ? command + "\r" : command;
           const bytes = Array.from(new TextEncoder().encode(payload));
-          invoke('write_terminal_data', { terminalId, data: bytes }).catch(console.error);
+          writeTerminal(terminalId, bytes);
           // Mirror the inserted command into the local buffer so the next
           // Enter (if the user typed one manually) still logs correctly.
           if (!execute) {
