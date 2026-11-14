@@ -759,6 +759,16 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
   }, [status]);
 
   const [activeTool, setActiveTool] = useState<ToolId | null>(null);
+  // A tool panel closed: the focus falls to the page when the control went
+  // with the panel, and typing lands nowhere (#298). Switching to another
+  // tool isn't a close.
+  const hadToolRef = useRef(false);
+  useEffect(() => {
+    const had = hadToolRef.current;
+    hadToolRef.current = activeTool !== null;
+    if (had && activeTool === null) requestTerminalFocus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTool]);
 
   // "Push shell config": a one-shot push, not a dockable tool pane, so it
   // gets its own preview/confirm dialog. Offered on the servers picked in
