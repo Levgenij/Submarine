@@ -13,6 +13,7 @@ import HistorySearchOverlay, { CMD_HISTORY_CHANGED } from './HistorySearchOverla
 import { bundledAlias, fontFamilyCss, readFontFamily, readFontSize } from '../util/terminalFont';
 import { readScrollback } from '../util/terminalScrollback';
 import { TERMINAL_PASTE, withoutPasteControls, type TerminalPaste } from '../util/pasteText';
+import { TERMINAL_READ, TERMINAL_READ_REPLY, type TerminalRead, type TerminalReadReply } from '../util/terminalRead';
 import { READABLE_CONTRAST, readBoldBright, readMinContrast, readScheme } from '../util/terminalTheme';
 import { readUseLocalShell } from '../util/terminalShell';
 import { holdTerminalInput, writeTerminal } from '../util/terminalWrite';
@@ -1433,9 +1434,10 @@ const TerminalView = ({
       IS_LINUX ? invoke<string>('clipboard_read_text') : navigator.clipboard.readText();
     // Paste text into the PTY, however it got here. Disabled sessions silently
     // drop the paste (matches onData). Empty text is ignored and writes nothing.
-    // `request`: the Library's Run/Paste (see TERMINAL_PASTE). The same checks
-    // apply, except the question about several lines: the Library asked it
-    // already, with the whole text and Run or Paste as the answer.
+    // `request`: the Library's Run/Paste, the AI's Insert (see TERMINAL_PASTE).
+    // The same checks apply, except the question about several lines for a Run
+    // (`enter`): the caller asked it already, with the whole text. Text only
+    // pasted is asked about again where each line would run as it lands.
     const pasteText = async (raw: string, toast: boolean, request?: { enter: boolean }) => {
       if (disabledRef.current || !raw) return;
       // No escape sequence or other control character gets through (see pasteText.ts).
@@ -1451,12 +1453,12 @@ const TerminalView = ({
       // lands, so ask first and show what would run. With the mode on, the
       // program takes the paste as one block and nothing runs by itself; a
       // single line with a trailing newline runs as one command, as anywhere.
-      const pasteAsk = request ? null : multilinePastePrompt(text, term.modes.bracketedPasteMode);
+      const pasteAsk = request?.enter ? null : multilinePastePrompt(text, term.modes.bracketedPasteMode);
       if (pasteAsk) {
         const ok = await confirmRef.current({
           title: `Paste ${pasteAsk.count} lines?`,
           message: `The program here doesn't take a paste as one block, so each line runs as soon as it lands:\n\n${pasteAsk.preview}`,
-          okLabel: 'Paste',
+          okLabel: request ? 'Paste and run' : 'Paste',
           safeDefault: true,
         });
         if (!ok) return;
@@ -1596,6 +1598,36 @@ const TerminalView = ({
       void pasteText(text, false, { enter });
     };
     window.addEventListener(TERMINAL_PASTE, onPasteRequest);
+    // The last `count` lines of the buffer, scrollback included, a wrapped
+    // line rebuilt into one as buildSelectedText does. The blank lines at the
+    // end (the rows under the prompt) are left out.
+    const readTail = (count: number): string => {
+      const buf = term.buffer.active;
+      const lines: string[] = [];
+      let text = '';
+      for (let y = buf.length - 1; y >= 0 && lines.length < count; y--) {
+        const line = buf.getLine(y);
+        if (!line) continue;
+        text = line.translateToString(true) + text;
+        // A wrapped row goes on from the one above it.
+        if (line.isWrapped && y > 0) continue;
+        if (lines.length > 0 || text.trim()) lines.push(text);
+        text = '';
+      }
+      return lines.reverse().join('\n');
+    };
+    // A read from outside the terminal (see TERMINAL_READ). The view that owns
+    // the PTY answers, as for a paste: a Wall tile holds only what came since
+    // it opened.
+    const onReadRequest = (e: Event) => {
+      const { requestId, terminalId: target, what, lines } = (e as CustomEvent<TerminalRead>).detail;
+      if (attachOnly || target !== terminalId) return;
+      const text = what === 'selection'
+        ? buildSelectedText().replace(/\n+$/, '')
+        : readTail(lines > 0 ? Math.floor(lines) : 0);
+      window.dispatchEvent(new CustomEvent<TerminalReadReply>(TERMINAL_READ_REPLY, { detail: { requestId, terminalId, text } }));
+    };
+    window.addEventListener(TERMINAL_READ, onReadRequest);
 
     // Handle Resize, once the size has settled (PTY_SIZE_SETTLE_MS).
     const onResizeDisposable = term.onResize(() => {
@@ -1820,6 +1852,7 @@ const TerminalView = ({
       document.removeEventListener('mouseup', onDocMouseUp);
       window.removeEventListener('blur', onWindowBlur);
       window.removeEventListener(TERMINAL_PASTE, onPasteRequest);
+      window.removeEventListener(TERMINAL_READ, onReadRequest);
       window.visualViewport?.removeEventListener('resize', onVvResize);
       if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
       unlistenPromise.then(unlisten => unlisten());
