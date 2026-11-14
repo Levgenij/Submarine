@@ -1605,7 +1605,7 @@ impl client::Handler for ClientHandler {
                             let target = entry.target.clone();
                             let dial = tokio::time::timeout(
                                 crate::tunnel::FORWARDED_CONNECT_TIMEOUT,
-                                tokio::net::TcpStream::connect(&target),
+                                crate::dial::connect(target.as_str()),
                             )
                             .await;
                             match dial {

@@ -795,7 +795,7 @@ async fn open_transport(auth: &NodeAuth, connect_timeout: Duration) -> Result<Bo
             let proxy_addr = format!("{}:{}", p_host, p_port);
             let stream = tokio::time::timeout(
                 connect_timeout,
-                tokio_socks::tcp::Socks5Stream::connect(proxy_addr.as_str(), (auth.host.as_str(), auth.port)),
+                crate::dial::socks5(proxy_addr.as_str(), (auth.host.as_str(), auth.port)),
             )
             .await
             .map_err(|_| format!("SOCKS5 proxy {} timed out", proxy_addr))?
@@ -811,7 +811,7 @@ async fn open_transport(auth: &NodeAuth, connect_timeout: Duration) -> Result<Bo
             let proxy_addr = format!("{}:{}", p_host, p_port);
             let mut tcp = tokio::time::timeout(
                 connect_timeout,
-                tokio::net::TcpStream::connect(proxy_addr.as_str()),
+                crate::dial::connect(proxy_addr.as_str()),
             )
             .await
             .map_err(|_| format!("HTTP proxy {} timed out", proxy_addr))?
@@ -826,7 +826,7 @@ async fn open_transport(auth: &NodeAuth, connect_timeout: Duration) -> Result<Bo
             }
             tokio::time::timeout(
                 connect_timeout,
-                async_http_proxy::http_connect_tokio(&mut tcp, &auth.host, auth.port),
+                crate::dial::http_tunnel(&mut tcp, &auth.host, auth.port),
             )
             .await
             .map_err(|_| format!("HTTP CONNECT to {}:{} timed out", auth.host, auth.port))?
@@ -836,7 +836,7 @@ async fn open_transport(auth: &NodeAuth, connect_timeout: Duration) -> Result<Bo
         _ => {
             let stream = tokio::time::timeout(
                 connect_timeout,
-                tokio::net::TcpStream::connect((auth.host.as_str(), auth.port)),
+                crate::dial::connect((auth.host.as_str(), auth.port)),
             )
             .await
             .map_err(|_| format!("TCP connect to {}:{} timed out", auth.host, auth.port))?
