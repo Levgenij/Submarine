@@ -1430,11 +1430,25 @@ const TerminalView = ({
       ev.preventDefault();
       void pasteClipboard(true);
     };
+    // A key held down while the focus moved here (Enter on a panel's close
+    // button) goes on repeating into the terminal. It wasn't pressed for the
+    // shell, so its repeats are dropped until a key goes down here. Keys an
+    // input method takes (keyCode 229) are left alone: it has used them before
+    // they get here, and xterm reads what it typed from its field afterwards.
+    let noKeySinceFocus = false;
+    const onTextareaFocus = () => { noKeySinceFocus = true; };
+    term.textarea?.addEventListener('focus', onTextareaFocus);
     // Ctrl+Shift+A selects the whole buffer and Ctrl+Shift+C copies the
     // selection, on every platform. The shifted combo keeps plain Ctrl+A
     // (start of line) and Ctrl+C (interrupt) going to the shell. xterm.js
     // allows only one custom key handler, so the Linux paste keys share it.
     term.attachCustomKeyEventHandler((ev) => {
+      // A held key's repeats (see noKeySinceFocus).
+      if (ev.type === 'keydown' && !ev.repeat) noKeySinceFocus = false;
+      if (noKeySinceFocus && ev.repeat && !ev.isComposing && ev.keyCode !== 229) {
+        ev.preventDefault();
+        return false;
+      }
       const noOtherMods = !ev.altKey && !ev.metaKey && ev.ctrlKey && ev.shiftKey;
       if (noOtherMods && ev.code === 'KeyA') {
         if (ev.type === 'keydown' && !ev.repeat) term.selectAll();
@@ -1712,6 +1726,7 @@ const TerminalView = ({
       term.textarea?.removeEventListener("compositionend", onCompositionEnd);
       term.element?.removeEventListener("keydown", onAndroidKeyDown, true);
       term.textarea?.removeEventListener("input", onAndroidInput);
+      term.textarea?.removeEventListener('focus', onTextareaFocus);
       if (inputRef.current === handleData) inputRef.current = null;
       onResizeDisposable.dispose();
       window.clearTimeout(sizeTimer);
