@@ -1226,6 +1226,7 @@ interface SecretInputProps {
 // A password box with a show / hide toggle, hidden at first. Shown or not, it
 // stays out of spell check and autocorrect, so a visible password isn't kept
 // as a word. The ref is the input, so a wrong password can be selected.
+// Windows' own eye button is hidden (no-native-reveal): the box has one already.
 const SecretInput = forwardRef<HTMLInputElement, SecretInputProps>(
   ({ value, onChange, placeholder, autoComplete, className, wrapperClassName, invalid = false, describedBy, onKeyDown }, ref) => {
     const [shown, setShown] = useState(false);
@@ -1245,7 +1246,7 @@ const SecretInput = forwardRef<HTMLInputElement, SecretInputProps>(
           autoCapitalize="none"
           autoCorrect="off"
           spellCheck={false}
-          className={`pr-10 ${className}`}
+          className={`pr-10 no-native-reveal ${className}`}
         />
         <button
           type="button"
