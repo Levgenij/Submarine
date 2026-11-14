@@ -1,4 +1,4 @@
-import { Server, KeyRound, Library, Activity, Settings, LogOut, UserCircle } from "lucide-react";
+import { Server, KeyRound, Library, Activity, Settings, LogOut, UserCircle, Sparkles } from "lucide-react";
 
 // Vertical rail on desktop, horizontal bottom dock on mobile. Layout swap is
 // driven by `isMobile` so the terminal/session views can use the full screen
@@ -117,7 +117,10 @@ export const Sidebar = ({ activeTab, setActiveTab, isMobile, onLogout, profileNa
       </div>
 
       <nav className="flex flex-col gap-3 w-full px-2 shrink-0">
-        {items.map((item) => (
+        {/* The AI page is a desktop rail item only: the phone dock has no
+            room for another icon. */}
+        {/* The agent gateway's Agents item goes here (not ported yet). */}
+        {[...items, { id: 'ai', icon: Sparkles, label: 'AI assistant' }].map((item) => (
           <button
             key={item.id}
             onClick={() => setActiveTab(item.id)}

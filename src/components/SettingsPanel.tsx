@@ -9,6 +9,7 @@ import {
   ShellSyncPair, localPathProblem, readShellSyncPairs, readShellSyncServers, remotePathProblem,
   setShellSyncServer, writeShellSyncPairs,
 } from "../util/shellSync";
+import { AiSettings } from "./ai/AiSettings";
 import FontPicker from "./FontPicker";
 import CopyValue from "./CopyValue";
 import { loadInstalledFonts } from "../util/systemFonts";
@@ -699,7 +700,7 @@ function SshConfigSetting({ settings, setSettings }: any) {
   );
 }
 
-const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any) => {
+const SettingsPanel = ({ settings, setSettings, onOpenLogs, onOpenAiChats, servers = [] }: any) => {
   const accentColors = [
     { name: 'Light Blue', value: '#60a5fa' },
     { name: 'Sky', value: '#38bdf8' },
@@ -884,6 +885,10 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any)
             </div>
           </section>
         )}
+
+        <AiSettings servers={servers} onOpenChats={onOpenAiChats} />
+
+        {/* The agent gateway's settings (AgentSettings) go here, desktop only (not ported yet). */}
 
         {/* Cloud Section */}
         <section className="break-inside-avoid space-y-3 mb-4 sm:mb-8">
