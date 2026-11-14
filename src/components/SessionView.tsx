@@ -2034,7 +2034,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
               aria-expanded={!!plusMenu}
               aria-label="More terminal options"
               title="More terminal options"
-              className="h-10 w-7 sm:h-8 sm:w-5 rounded-r-lg border-l border-dashed border-white/10 flex items-center justify-center text-zinc-500 hover:bg-white/10 hover:text-white transition-all"
+              className="h-10 w-9 sm:h-8 sm:w-5 rounded-r-lg border-l border-dashed border-white/10 flex items-center justify-center text-zinc-500 hover:bg-white/10 hover:text-white transition-all"
             >
               <ChevronDown size={12} />
             </button>
@@ -2733,7 +2733,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   onClick={closeShellSync}
                   disabled={shellSyncPushing}
                   aria-label="Close"
-                  className="shrink-0 text-zinc-500 hover:text-white transition-colors disabled:opacity-40"
+                  className="shrink-0 p-[13px] -m-[13px] sm:p-0 sm:m-0 text-zinc-500 hover:text-white transition-colors disabled:opacity-40"
                 >
                   <X size={14} />
                 </button>
