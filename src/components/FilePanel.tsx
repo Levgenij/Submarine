@@ -193,8 +193,8 @@ export interface FilePanelProps {
   headerExtra?: React.ReactNode;
   /** File operations in this pane run as root - tint the header so it's unmistakable. */
   rootMode?: boolean;
-  /** Why archive and extract can't run in this pane (an FTP server has no shell). None: they can. */
-  archiveOff?: string;
+  /** Why actions that run a command on the server (archive, extract, duplicate, owner names) are off in this pane (an FTP server has no shell). None: they can. */
+  shellOff?: string;
   /** The other pane's listing, to mark this pane's rows against. None: Compare is off. */
   compareWith?: FileEntry[] | null;
   /** While comparing: leave out files that look the same. Folders stay, so they can be opened. */
@@ -243,7 +243,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   globalBookmarksKey,
   headerExtra,
   rootMode = false,
-  archiveOff,
+  shellOff,
   compareWith = null,
   hideSame = false,
   onEntriesChange,
@@ -423,6 +423,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       provider.id !== "remote"
       || !sessionId
       || disabled
+      || shellOff
       || ownerLookupUnavailableRef.current
       || failedOwnerLookupListGenRef.current === listGenRef.current
     ) return;
@@ -455,7 +456,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         failedOwnerLookupListGenRef.current = listGeneration;
         uids.forEach((uid) => requestedOwnerUidsRef.current.delete(uid));
       });
-  }, [entries, provider.id, sessionId, disabled]);
+  }, [entries, provider.id, sessionId, disabled, shellOff]);
   useEffect(() => {
     const path = scrollToPathRef.current;
     if (!path) return;
@@ -3611,7 +3612,8 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                 const name = duplicateName(entry.name, entry.isDir, entries.map((e) => e.name), moveRules());
                 setModal({ type: "duplicate", entry, v1: currentPath, v2: name });
               }}
-              className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
+              disabled={!!shellOff} title={shellOff}
+              className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed">
               <CopyPlus size={11} /><span>Duplicate…</span>
             </button>
           )}
@@ -3655,7 +3657,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
 
           <div className="h-px bg-white/5 my-1" />
           <button onClick={() => { setContextMenu(null); openArchiveDialog(acting); }}
-            disabled={!!archiveOff} title={archiveOff}
+            disabled={!!shellOff} title={shellOff}
             className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed">
             <Archive size={11} className="text-amber-300" />
             <span>{multi ? `Add to archive (${acting.length})…` : "Add to archive…"}</span>
@@ -3663,13 +3665,13 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           {!multi && !contextMenu.entry.isDir && archiveKind(contextMenu.entry.name) && (
             <>
               <button onClick={() => { setContextMenu(null); extractEntry(contextMenu.entry, false); }}
-                disabled={!!archiveOff} title={archiveOff}
+                disabled={!!shellOff} title={shellOff}
                 className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed">
                 <PackageOpen size={11} className="text-amber-300" /><span>Extract here</span>
               </button>
               {extractFolderName(contextMenu.entry.name) && (
                 <button onClick={() => { setContextMenu(null); extractEntry(contextMenu.entry, true); }}
-                  disabled={!!archiveOff} title={archiveOff}
+                  disabled={!!shellOff} title={shellOff}
                   className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed">
                   <PackageOpen size={11} className="text-amber-300 shrink-0" />
                   <span className="truncate max-w-[260px]">Extract to “{extractFolderName(contextMenu.entry.name)}{provider.pathSep}”</span>

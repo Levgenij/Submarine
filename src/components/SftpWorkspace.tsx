@@ -646,7 +646,7 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
             globalBookmarksKey={globalBookmarksKey("remote")}
             headerExtra={ftp ? undefined : elevationControl}
             rootMode={!ftp && (elevation.elevated || rootByLogin)}
-            archiveOff={ftp ? "Archive and extract need an SSH server: they run commands on it" : undefined}
+            shellOff={ftp ? "Needs an SSH server: it runs a command on it" : undefined}
             onEntriesChange={setRemoteEntries}
             compareWith={compareOn ? localEntries : null}
             hideSame={hideSame}
