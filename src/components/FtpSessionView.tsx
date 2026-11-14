@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { AlertTriangle, FolderOpen, Loader2, Lock, RotateCw, ScrollText, ShieldAlert, X } from "lucide-react";
+import { AlertTriangle, FolderOpen, Loader2, Lock, RotateCw, ScrollText, ShieldAlert, Sparkles, X } from "lucide-react";
 import { AuthPrompts } from "./AuthPrompts";
 import SftpWorkspace from "./SftpWorkspace";
+import { AiPanel } from "./ai/AiPanel";
+import { AI_FOCUS_EVENT, takeAiFocus } from "../util/aiEvents";
+import { IS_MOBILE } from "../util/platform";
 import { parseObjectList } from "../util/serverJson";
 import { readUseSshAgent } from "../util/sshAgent";
 
@@ -14,6 +17,9 @@ import { readUseSshAgent } from "../util/sshAgent";
 // an SSH server's tab has. Under FTPS a certificate that no public authority
 // vouches for is shown to check once, like an SSH host key. Plain FTP isn't
 // encrypted, and the tab says so. The backend is ftp_connect in lib.rs.
+//
+// The AI assistant works here too, with its file tools only (FTP runs no
+// commands): its panel sits beside the files, or over them on a phone.
 
 type LogLine = { msg: string; type: string; time: string };
 type Status = "connecting" | "connected" | "failed" | "disconnected";
@@ -31,6 +37,36 @@ export default function FtpSessionView({ session, profile, displayName, onClose,
   // The files come with the first connection and stay (greyed) after a drop.
   const [everConnected, setEverConnected] = useState(false);
   const [showLog, setShowLog] = useState(false);
+  // The AI assistant: shown or not; mounted the first time it shows, then kept
+  // (a run goes on while it is hidden). The AI page's "Open the server" opens
+  // it on the chat it asks for.
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiMounted, setAiMounted] = useState(false);
+  const [aiOpenChat, setAiOpenChat] = useState<{ id: number | null; n: number } | null>(null);
+  const [aiPending, setAiPending] = useState(0);
+  useEffect(() => { if (aiOpen) setAiMounted(true); }, [aiOpen]);
+  useEffect(() => {
+    const take = () => {
+      const chat = takeAiFocus(session.id);
+      if (chat === undefined) return;
+      setAiOpen(true);
+      setAiOpenChat((prev) => ({ id: chat, n: (prev?.n ?? 0) + 1 }));
+    };
+    take();
+    const onFocus = (e: Event) => {
+      if ((e as CustomEvent<{ sessionId: string }>).detail?.sessionId === session.id) take();
+    };
+    window.addEventListener(AI_FOCUS_EVENT, onFocus);
+    return () => window.removeEventListener(AI_FOCUS_EVENT, onFocus);
+  }, [session.id]);
+  // As wide as the SSH tab's AI panel (the same setting).
+  const [aiWidth] = useState<number>(() => {
+    try {
+      const saved = parseInt(localStorage.getItem("submarine-ai-panel-width") || "", 10);
+      if (Number.isFinite(saved) && saved >= 320) return saved;
+    } catch { /* the default below */ }
+    return Math.max(460, Math.min(900, Math.round((window.innerWidth || 1440) * 0.45)));
+  });
   // Asked again after the saved password was refused: twice at most.
   const askPassword = useRef(false);
   const passwordRetries = useRef(0);
@@ -215,6 +251,18 @@ export default function FtpSessionView({ session, profile, displayName, onClose,
           </span>
         )}
         <span className={`min-w-0 flex-1 truncate text-[11px] ${broken ? "text-red-400/90" : "text-zinc-500"}`}>{statusText}</span>
+        {everConnected && session.serverUuid && (
+          <button
+            onClick={() => setAiOpen((v) => !v)}
+            aria-pressed={aiOpen}
+            aria-label="AI"
+            title="AI — the assistant for this server"
+            className={`relative h-10 min-w-10 justify-center sm:h-7 sm:min-w-0 px-2 flex items-center gap-1.5 rounded-lg text-xs font-semibold transition-colors ${aiOpen ? "bg-primary/15 text-primary" : "bg-white/5 text-zinc-300 hover:bg-white/10"}`}
+          >
+            <Sparkles size={13} /><span className="hidden sm:inline">AI</span>
+            {aiPending > 0 && !aiOpen && <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-amber-400 text-black text-[10px] font-bold leading-4 text-center">{aiPending}</span>}
+          </button>
+        )}
         {everConnected && (
           <button
             onClick={() => setShowLog((v) => !v)}
@@ -246,15 +294,35 @@ export default function FtpSessionView({ session, profile, displayName, onClose,
       </div>
 
       {everConnected ? (
-        <div className="flex-1 min-h-0 relative flex flex-col">
-          <SftpWorkspace
-            sessionId={session.id}
-            disabled={status !== "connected"}
-            serverId={session.serverId}
-            profile={profile}
-            mirrorsConfig={parseObjectList(session.mirrors)}
-            ftp
-          />
+        <div className="flex-1 min-h-0 relative flex">
+          <div className={`flex-1 min-w-0 min-h-0 relative flex flex-col ${aiOpen && IS_MOBILE ? "hidden" : ""}`}>
+            <SftpWorkspace
+              sessionId={session.id}
+              disabled={status !== "connected"}
+              serverId={session.serverId}
+              profile={profile}
+              mirrorsConfig={parseObjectList(session.mirrors)}
+              ftp
+            />
+          </div>
+          {aiMounted && session.serverUuid && (
+            <div
+              data-ftp-ai=""
+              className={aiOpen ? (IS_MOBILE ? "flex-1 min-w-0 min-h-0 flex flex-col" : "shrink-0 min-h-0 flex flex-col border-l border-white/10") : "hidden"}
+              style={aiOpen && !IS_MOBILE ? { width: `${aiWidth}px`, maxWidth: "60%" } : undefined}
+            >
+              <AiPanel
+                sessionId={session.id}
+                serverUuid={session.serverUuid}
+                serverName={session.serverName}
+                connected={status === "connected"}
+                active={aiOpen && isActiveView}
+                onPending={setAiPending}
+                onClose={() => setAiOpen(false)}
+                openChat={aiOpenChat}
+              />
+            </div>
+          )}
           {broken && reason && (
             <div className="absolute left-3 right-3 top-3 z-20 px-3 py-2 rounded-lg border border-red-500/20 bg-[#1a0f10]/95 text-[12px] text-red-300/90 break-words">
               {reason}

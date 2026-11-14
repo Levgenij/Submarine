@@ -37,7 +37,8 @@ interface Props {
   readTerminal?: (what: "selection" | "tail") => Promise<string | null>;
   /** How many calls wait for the user's answer. */
   onPending: (n: number) => void;
-  onClose: () => void;
+  /** Without it the bar has no Close button: the host's own header closes the tab. */
+  onClose?: () => void;
   headerActions?: ReactNode;
   /** A chat to show, asked for from outside ("Open the server" on the AI
    *  page): `id` null means the one open last. `n` changes with each ask. */
@@ -249,9 +250,11 @@ export const AiPanel = ({ sessionId, serverUuid, serverName, connected, active, 
         <Settings size={15} />
       </button>
       {headerActions}
-      <button type="button" onClick={onClose} aria-label="Close" className={`${barIcon} text-zinc-500 hover:text-white hover:bg-white/5`}>
-        <X size={15} />
-      </button>
+      {onClose && (
+        <button type="button" onClick={onClose} aria-label="Close" className={`${barIcon} text-zinc-500 hover:text-white hover:bg-white/5`}>
+          <X size={15} />
+        </button>
+      )}
     </>
   );
 
