@@ -58,6 +58,12 @@ interface SftpWorkspaceProps {
   follow?: ShellFolderState | null;
   /** The remote pane's Follow button. */
   onFollowToggle?: () => void;
+  /**
+   * An FTP server's tab (FtpSessionView): its files go over FTP, so nothing
+   * that runs commands on the server is offered (root mode, archives, the
+   * owners' names). The mirror works over FTP too.
+   */
+  ftp?: boolean;
 }
 
 // Profile names hold only [A-Za-z0-9_-], so ":" keeps the parts apart.
@@ -144,7 +150,7 @@ function FollowSetup({ onCopy }: { onCopy: (line: string) => void }) {
   );
 }
 
-const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfig = [], terminalId, onRevealTerminal, profile, follow, onFollowToggle }: SftpWorkspaceProps) => {
+const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfig = [], terminalId, onRevealTerminal, profile, follow, onFollowToggle, ftp = false }: SftpWorkspaceProps) => {
   // Active sub-tab. Files is the default (the common workflow); Mirror is
   // for the per-server one-way replication setup.
   const [view, setView] = useState<SftpView>("files");
@@ -176,8 +182,9 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
   const [activeSide, setActiveSide] = useState<FilesSide>(() => {
     try {
       const v = localStorage.getItem(sideStorageKey);
-      return v === "remote" ? "remote" : "local";
-    } catch { return "local"; }
+      // An FTP tab is there for the server's files: they come first.
+      return v === "remote" || v === "local" ? v : ftp ? "remote" : "local";
+    } catch { return ftp ? "remote" : "local"; }
   });
   const setActiveSidePersisted = (s: FilesSide) => {
     setActiveSide(s);
@@ -195,7 +202,7 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
   // Providers are created once per session so the panels' provider identity
   // is stable across renders (the FilePanel's load-on-mount effect keys off it).
   const localProvider = useMemo(() => createLocalProvider(), []);
-  const remoteProvider = useMemo(() => createRemoteProvider(sessionId), [sessionId]);
+  const remoteProvider = useMemo(() => createRemoteProvider(sessionId, { ftp }), [sessionId, ftp]);
 
   const localRef = useRef<FilePanelHandle | null>(null);
   const remoteRef = useRef<FilePanelHandle | null>(null);
@@ -217,6 +224,7 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
   const [elevError, setElevError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (ftp) return;
     let cancelled = false;
     invoke<ElevationStatus>("sftp_elevation_status", { sessionId })
       .then((s) => { if (!cancelled) setElevation(s); })
@@ -225,7 +233,7 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
   }, [sessionId]);
 
   useEffect(() => {
-    if (disabled) return;
+    if (disabled || ftp) return;
     let cancelled = false;
     invoke<string>("sftp_login_user", { sessionId })
       .then((u) => { if (!cancelled) setLoginUser(u || null); })
@@ -636,8 +644,9 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
             onFollowToggle={onFollowToggle}
             bookmarksKey={bookmarksKey("remote")}
             globalBookmarksKey={globalBookmarksKey("remote")}
-            headerExtra={elevationControl}
-            rootMode={elevation.elevated || rootByLogin}
+            headerExtra={ftp ? undefined : elevationControl}
+            rootMode={!ftp && (elevation.elevated || rootByLogin)}
+            archiveOff={ftp ? "Archive and extract need an SSH server: they run commands on it" : undefined}
             onEntriesChange={setRemoteEntries}
             compareWith={compareOn ? localEntries : null}
             hideSame={hideSame}

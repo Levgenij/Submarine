@@ -193,6 +193,8 @@ export interface FilePanelProps {
   headerExtra?: React.ReactNode;
   /** File operations in this pane run as root - tint the header so it's unmistakable. */
   rootMode?: boolean;
+  /** Why archive and extract can't run in this pane (an FTP server has no shell). None: they can. */
+  archiveOff?: string;
   /** The other pane's listing, to mark this pane's rows against. None: Compare is off. */
   compareWith?: FileEntry[] | null;
   /** While comparing: leave out files that look the same. Folders stay, so they can be opened. */
@@ -241,6 +243,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
   globalBookmarksKey,
   headerExtra,
   rootMode = false,
+  archiveOff,
   compareWith = null,
   hideSame = false,
   onEntriesChange,
@@ -3652,19 +3655,22 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
 
           <div className="h-px bg-white/5 my-1" />
           <button onClick={() => { setContextMenu(null); openArchiveDialog(acting); }}
-            className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
+            disabled={!!archiveOff} title={archiveOff}
+            className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed">
             <Archive size={11} className="text-amber-300" />
             <span>{multi ? `Add to archive (${acting.length})…` : "Add to archive…"}</span>
           </button>
           {!multi && !contextMenu.entry.isDir && archiveKind(contextMenu.entry.name) && (
             <>
               <button onClick={() => { setContextMenu(null); extractEntry(contextMenu.entry, false); }}
-                className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
+                disabled={!!archiveOff} title={archiveOff}
+                className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed">
                 <PackageOpen size={11} className="text-amber-300" /><span>Extract here</span>
               </button>
               {extractFolderName(contextMenu.entry.name) && (
                 <button onClick={() => { setContextMenu(null); extractEntry(contextMenu.entry, true); }}
-                  className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
+                  disabled={!!archiveOff} title={archiveOff}
+                  className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed">
                   <PackageOpen size={11} className="text-amber-300 shrink-0" />
                   <span className="truncate max-w-[260px]">Extract to “{extractFolderName(contextMenu.entry.name)}{provider.pathSep}”</span>
                 </button>

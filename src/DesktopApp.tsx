@@ -47,6 +47,7 @@ import ProfilePanel from "./components/ProfilePanel";
 import { SessionView } from "./components/SessionView";
 import RdpSessionView from "./components/RdpSessionView";
 import TelnetSessionView from "./components/TelnetSessionView";
+import FtpSessionView from "./components/FtpSessionView";
 import { isFtp, serverProtocol, type ServerProtocol } from "./util/serverProtocol";
 import VncSessionView from "./components/VncSessionView";
 import MonitoringPanel from "./components/MonitoringPanel";
@@ -297,7 +298,8 @@ function DesktopApp() {
   const defaultNode = {
     id: null as number | null,
     // "ssh", "rdp" (it opens in the system's RDP app), "telnet" (it opens
-    // in a terminal, over telnet) or "vnc" (its screen in the tab).
+    // in a terminal, over telnet), "vnc" (its screen in the tab) or "ftp",
+    // "ftps", "ftps-implicit" (its files in the tab).
     protocol: "ssh" as ServerProtocol,
     // An RDP server's window and sharing on this device (util/rdpOptions).
     rdpOptions: { ...DEFAULT_RDP_OPTIONS },
@@ -2624,6 +2626,17 @@ function DesktopApp() {
                                 shown={isVisible && viewIsSession}
                                 onPromptChange={handlePromptChange}
                               />
+                            ) : isFtp(sess.protocol) ? (
+                              <FtpSessionView
+                                session={sess}
+                                profile={activeProfile}
+                                displayName={tabLabel(sess)}
+                                onClose={getCloseHandler(sess.id)}
+                                onStatusChange={handleSessionStatus}
+                                isActiveView={isFocused}
+                                shown={isVisible && viewIsSession}
+                                onPromptChange={handlePromptChange}
+                              />
                             ) : sess.protocol === "telnet" ? (
                               <TelnetSessionView
                                 session={sess}
@@ -3200,7 +3213,7 @@ function DesktopApp() {
             // `normalize_server_identity` enforces this again on the server
             // side as a belt-and-suspenders guarantee.
             const isInline = newNode.authType === "custom_pass" || newNode.authType === "custom_key";
-            // An RDP, telnet, or VNC server has a host, port, login (its own
+            // An RDP, telnet, VNC, or FTP server has a host, port, login (its own
             // or a saved one) and maybe an SSH server to go through; nothing
             // that runs over SSH (forwards, mirrors, autostart, a proxy, a
             // key). Its saved password is kept: an RDP server's for the
@@ -3289,7 +3302,7 @@ function DesktopApp() {
             } catch (e) {
               addLog(`SAVE_JUMP_HOST_FAILED: ${e}`, "error");
             }
-            // SSH, RDP, telnet or VNC: the same separate-write pattern.
+            // SSH, RDP, telnet, VNC or FTP: the same separate-write pattern.
             try {
               await invoke("set_server_protocol", { id: savedId, value: isRdp ? "rdp" : isTelnet ? "telnet" : isVnc ? "vnc" : ftpServer ? newNode.protocol : null, persist: false });
             } catch (e) {
