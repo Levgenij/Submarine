@@ -2,9 +2,36 @@
 
 ## 0.5.4
 
+### Connect
+
+- A server name with several addresses is tried address by address, a quarter second apart, so one dead address (often IPv6) no longer stalls the login. An HTTP proxy no longer loses the first bytes the server sends right after the tunnel opens.
+- A FIDO security key (`sk-ssh-ed25519`, `sk-ecdsa`) named by IdentityFile or saved on the server logs in through the ssh-agent's copy, also under `IdentitiesOnly yes`. The connect log says why when no agent can sign for it.
+- Settings → Connections has "Send keepalives" and "Reconnect automatically", and each SSH server can follow them or turn either on or off for itself.
+- When the server ends the connection with a message, the banner shows that message. While reconnecting, the banner shows the steps reached, each attempt and the time spent.
+
+### Terminal
+
+- Ctrl+- and Ctrl+/ send undo (^_), as in other terminals.
+- Holding an arrow key in nano or vim no longer makes keys pile up behind the screen.
+- Keys typed while the shell opens, or typed fast, reach the shell once and in order. On Android, fast typing and backspace from the keyboard app no longer double or swap letters.
+- Closing a tool panel gives the focus back to the terminal, and a key still held from the panel doesn't repeat into the shell.
+- Selecting only blank cells no longer replaces the clipboard. On a Mac, Option+drag selects text inside programs that use the mouse.
+- On the phone, a held arrow on the key bar repeats.
+
 ### Files
 
 - Drag on empty space in a file list to select files with a box. Hold Ctrl, ⌘ or Shift to add them to what is already selected; near the top or bottom edge the list scrolls on its own.
+
+### App
+
+- A form with changes asks before it closes: Save, Discard or Keep editing. This covers the server, command, note, login and key forms. Drag-selecting out of a field no longer closes the form, and a failed save keeps it open with the error in view.
+- A session tab's right-click menu has "Edit server". A renamed server shows its new name on open tabs.
+- The second click of a double-click can no longer answer the dialog the first click opened.
+- The active session tab stays in view, with arrows when tabs are hidden past an end.
+- Password boxes on Windows show one eye, not two. Controls on the phone have bigger touch areas.
+- The vault's temporary data stays in memory, never in temporary files on disk. Only well-formed web addresses are opened in the browser.
+
+Vault format is unchanged. Existing profiles open without a migration. The keepalive and reconnect choices are kept on this device.
 
 ## 0.5.3
 
