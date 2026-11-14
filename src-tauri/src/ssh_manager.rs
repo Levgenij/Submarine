@@ -992,6 +992,9 @@ pub struct SshState {
     /// the Info panel's Connection card. Replaced on every successful connect,
     /// dropped on disconnect and profile close.
     pub session_info: Arc<Mutex<HashMap<String, SessionInfo>>>,
+    /// FTP tabs, by session id: their file access, which every `sftp_*`
+    /// command finds through `get_sftp_session` (see ftp_sftp.rs).
+    pub ftp_sessions: Arc<Mutex<HashMap<String, crate::ftp_sftp::Live>>>,
 }
 
 /// The resolved parameters of a tab's live connection (after ~/.ssh/config,
@@ -1130,6 +1133,7 @@ impl SshState {
             sftp_shell: Arc::new(Mutex::new(std::collections::HashSet::new())),
             kbi_save: Arc::new(Mutex::new(HashMap::new())),
             session_info: Arc::new(Mutex::new(HashMap::new())),
+            ftp_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
