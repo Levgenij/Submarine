@@ -7,6 +7,7 @@ import { TerminalSquare, Folder, Network, AlertTriangle, Check, X, Play, Library
 import TerminalView from "./TerminalView";
 import { AuthPrompts } from "./AuthPrompts";
 import SftpWorkspace from "./SftpWorkspace";
+import { readAutoReconnect, readSendKeepalives } from "../util/sessionKeep";
 import { nextShellFolder, type ShellFolderState } from "../util/shellFolder";
 import TunnelsPanel from "./TunnelsPanel";
 import InfoPanel from "./InfoPanel";
@@ -38,7 +39,8 @@ const fmtBytes = (n: number) => {
 // the session toolbar for SFTP and Ports. The status dot reflects the live
 // state of the dedicated connection: green = up, amber (pulsing) = opening /
 // applies-on-connect, red = couldn't be established (falling back to the main
-// session). No dot when the toggle is off.
+// session). No dot when the toggle is off, or while the tab is down and nothing
+// is reconnecting it (`off`).
 //
 // The visible word is "Dedicated". Hovering it, or moving keyboard focus to
 // it, shows a short guide: what the option does (`hint`), when the terminal's
@@ -80,7 +82,7 @@ const SepToggle = ({ on, onToggle, status, hint, onReconnect, showLabel = true }
           {on && <Check size={12} strokeWidth={3} />}
         </span>
         {showLabel && <span className="font-medium whitespace-nowrap">Dedicated</span>}
-        {on && (
+        {on && status !== 'off' && (
           <span
             className={`w-1.5 h-1.5 rounded-full shrink-0 ${
               status === 'ready' ? 'bg-emerald-400' : status === 'failed' ? 'bg-red-400' : 'bg-amber-400 animate-pulse-brief'
@@ -116,8 +118,8 @@ const SepToggle = ({ on, onToggle, status, hint, onReconnect, showLabel = true }
       {/* Reconnect just the dedicated connection - outside the <label> so a
           click can't toggle the checkbox. Shown whenever the toggle is on and
           no connect attempt is already in flight; also the retry affordance
-          after a red (failed) dot. */}
-      {on && onReconnect && status !== 'pending' && (
+          after a red (failed) dot. Not while the tab is down: it can't. */}
+      {on && onReconnect && (status === 'ready' || status === 'failed') && (
         <button
           onClick={onReconnect}
           title="Reconnect the dedicated session"
@@ -516,6 +518,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
       sessionRole: "sftp",
       separateSessions: false,
       useSshAgent: readUseSshAgent(),
+      sendKeepalives: readSendKeepalives(session.serverUuid),
     }).catch((e) => {
       // Refused before any connecting: no failure event follows.
       console.error(e);
@@ -532,6 +535,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
       sessionRole: "forward",
       separateSessions: false,
       useSshAgent: readUseSshAgent(),
+      sendKeepalives: readSendKeepalives(session.serverUuid),
     }).catch((e) => {
       // Refused before any connecting: no failure event follows, and the
       // tunnels still need a transport.
@@ -556,15 +560,16 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
   const primarySeparateRef = useRef(false);
 
   // Schedule an auto-retry for a dropped secondary. Fires only if the toggle
-  // is still on and the primary is still connected at fire time.
+  // is still on and the primary is still connected at fire time; with
+  // reconnecting turned off meanwhile, it gives up instead.
   const scheduleSecondaryRetry = (which: 'sftp' | 'fwd') => {
     const retryRef = which === 'sftp' ? sftpRetryRef : fwdRetryRef;
     const timerRef = which === 'sftp' ? sftpRetryTimerRef : fwdRetryTimerRef;
     const enabledRef = which === 'sftp' ? separateSftpRef : separateFwdRef;
     const setStatus = which === 'sftp' ? setSftpConnStatus : setFwdConnStatus;
-    if (retryRef.current >= SECONDARY_RETRY_DELAYS.length) {
-      // Out of retries — mark failed; operations ride the primary. For
-      // forwarding, explicitly restore the tunnels there.
+    if (retryRef.current >= SECONDARY_RETRY_DELAYS.length || !readAutoReconnect(session.serverUuid)) {
+      // Out of retries, or reconnecting is off — mark failed; operations ride
+      // the primary. For forwarding, explicitly restore the tunnels there.
       setStatus('failed');
       if (which === 'fwd') restoreTunnelsOnPrimary();
       return;
@@ -576,6 +581,10 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
     timerRef.current = setTimeout(() => {
       timerRef.current = null;
       if (!enabledRef.current || statusRef.current !== 'connected') return;
+      if (!readAutoReconnect(session.serverUuid)) {
+        scheduleSecondaryRetry(which);
+        return;
+      }
       if (which === 'sftp') openSftpConn(); else openFwdConn();
     }, delay);
   };
@@ -591,8 +600,9 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
   };
 
   // Reset secondary tracking when the primary drops / reconnects. The backend
-  // has already torn the secondaries down (primary connect-teardown, or the
-  // primary disconnect sweep); this just resets the indicators + retry state.
+  // has already torn the secondaries down (primary connect-teardown, the
+  // primary disconnect sweep, or the primary's watcher when it dropped); this
+  // just resets the indicators + retry state.
   const resetSecondaryStatus = () => {
     clearSecondaryRetryTimers();
     sftpRetryRef.current = 0;
@@ -1084,7 +1094,15 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
 
     // Setup listeners. The connection starts once they're all registered (below).
     const unlistenLog = listen(`session-log-${session.id}`, (event: any) => {
-      pushLog(event.payload);
+      const line = event.payload;
+      pushLog(line);
+      // The session watchers' lines for the Activity Log: a keepalive that went
+      // unanswered, or another of the tab's connections that dropped (`via`
+      // names it; the tab's own drop is logged below).
+      if (line?.activity) {
+        const tag = line.closed ? "SSH_DISCONNECTED" : "SSH_KEEPALIVE";
+        addLog(`${tag} [${session.serverName}${line.via ? `, ${line.via}` : ""}]: ${line.msg}`, "warn");
+      }
     });
 
     const unlistenPrompt = listen(`fingerprint-prompt-${session.id}`, (event: any) => {
@@ -1308,8 +1326,9 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
       // can help: a timeout, a refusal, a link that broke. A rejected or
       // cancelled login, a host key that was not approved (its prompt would
       // come straight back), no common algorithm, or a setting stops the
-      // cycle. Reconnect is still there.
-      if (event.payload?.retry === true) {
+      // cycle, and so does reconnecting turned off (util/sessionKeep).
+      // Reconnect is still there.
+      if (event.payload?.retry === true && readAutoReconnect(session.serverUuid)) {
         scheduleReconnect(reconnectAttemptRef.current + 1);
       } else {
         cancelReconnect();
@@ -1331,8 +1350,9 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
       // User-initiated disconnect (right-click → Disconnect) should NOT
       // bounce straight into auto-reconnect — the user explicitly asked
       // for the session to be dead. The "Reconnect" banner button is
-      // still available if they change their mind.
-      if (!userInitiated) {
+      // still available if they change their mind. The same when reconnecting by
+      // itself is turned off: the session stays down until the button is pressed.
+      if (!userInitiated && readAutoReconnect(session.serverUuid)) {
         scheduleReconnect(1);
       } else {
         cancelReconnect();
@@ -1351,7 +1371,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
       unlistenSftpOk, unlistenSftpFail, unlistenSftpDown, unlistenFwdOk, unlistenFwdFail, unlistenFwdDown,
       unlistenSuccess, unlistenFailed, unlistenDisconnected,
     ]).then(() =>
-      invoke("initiate_connection", { sessionId: session.id, serverId: session.serverId, customPassword: customPasswordRef.current || null, quickAuth: session.quickAuth || null, sessionRole: "primary", separateSessions: separateFwdRef.current, useSshAgent: readUseSshAgent() })
+      invoke("initiate_connection", { sessionId: session.id, serverId: session.serverId, customPassword: customPasswordRef.current || null, quickAuth: session.quickAuth || null, sessionRole: "primary", separateSessions: separateFwdRef.current, useSshAgent: readUseSshAgent(), sendKeepalives: readSendKeepalives(session.serverUuid) })
     ).catch(connectRefused);
 
     return () => {
@@ -1399,6 +1419,13 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
     updateAttempt(attempt);
     setNextReconnectAt(Date.now() + delay);
     reconnectTimerRef.current = setTimeout(() => {
+      reconnectTimerRef.current = null;
+      // Reconnecting was turned off while this waited (a server's own choice,
+      // say): stop here, as a drop would now.
+      if (!readAutoReconnect(session.serverUuid)) {
+        cancelReconnect();
+        return;
+      }
       setNextReconnectAt(null);
       setStatus('connecting');
       // Seen in the connect view while a first connect is being retried.
@@ -1413,6 +1440,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
         sessionRole: "primary",
         separateSessions: separateFwdRef.current,
         useSshAgent: readUseSshAgent(),
+        sendKeepalives: readSendKeepalives(session.serverUuid),
       }).catch(connectRefused);
     }, delay);
   };
@@ -1440,6 +1468,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
       sessionRole: "primary",
       separateSessions: separateFwdRef.current,
       useSshAgent: readUseSshAgent(),
+      sendKeepalives: readSendKeepalives(session.serverUuid),
     }).catch(connectRefused);
   };
 
@@ -1452,6 +1481,17 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
     window.addEventListener(evt, onReconnect);
     return () => window.removeEventListener(evt, onReconnect);
   }, [session.id, customPassword]);
+
+  // Reconnecting turned off in Settings stops a countdown that is running, at
+  // once rather than when it ends.
+  useEffect(() => {
+    const onSettings = () => {
+      if (reconnectTimerRef.current && !readAutoReconnect(session.serverUuid)) cancelReconnect();
+    };
+    window.addEventListener('submarine-settings-changed', onSettings);
+    return () => window.removeEventListener('submarine-settings-changed', onSettings);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session.serverUuid]);
 
   // ---- Tool pane sizing + window growth ------------------------------------
   // Left or right, and only while this session is the one on screen, the
@@ -1701,6 +1741,15 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
       }}
     />
   );
+
+  // What a Dedicated toggle's dot shows (SepToggle). While the tab is down, its
+  // dedicated connections are gone: amber while the tab is (re)connecting,
+  // which opens them next, and none while it stays down, since nothing will.
+  const sepDot = (on: boolean, conn: SecondaryStatus): 'ready' | 'pending' | 'failed' | 'off' => {
+    if (!on) return 'off';
+    if (status !== 'connected') return status === 'connecting' || nextReconnectAt !== null ? 'pending' : 'off';
+    return conn === 'ready' ? 'ready' : conn === 'failed' ? 'failed' : conn === 'connecting' ? 'pending' : 'off';
+  };
 
   // Full-screen log for the first connection, including its retries. This
   // return replaces the whole tree below, terminals included, so once the
@@ -2296,7 +2345,9 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   </button>
                 </div>
               </div>
-              {/* The password box when the login was refused. */}
+              {/* The password box when the login was refused. The reason, a
+                  server's goodbye included, is in the line above at every
+                  width, so a phone sees why a session that stays down dropped. */}
               {gaveUp && isAuthError && <div className="px-4 pb-2">{retryPassword}</div>}
             </div>
           );
@@ -2375,6 +2426,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   connectionEpoch={connectionEpoch}
                   serverId={session.serverId}
                   serverName={session.serverName}
+                  serverUuid={session.serverUuid}
                   ownLogin={t.ownLogin}
                   quickAuth={session.quickAuth}
                   onFolder={t.container ? undefined : onTerminalFolder}
@@ -2512,7 +2564,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                 <SepToggle
                   on={separateSftp}
                   onToggle={toggleSeparateSftp}
-                  status={!separateSftp ? 'off' : sftpConnStatus === 'ready' ? 'ready' : sftpConnStatus === 'failed' ? 'failed' : 'pending'}
+                  status={sepDot(separateSftp, sftpConnStatus)}
                   hint="SFTP runs on its own SSH connection, so large transfers don't slow the terminal down."
                   onReconnect={reconnectSftpConn}
                   showLabel={toolBarWide}
@@ -2546,7 +2598,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                 <SepToggle
                   on={separateFwd}
                   onToggle={toggleSeparateFwd}
-                  status={!separateFwd ? 'off' : fwdConnStatus === 'ready' ? 'ready' : fwdConnStatus === 'failed' ? 'failed' : 'pending'}
+                  status={sepDot(separateFwd, fwdConnStatus)}
                   hint="Port forwards run on their own SSH connection, so heavy traffic doesn't slow the terminal down."
                   onReconnect={reconnectFwdConn}
                   showLabel={toolBarWide}
