@@ -7,5 +7,7 @@ pub mod gate;
 pub mod net;
 pub mod prompt;
 pub mod provider;
+pub mod route;
 pub mod shape;
 pub mod sse;
+pub mod tools;
