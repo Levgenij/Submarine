@@ -45,6 +45,9 @@ mod ftp_sftp;
 mod rdp_share;
 mod term_filter;
 mod vault_backup;
+// shortcut: until the ai commands land (B4)
+#[allow(dead_code, unused_imports)]
+mod ai;
 mod vnc_client;
 mod screen_flow;
 mod screen_link;
