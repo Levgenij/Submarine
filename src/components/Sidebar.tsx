@@ -134,6 +134,9 @@ export const Sidebar = ({ activeTab, setActiveTab, isMobile, onLogout, profileNa
           >
             <item.icon size={20} className={activeTab === item.id ? "drop-shadow-[0_0_8px_rgba(var(--primary),0.5)]" : ""} />
             {activeTab === item.id && <div className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-1/2 bg-primary rounded-r-full shadow-[0_0_10px_rgba(var(--primary),1)]" />}
+            {item.id === 'agents' && agentsWaiting > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 min-w-4 h-4 px-1 rounded-full bg-primary text-[10px] font-bold text-black flex items-center justify-center">{agentsWaiting > 9 ? '9+' : agentsWaiting}</span>
+            )}
           </button>
         ))}
       </nav>
