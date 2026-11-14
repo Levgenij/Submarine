@@ -14,6 +14,7 @@ import { RdpShareFields, RdpSpeedFields } from "./RdpOptionFields";
 import { VncSpeedFields } from "./VncOptionFields";
 import { DEFAULT_VNC_OPTIONS, normalizeVncOptions, type VncOptions } from "../util/vncOptions";
 import { IS_ANDROID, IS_WINDOWS } from "../util/platform";
+import { USUAL_PORTS, isFtp, type FtpProtocol, type ServerProtocol } from "../util/serverProtocol";
 import { TAG_COLOURS, customTagColour, pickerValue } from "../util/tagColours";
 
 // Compact "2h ago" style relative time for the attribution line.
@@ -43,7 +44,14 @@ type ImportedHost = {
   user: string;
   identity_file: string | null;
   proxy_jump: string | null;
+  // An FTP site from FileZilla's list: its kind and the password it kept.
+  protocol?: FtpProtocol;
+  password?: string;
 };
+
+// The kind a row says it is, for its badge.
+const importKind = (h: ImportedHost) =>
+  h.protocol === "ftp" ? "FTP" : h.protocol ? "FTPS" : "SSH";
 
 // What `import_ssh_key_file` hands back after putting a key file in the vault.
 type ImportedSshKey = {
@@ -65,11 +73,13 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
   }, [isOpen, isRdp]);
   const isTelnet = newNode.protocol === "telnet";
   const isVnc = newNode.protocol === "vnc";
-  const isSsh = !isRdp && !isTelnet && !isVnc;
-  const setProtocol = (protocol: "ssh" | "rdp" | "telnet" | "vnc") => {
+  // FTP: FTPS with TLS after connecting (the usual), from the start, or plain.
+  const ftp = isFtp(newNode.protocol);
+  const isSsh = !isRdp && !isTelnet && !isVnc && !ftp;
+  const setProtocol = (protocol: ServerProtocol) => {
     if (protocol === newNode.protocol) return;
     // The usual port of the new kind, unless another was typed.
-    const usual: Record<string, number> = { ssh: 22, rdp: 3389, telnet: 23, vnc: 5900 };
+    const usual = USUAL_PORTS;
     const port = !newNode.port || Object.values(usual).includes(newNode.port) ? usual[protocol] : newNode.port;
     const authType = protocol !== "ssh" && newNode.authType === "custom_key" ? "custom_pass" : newNode.authType;
     setNewNode({ ...newNode, protocol, port, authType });
@@ -161,7 +171,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
   // config (desktop only); `paste` = a text blob pasted from PuTTY /
   // MobaXterm / a JSON export — parsed by the auto-detecting Rust
   // command so the user doesn't have to say which client it came from.
-  const [importSource, setImportSource] = useState<"ssh" | "paste">("ssh");
+  const [importSource, setImportSource] = useState<"ssh" | "filezilla" | "paste">("ssh");
   const [importPasteText, setImportPasteText] = useState("");
 
   // Open the picker: fetch fresh from ~/.ssh/config every time so users who
@@ -209,17 +219,19 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
     }
   };
 
-  const switchImportSource = async (next: "ssh" | "paste") => {
+  const switchImportSource = async (next: "ssh" | "filezilla" | "paste") => {
     if (importBusy || importSource === next) return;
     setImportSource(next);
     setImportError(null);
     setImportNotice(null);
     setImportHosts([]);
     setImportSelected(new Set());
-    if (next === "ssh") {
+    if (next === "ssh" || next === "filezilla") {
       setImportLoading(true);
       try {
-        const hosts = await invoke<ImportedHost[]>("parse_ssh_config", { path: null });
+        const hosts = next === "ssh"
+          ? await invoke<ImportedHost[]>("parse_ssh_config", { path: null })
+          : await invoke<ImportedHost[]>("read_filezilla_sites");
         setImportHosts(hosts);
       } catch (e: any) {
         setImportError(typeof e === "string" ? e : (e?.message || String(e)));
@@ -284,10 +296,27 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
       ...new Set(importHosts.filter((h) => importSelected.has(h.host_alias) && h.identity_file).map((h) => h.identity_file as string)),
     ];
     let withKeys = true;
+    // FileZilla's site list keeps passwords: in a shared profile they would go
+    // to everyone it's shared with, so they are asked about too. The safe
+    // answer leaves them out (each server asks when connecting).
+    const withPasswordsAsked = importHosts.some((h) => importSelected.has(h.host_alias) && h.password);
+    const sharedProfile = keyFiles.length > 0 || withPasswordsAsked
+      ? await invoke<{ share_id: string | null }>("profile_share_status")
+          .then((s) => typeof s.share_id === "string" && s.share_id.length > 0)
+          .catch(() => false)
+      : false;
+    let withPasswords = true;
+    if (withPasswordsAsked && sharedProfile) {
+      withPasswords = await confirm({
+        title: "Add saved passwords to a shared profile?",
+        message: "This profile is shared. The passwords saved with these sites would go to everyone you share it with. Import the sites with them, or without (each one asks when connecting)?",
+        okLabel: "Import with passwords",
+        cancelLabel: "Without passwords",
+        safeDefault: true,
+      });
+    }
     if (keyFiles.length > 0) {
-      const shared = await invoke<{ share_id: string | null }>("profile_share_status")
-        .then((s) => typeof s.share_id === "string" && s.share_id.length > 0)
-        .catch(() => false);
+      const shared = sharedProfile;
       if (shared) {
         withKeys = await confirm({
           title: "Add your key files to a shared profile?",
@@ -326,15 +355,16 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
         }
       }
       try {
-        await invoke<number>("add_server", {
+        const id = await invoke<number>("add_server", {
           name: host.host_alias,
           host: host.hostname || host.host_alias,
-          port: host.port || 22,
+          port: host.port || (host.protocol ? USUAL_PORTS[host.protocol] : 22),
           // No user in the export (MobaXterm's <default>, an ssh_config
           // entry without User): leave it blank, so connecting asks
           // "Login as" - where empty still means root (#72).
           username: host.user ? host.user.trim() : "",
-          password: null,
+          // A password FileZilla kept (and, in a shared profile, allowed).
+          password: host.password && withPasswords && !key ? host.password : null,
           credentialId: null,
           folderId: null,
           proxyType: "none",
@@ -348,6 +378,10 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
           color: null,
           persist: false,
         });
+        // An FTP site from FileZilla's list: its kind goes with it.
+        if (host.protocol) {
+          await invoke("set_server_protocol", { id, value: host.protocol, persist: false });
+        }
         ok++;
       } catch (e: any) {
         failed++;
@@ -504,7 +538,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                 PuTTY / MobaXterm / JSON" source that doesn't need a local
                 ~/.ssh/config. The SSH-config tab still errors gracefully
                 there — the user just picks the paste tab. */}
-            {!isEditMode && isSsh && (
+            {!isEditMode && (isSsh || ftp) && (
               <button
                 onClick={openImportModal}
                 title="Import from ~/.ssh/config"
@@ -534,15 +568,40 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
               <select
                 id="server-type"
                 aria-label="Server type"
-                value={isRdp ? "rdp" : isTelnet ? "telnet" : isVnc ? "vnc" : "ssh"}
-                onChange={(e) => setProtocol(e.target.value as "ssh" | "rdp" | "telnet" | "vnc")}
+                value={isRdp ? "rdp" : isTelnet ? "telnet" : isVnc ? "vnc" : ftp ? "ftps" : "ssh"}
+                onChange={(e) => setProtocol(e.target.value as ServerProtocol)}
                 className="w-full h-9 bg-[#1a1a1e] rounded-lg px-3 text-[12px] text-white border border-white/10 outline-none focus:border-primary/50 focus:bg-[#232328] transition-all shadow-inner"
               >
                 <option value="ssh" className="bg-[#1a1a1e] text-white">SSH</option>
                 <option value="rdp" className="bg-[#1a1a1e] text-white">RDP (Remote Desktop)</option>
                 <option value="telnet" className="bg-[#1a1a1e] text-white">Telnet (not encrypted)</option>
                 <option value="vnc" className="bg-[#1a1a1e] text-white">VNC</option>
+                <option value="ftps" className="bg-[#1a1a1e] text-white">FTP or FTPS (files)</option>
               </select>
+              {ftp && (
+                <div className="space-y-1.5 pt-1">
+                  <label htmlFor="ftp-security" className="text-[11px] font-bold text-zinc-400 ml-1">Encryption</label>
+                  <select
+                    id="ftp-security"
+                    value={newNode.protocol}
+                    onChange={(e) => setProtocol(e.target.value as FtpProtocol)}
+                    className="w-full h-9 bg-[#1a1a1e] rounded-lg px-3 text-[12px] text-white border border-white/10 outline-none focus:border-primary/50 focus:bg-[#232328] transition-all shadow-inner"
+                  >
+                    <option value="ftps" className="bg-[#1a1a1e] text-white">FTPS: TLS after connecting (usual)</option>
+                    <option value="ftps-implicit" className="bg-[#1a1a1e] text-white">FTPS: TLS from the start (port 990)</option>
+                    <option value="ftp" className="bg-[#1a1a1e] text-white">None: plain FTP (not encrypted)</option>
+                  </select>
+                  {newNode.protocol !== "ftp" && (
+                    <p className="text-[10px] text-zinc-500 ml-1">A certificate that no public authority vouches for is shown to you to check once, like an SSH host key.</p>
+                  )}
+                </div>
+              )}
+              {newNode.protocol === "ftp" && (
+                <p role="note" className="flex gap-2 px-3 py-2 rounded-lg border border-amber-500/25 bg-amber-500/10 text-[11px] leading-snug text-amber-200/90">
+                  <ShieldAlert size={13} className="shrink-0 mt-px" aria-hidden="true" />
+                  <span>Plain FTP isn't encrypted: the password and the files cross the network as they are. Pick FTPS if the server offers it, or go through an SSH server (below) to keep it private up to that server.</span>
+                </p>
+              )}
               {isTelnet && (
                 <p role="note" className="flex gap-2 px-3 py-2 rounded-lg border border-amber-500/25 bg-amber-500/10 text-[11px] leading-snug text-amber-200/90">
                   <ShieldAlert size={13} className="shrink-0 mt-px" aria-hidden="true" />
@@ -711,7 +770,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
               <div className="space-y-3 animate-in fade-in">
                 {!isVnc && <div className="space-y-1.5">
                   <label className="text-[11px] font-bold text-zinc-400 ml-1">Username</label>
-                  <input type="text" placeholder={isTelnet ? "For your reference" : "Ask when connecting"} value={newNode.username || ""} onChange={e => setNewNode({ ...newNode, username: e.target.value })} autoCapitalize="none" autoCorrect="off" spellCheck={false} className="w-full h-9 bg-[#1a1a1e] rounded-lg px-3 text-[12px] text-white border border-white/10 outline-none focus:border-primary/50 transition-all shadow-inner" />
+                  <input type="text" placeholder={isTelnet ? "For your reference" : ftp ? "Empty: anonymous" : "Ask when connecting"} value={newNode.username || ""} onChange={e => setNewNode({ ...newNode, username: e.target.value })} autoCapitalize="none" autoCorrect="off" spellCheck={false} className="w-full h-9 bg-[#1a1a1e] rounded-lg px-3 text-[12px] text-white border border-white/10 outline-none focus:border-primary/50 transition-all shadow-inner" />
                 </div>}
                 <div className="space-y-1.5">
                   <label className="text-[11px] font-bold text-zinc-400 ml-1">{isVnc ? "VNC password" : "Password"}</label>
@@ -801,7 +860,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
           </div>
 
           <div className="pt-5 border-t border-white/5 space-y-4">
-            {isSsh && (<>
+            {(isSsh || ftp) && (<>
             <div className="flex justify-between items-center">
               <label className="text-[11px] font-bold text-zinc-400">Proxy</label>
               <select className="bg-transparent text-[12px] font-bold text-zinc-300 outline-none cursor-pointer" value={newNode.proxyType} onChange={e => setNewNode({ ...newNode, proxyType: e.target.value })}>
@@ -1350,6 +1409,19 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
               >
                 From ~/.ssh/config
               </button>
+              {!IS_ANDROID && (
+                <button
+                  onClick={() => switchImportSource("filezilla")}
+                  disabled={importBusy}
+                  className={`h-7 px-3 rounded-lg text-[10.5px] font-bold uppercase tracking-wider transition-all ${
+                    importSource === "filezilla"
+                      ? "bg-primary/10 text-primary border border-primary/30"
+                      : "text-zinc-400 border border-white/5 hover:text-white hover:bg-white/[0.04]"
+                  }`}
+                >
+                  From FileZilla
+                </button>
+              )}
               <button
                 onClick={() => switchImportSource("paste")}
                 disabled={importBusy}
@@ -1372,6 +1444,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                     <ul className="mt-1.5 ml-4 list-disc space-y-0.5 text-zinc-500 text-[10.5px]">
                       <li><b className="text-zinc-300">PuTTY</b> — export via <code className="text-zinc-300">regedit /e ... HKCU\Software\SimonTatham\PuTTY\Sessions</code>, open the .reg file, paste its contents.</li>
                       <li><b className="text-zinc-300">MobaXterm</b> — Export sessions → open <code className="text-zinc-300">.mxtsessions</code>, paste.</li>
+                      <li><b className="text-zinc-300">FileZilla</b> — File → Export in FileZilla (or its <code className="text-zinc-300">sitemanager.xml</code>): open it, paste.</li>
                       <li><b className="text-zinc-300">JSON</b> — an array of <code className="text-zinc-300">{`{name,host,port,user}`}</code> or Termius-style <code className="text-zinc-300">{`{label,address,port,username}`}</code>.</li>
                     </ul>
                   </div>
@@ -1396,7 +1469,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
 
               {importLoading && (
                 <div className="p-6 text-center text-[12px] text-zinc-400">
-                  {importSource === "ssh" ? "Reading ~/.ssh/config…" : "Parsing pasted text…"}
+                  {importSource === "ssh" ? "Reading ~/.ssh/config…" : importSource === "filezilla" ? "Reading FileZilla's site list…" : "Parsing pasted text…"}
                 </div>
               )}
 
@@ -1450,11 +1523,17 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                             className="mt-0.5 accent-primary shrink-0"
                           />
                           <div className="flex-1 min-w-0">
-                            <div className="text-[12.5px] font-bold text-white truncate">
-                              {h.host_alias}
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="text-[12.5px] font-bold text-white truncate">{h.host_alias}</span>
+                              {h.protocol && (
+                                <span className={`shrink-0 px-1 rounded text-[9px] font-bold tracking-wider leading-[14px] border ${h.protocol === "ftp" ? "text-amber-300 bg-amber-500/10 border-amber-500/20" : "text-teal-300 bg-teal-500/10 border-teal-500/20"}`}>
+                                  {importKind(h)}
+                                </span>
+                              )}
                             </div>
                             <div className="text-[11px] font-mono text-zinc-400 truncate">
                               {h.user ? `${h.user}@` : ""}{h.hostname}:{h.port}
+                              {h.password && <span className="ml-2 font-sans text-zinc-500">with password</span>}
                             </div>
                             {(h.identity_file || h.proxy_jump) && (
                               <div className="mt-0.5 text-[10.5px] text-zinc-600 truncate">

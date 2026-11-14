@@ -47,6 +47,8 @@ import ProfilePanel from "./components/ProfilePanel";
 import { SessionView } from "./components/SessionView";
 import RdpSessionView from "./components/RdpSessionView";
 import TelnetSessionView from "./components/TelnetSessionView";
+import FtpSessionView from "./components/FtpSessionView";
+import { isFtp, serverProtocol, type ServerProtocol } from "./util/serverProtocol";
 import VncSessionView from "./components/VncSessionView";
 import MonitoringPanel from "./components/MonitoringPanel";
 import { ErrorBoundary } from "./ui/ErrorBoundary";
@@ -74,7 +76,7 @@ const SLIDE_OUT_MS = 500;
 // `serverUuid` is the saved server's sync id. It keys this device's Shell
 // button (see util/shellSync.ts). Quick connect leaves it unset.
 type Session = {
-  id: string; serverId: number; serverName: string; serverUuid?: string | null; protocol?: "ssh" | "rdp" | "telnet" | "vnc"; customName?: string; mirrors?: string; runOnConnect?: string; runOnConnectEvery?: boolean; runOnConnectHeld?: boolean;
+  id: string; serverId: number; serverName: string; serverUuid?: string | null; protocol?: ServerProtocol; customName?: string; mirrors?: string; runOnConnect?: string; runOnConnectEvery?: boolean; runOnConnectHeld?: boolean;
   quickAuth?: QuickAuth | null; initialTerminals?: SnapTerm[]; initialActiveIndex?: number;
 };
 const tabLabel = (s: Session) => s.customName || s.serverName;
@@ -296,8 +298,9 @@ function DesktopApp() {
   const defaultNode = {
     id: null as number | null,
     // "ssh", "rdp" (it opens in the system's RDP app), "telnet" (it opens
-    // in a terminal, over telnet) or "vnc" (its screen in the tab).
-    protocol: "ssh" as "ssh" | "rdp" | "telnet" | "vnc",
+    // in a terminal, over telnet), "vnc" (its screen in the tab) or "ftp",
+    // "ftps", "ftps-implicit" (its files in the tab).
+    protocol: "ssh" as ServerProtocol,
     // An RDP server's window and sharing on this device (util/rdpOptions).
     rdpOptions: { ...DEFAULT_RDP_OPTIONS },
     // An SSH server's keepalives and reconnecting on this device (util/sessionKeep).
@@ -963,7 +966,7 @@ function DesktopApp() {
       // Only an SSH server starts by itself. An RDP server would open an app,
       // and a telnet or VNC server waits until it is opened.
       const toStart = list.filter((s) => s.autostart && !isHeld(s) && !restoredIds.has(s.id) && (s.protocol ?? "ssh") === "ssh");
-      const base = (s: any): Session => ({ id: `session-${s.id}`, serverId: s.id, serverName: s.name, serverUuid: s.uuid ?? null, protocol: s.protocol === "rdp" || s.protocol === "telnet" || s.protocol === "vnc" ? s.protocol : "ssh", mirrors: s.mirrors });
+      const base = (s: any): Session => ({ id: `session-${s.id}`, serverId: s.id, serverName: s.name, serverUuid: s.uuid ?? null, protocol: serverProtocol(s.protocol), mirrors: s.mirrors });
       // A server whose address someone else changed in a shared profile isn't
       // reopened by itself: opening it by hand asks first (openServer).
       const isMoved = (s: any) => (s.held || []).some((i: string) => i.startsWith("moved:"));
@@ -1174,7 +1177,7 @@ function DesktopApp() {
         id: sessionId,
         serverId: server.id,
         serverName: server.name,
-        protocol: server.protocol === "rdp" || server.protocol === "telnet" || server.protocol === "vnc" ? server.protocol : "ssh",
+        protocol: serverProtocol(server.protocol),
         // Pass the raw mirrors JSON through to SessionView so the
         // MirrorsPanel can pre-populate "Saved on this node" without
         // another round-trip to the backend.
@@ -1201,6 +1204,24 @@ function DesktopApp() {
   // exactly as before even if the save fails; the persisted node is a
   // best-effort side effect the backend dedups by (host, port, username).
   const openQuickConnect = (auth: QuickAuth) => {
+    // An FTP server is saved first and then opened like any saved one: its tab
+    // connects by the saved server (ftp_connect), with the certificate check
+    // and the password prompt that come with it.
+    if (isFtp(auth.protocol)) {
+      setIsQuickConnectOpen(false);
+      const shown = auth.username ? `${auth.username}@${auth.host}:${auth.port}` : `${auth.host}:${auth.port}`;
+      addLog(`Quick connect → ${shown}`, "info");
+      invoke<number>("save_quick_connect_node", { auth })
+        .then(async (id) => {
+          const list = await invoke<any[]>("get_servers");
+          refreshServers();
+          bumpSync();
+          const server = list.find((s) => s.id === id);
+          if (server) await openServer(server);
+        })
+        .catch((e) => addLog(`QUICK_NODE_SAVE_FAILED: ${e}`, "error"));
+      return;
+    }
     const sessionId = `session-quick-${Date.now()}`;
     // No `user@` when the username is left blank (asked at connect).
     const displayName = auth.username
@@ -1242,7 +1263,7 @@ function DesktopApp() {
     }
     setNewNode({
       id: server.id,
-      protocol: server.protocol === "rdp" || server.protocol === "telnet" || server.protocol === "vnc" ? server.protocol : "ssh",
+      protocol: serverProtocol(server.protocol),
       rdpOptions: readRdpOptions(server.uuid),
       sessionKeep: readSessionKeep(server.uuid),
       vncOptions: readVncOptions(server.uuid),
@@ -2623,6 +2644,17 @@ function DesktopApp() {
                                 shown={isVisible && viewIsSession}
                                 onPromptChange={handlePromptChange}
                               />
+                            ) : isFtp(sess.protocol) ? (
+                              <FtpSessionView
+                                session={sess}
+                                profile={activeProfile}
+                                displayName={tabLabel(sess)}
+                                onClose={getCloseHandler(sess.id)}
+                                onStatusChange={handleSessionStatus}
+                                isActiveView={isFocused}
+                                shown={isVisible && viewIsSession}
+                                onPromptChange={handlePromptChange}
+                              />
                             ) : sess.protocol === "telnet" ? (
                               <TelnetSessionView
                                 session={sess}
@@ -3199,7 +3231,7 @@ function DesktopApp() {
             // `normalize_server_identity` enforces this again on the server
             // side as a belt-and-suspenders guarantee.
             const isInline = newNode.authType === "custom_pass" || newNode.authType === "custom_key";
-            // An RDP, telnet, or VNC server has a host, port, login (its own
+            // An RDP, telnet, VNC, or FTP server has a host, port, login (its own
             // or a saved one) and maybe an SSH server to go through; nothing
             // that runs over SSH (forwards, mirrors, autostart, a proxy, a
             // key). Its saved password is kept: an RDP server's for the
@@ -3208,7 +3240,10 @@ function DesktopApp() {
             const isRdp = newNode.protocol === "rdp";
             const isTelnet = newNode.protocol === "telnet";
             const isVnc = newNode.protocol === "vnc";
-            const payload = isRdp || isTelnet || isVnc ? {
+            // An FTP server: the same, its saved password for its login; it also
+            // keeps its proxy and its mirrors (they work over FTP too).
+            const ftpServer = isFtp(newNode.protocol);
+            const payload = isRdp || isTelnet || isVnc || ftpServer ? {
               name: newNode.name,
               host: newNode.host,
               port: newNode.port,
@@ -3216,14 +3251,14 @@ function DesktopApp() {
               password: newNode.authType === "custom_pass" ? (newNode.password || null) : null,
               credentialId: (newNode.authType === "vault" && newNode.credentialId) ? parseInt(newNode.credentialId) : null,
               folderId: newNode.folderId ? parseInt(newNode.folderId) : null,
-              proxyType: "none",
-              proxyHost: "",
-              proxyPort: 1080,
+              proxyType: ftpServer ? newNode.proxyType || "none" : "none",
+              proxyHost: ftpServer ? newNode.proxyHost || "" : "",
+              proxyPort: ftpServer ? newNode.proxyPort || 1080 : 1080,
               tunnels: [],
               authType: newNode.authType === "vault" ? "vault" : "custom_pass",
               keyId: null,
               autostart: false,
-              mirrors: [],
+              mirrors: ftpServer ? (newNode.mirrors || []) : [],
               color: newNode.color ?? null,
               preservePassword: !!newNode.id && !newNode.password_dirty,
             } : {
@@ -3285,9 +3320,9 @@ function DesktopApp() {
             } catch (e) {
               addLog(`SAVE_JUMP_HOST_FAILED: ${e}`, "error");
             }
-            // SSH, RDP, telnet or VNC: the same separate-write pattern.
+            // SSH, RDP, telnet, VNC or FTP: the same separate-write pattern.
             try {
-              await invoke("set_server_protocol", { id: savedId, value: isRdp ? "rdp" : isTelnet ? "telnet" : isVnc ? "vnc" : null, persist: false });
+              await invoke("set_server_protocol", { id: savedId, value: isRdp ? "rdp" : isTelnet ? "telnet" : isVnc ? "vnc" : ftpServer ? newNode.protocol : null, persist: false });
             } catch (e) {
               addLog(`SAVE_PROTOCOL_FAILED: ${e}`, "error");
             }
