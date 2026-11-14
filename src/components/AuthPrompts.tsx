@@ -52,7 +52,7 @@ export function AuthPrompts({
     {fingerprintPrompt && (() => {
       const isMismatch = !!fingerprintPrompt.mismatch;
       // An RDP server proves itself with a certificate, an SSH server with a key.
-      const isCert = fingerprintPrompt.keyType === "RDP certificate";
+      const isCert = fingerprintPrompt.keyType === "RDP certificate" || fingerprintPrompt.keyType === "FTPS certificate";
       const what = isCert ? "certificate" : "key";
       const tone = isMismatch
         ? "border-red-500/40 bg-red-500/10"

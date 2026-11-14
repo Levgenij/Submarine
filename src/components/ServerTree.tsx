@@ -624,7 +624,7 @@ function collectIds(tree: FolderTree): Set<number> {
   return out;
 }
 
-/** The RDP / TELNET / VNC tag of a server; null for SSH, the default. */
+/** The RDP / TELNET / VNC / FTP / FTPS tag of a server; null for SSH, the default. */
 export function protocolTag(s: any) {
   const tag =
     s.protocol === "rdp" ? { t: "RDP", c: "text-sky-300 bg-sky-500/10 border-sky-500/20", title: "RDP server" } :
@@ -633,6 +633,8 @@ export function protocolTag(s: any) {
       t: "VNC", c: "text-violet-300 bg-violet-500/10 border-violet-500/20",
       title: s.jump_host_id ? "Only the hop after the SSH server isn't encrypted" : "VNC server (not encrypted)",
     } :
+    s.protocol === "ftp" ? { t: "FTP", c: "text-amber-300 bg-amber-500/10 border-amber-500/20", title: "FTP server (not encrypted)" } :
+    s.protocol === "ftps" || s.protocol === "ftps-implicit" ? { t: "FTPS", c: "text-teal-300 bg-teal-500/10 border-teal-500/20", title: "FTPS server (FTP over TLS)" } :
     null;
   return tag && <span title={tag.title} className={`shrink-0 px-1 rounded text-[9px] font-bold tracking-wider leading-[14px] border ${tag.c}`}>{tag.t}</span>;
 }

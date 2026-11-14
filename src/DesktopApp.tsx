@@ -47,6 +47,7 @@ import ProfilePanel from "./components/ProfilePanel";
 import { SessionView } from "./components/SessionView";
 import RdpSessionView from "./components/RdpSessionView";
 import TelnetSessionView from "./components/TelnetSessionView";
+import { isFtp, serverProtocol, type ServerProtocol } from "./util/serverProtocol";
 import VncSessionView from "./components/VncSessionView";
 import MonitoringPanel from "./components/MonitoringPanel";
 import { ErrorBoundary } from "./ui/ErrorBoundary";
@@ -74,7 +75,7 @@ const SLIDE_OUT_MS = 500;
 // `serverUuid` is the saved server's sync id. It keys this device's Shell
 // button (see util/shellSync.ts). Quick connect leaves it unset.
 type Session = {
-  id: string; serverId: number; serverName: string; serverUuid?: string | null; protocol?: "ssh" | "rdp" | "telnet" | "vnc"; customName?: string; mirrors?: string; runOnConnect?: string; runOnConnectEvery?: boolean; runOnConnectHeld?: boolean;
+  id: string; serverId: number; serverName: string; serverUuid?: string | null; protocol?: ServerProtocol; customName?: string; mirrors?: string; runOnConnect?: string; runOnConnectEvery?: boolean; runOnConnectHeld?: boolean;
   quickAuth?: QuickAuth | null; initialTerminals?: SnapTerm[]; initialActiveIndex?: number;
 };
 const tabLabel = (s: Session) => s.customName || s.serverName;
@@ -297,7 +298,7 @@ function DesktopApp() {
     id: null as number | null,
     // "ssh", "rdp" (it opens in the system's RDP app), "telnet" (it opens
     // in a terminal, over telnet) or "vnc" (its screen in the tab).
-    protocol: "ssh" as "ssh" | "rdp" | "telnet" | "vnc",
+    protocol: "ssh" as ServerProtocol,
     // An RDP server's window and sharing on this device (util/rdpOptions).
     rdpOptions: { ...DEFAULT_RDP_OPTIONS },
     // An SSH server's keepalives and reconnecting on this device (util/sessionKeep).
@@ -963,7 +964,7 @@ function DesktopApp() {
       // Only an SSH server starts by itself. An RDP server would open an app,
       // and a telnet or VNC server waits until it is opened.
       const toStart = list.filter((s) => s.autostart && !isHeld(s) && !restoredIds.has(s.id) && (s.protocol ?? "ssh") === "ssh");
-      const base = (s: any): Session => ({ id: `session-${s.id}`, serverId: s.id, serverName: s.name, serverUuid: s.uuid ?? null, protocol: s.protocol === "rdp" || s.protocol === "telnet" || s.protocol === "vnc" ? s.protocol : "ssh", mirrors: s.mirrors });
+      const base = (s: any): Session => ({ id: `session-${s.id}`, serverId: s.id, serverName: s.name, serverUuid: s.uuid ?? null, protocol: serverProtocol(s.protocol), mirrors: s.mirrors });
       // A server whose address someone else changed in a shared profile isn't
       // reopened by itself: opening it by hand asks first (openServer).
       const isMoved = (s: any) => (s.held || []).some((i: string) => i.startsWith("moved:"));
@@ -1174,7 +1175,7 @@ function DesktopApp() {
         id: sessionId,
         serverId: server.id,
         serverName: server.name,
-        protocol: server.protocol === "rdp" || server.protocol === "telnet" || server.protocol === "vnc" ? server.protocol : "ssh",
+        protocol: serverProtocol(server.protocol),
         // Pass the raw mirrors JSON through to SessionView so the
         // MirrorsPanel can pre-populate "Saved on this node" without
         // another round-trip to the backend.
@@ -1242,7 +1243,7 @@ function DesktopApp() {
     }
     setNewNode({
       id: server.id,
-      protocol: server.protocol === "rdp" || server.protocol === "telnet" || server.protocol === "vnc" ? server.protocol : "ssh",
+      protocol: serverProtocol(server.protocol),
       rdpOptions: readRdpOptions(server.uuid),
       sessionKeep: readSessionKeep(server.uuid),
       vncOptions: readVncOptions(server.uuid),
@@ -3208,7 +3209,10 @@ function DesktopApp() {
             const isRdp = newNode.protocol === "rdp";
             const isTelnet = newNode.protocol === "telnet";
             const isVnc = newNode.protocol === "vnc";
-            const payload = isRdp || isTelnet || isVnc ? {
+            // An FTP server: the same, its saved password for its login; it also
+            // keeps its proxy and its mirrors (they work over FTP too).
+            const ftpServer = isFtp(newNode.protocol);
+            const payload = isRdp || isTelnet || isVnc || ftpServer ? {
               name: newNode.name,
               host: newNode.host,
               port: newNode.port,
@@ -3216,14 +3220,14 @@ function DesktopApp() {
               password: newNode.authType === "custom_pass" ? (newNode.password || null) : null,
               credentialId: (newNode.authType === "vault" && newNode.credentialId) ? parseInt(newNode.credentialId) : null,
               folderId: newNode.folderId ? parseInt(newNode.folderId) : null,
-              proxyType: "none",
-              proxyHost: "",
-              proxyPort: 1080,
+              proxyType: ftpServer ? newNode.proxyType || "none" : "none",
+              proxyHost: ftpServer ? newNode.proxyHost || "" : "",
+              proxyPort: ftpServer ? newNode.proxyPort || 1080 : 1080,
               tunnels: [],
               authType: newNode.authType === "vault" ? "vault" : "custom_pass",
               keyId: null,
               autostart: false,
-              mirrors: [],
+              mirrors: ftpServer ? (newNode.mirrors || []) : [],
               color: newNode.color ?? null,
               preservePassword: !!newNode.id && !newNode.password_dirty,
             } : {
@@ -3287,7 +3291,7 @@ function DesktopApp() {
             }
             // SSH, RDP, telnet or VNC: the same separate-write pattern.
             try {
-              await invoke("set_server_protocol", { id: savedId, value: isRdp ? "rdp" : isTelnet ? "telnet" : isVnc ? "vnc" : null, persist: false });
+              await invoke("set_server_protocol", { id: savedId, value: isRdp ? "rdp" : isTelnet ? "telnet" : isVnc ? "vnc" : ftpServer ? newNode.protocol : null, persist: false });
             } catch (e) {
               addLog(`SAVE_PROTOCOL_FAILED: ${e}`, "error");
             }
