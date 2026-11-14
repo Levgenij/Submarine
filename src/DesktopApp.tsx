@@ -1958,6 +1958,9 @@ function DesktopApp() {
         const currentMerges = targetIsActive ? mergedSessionIds : [];
         const others = sessions.filter(s => s.id !== targetId);
         const target = sessions.find(s => s.id === targetId);
+        // The saved server behind the tab, for Edit server. None for a quick
+        // connect (server 0), or once the server has been deleted.
+        const targetServer = target && target.serverId > 0 ? servers.find(sv => sv.id === target.serverId) : undefined;
         return (
         <>
           <div className="fixed inset-0 z-[60]" onClick={() => setTabMenu(null)} onContextMenu={(e) => { e.preventDefault(); setTabMenu(null); }} />
@@ -1982,6 +1985,15 @@ function DesktopApp() {
                 onClick={() => setTabMenu(m => m && { ...m, renaming: true })}
               >Rename tab</button>
             ))}
+            {targetServer && (
+              <button
+                className="w-full text-left px-3 py-1.5 hover:bg-primary/15 hover:text-primary text-zinc-200 flex items-center gap-2"
+                onClick={() => {
+                  setTabMenu(null);
+                  void handleEditNode(targetServer);
+                }}
+              >Edit server</button>
+            )}
             <button
               className="w-full text-left px-3 py-1.5 hover:bg-primary/15 hover:text-primary text-zinc-200 flex items-center gap-2"
               onClick={() => {
@@ -3223,6 +3235,14 @@ function DesktopApp() {
             setFormError("");
             refreshServers();
             bumpSync();
+            // A tab open on this server shows its new name (Edit server is in
+            // the tab's own menu). A tab given a name of its own keeps it.
+            if (newNode.id) {
+              const name = newNode.name;
+              setSessions(prev => prev.some(s => s.serverId === savedId && s.serverName !== name)
+                ? prev.map(s => (s.serverId === savedId ? { ...s, serverName: name } : s))
+                : prev);
+            }
             // If we just edited a node whose session is live, re-apply its saved
             // forwarding rules now so a changed/added tunnel comes up without a
             // manual reconnect. The backend cleared the stale tunnel cache when
