@@ -857,8 +857,6 @@ impl Store {
     /// Logs a call an outside agent made through the agent gateway: the same
     /// row as the assistant's, without a chat, with who asked and under which
     /// grant, and what Undo needs for a change, as for the assistant's.
-    // shortcut: used by the agent gateway (G1)
-    #[allow(dead_code)]
     pub fn log_agent_action(&mut self, e: &ActionEntry, agent: &str, grant: &str, undo: Option<&Undo>) -> Result<i64, String> {
         let t = now();
         self.conn.execute("DELETE FROM actions WHERE at < ?1", [t - ACTIONS_KEPT]).map_err(db_err)?;
@@ -886,8 +884,6 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
-    // shortcut: used by the agent gateway (G1)
-    #[allow(dead_code)]
     pub fn log_agent_event(&mut self, e: &AgentEvent) -> Result<(), String> {
         let t = now();
         self.conn.execute("DELETE FROM agent_events WHERE at < ?1", [t - ACTIONS_KEPT]).map_err(db_err)?;
@@ -901,8 +897,6 @@ impl Store {
     }
 
     /// The newest agent events.
-    // shortcut: used by the agent gateway (G1)
-    #[allow(dead_code)]
     pub fn agent_events(&self, limit: i64) -> Result<Vec<AgentEventView>, String> {
         let mut st = self
             .conn
@@ -1024,8 +1018,6 @@ pub struct ActionView {
 
 /// Something that happened between an outside agent and the user: a
 /// connection, a request, an answer, the end of a grant.
-// shortcut: used by the agent gateway (G1)
-#[allow(dead_code)]
 pub struct AgentEvent {
     /// connected, disconnected, asked, approved, denied, ended.
     pub kind: String,
@@ -1039,8 +1031,6 @@ pub struct AgentEvent {
     pub detail: String,
 }
 
-// shortcut: used by the agent gateway (G1)
-#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize)]
 pub struct AgentEventView {
     pub id: i64,

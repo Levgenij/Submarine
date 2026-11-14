@@ -46,6 +46,7 @@ mod rdp_share;
 mod term_filter;
 mod vault_backup;
 mod ai;
+mod gateway;
 mod vnc_client;
 mod screen_flow;
 mod screen_link;
@@ -6577,7 +6578,9 @@ async fn teardown_profile(
     // the returned Err and continue teardown — losing recent history is
     // preferable to leaking session state.
     // The assistant goes first: its runs stop, and its store is saved and
-    // dropped with its key (ai::profile_closing).
+    // dropped with its key (ai::profile_closing). Before it, what outside
+    // agents were given ends, while the log can still say so.
+    gateway::hub::profile_closing().await;
     ai::profile_closing(opened).await;
     let _ = save_vault_async(state).await;
 
@@ -19514,7 +19517,9 @@ async fn disconnect_session(
     let session_drag = session_drag_dir(&session_id)?;
     // The assistant's runs on this session stop first, while every connection
     // is still there: a running command gets TERM, since without a terminal
-    // the server doesn't stop it when the connection goes.
+    // the server doesn't stop it when the connection goes. The same for
+    // what an outside agent runs here: its grants on this session end.
+    gateway::hub::session_closing(&session_id).await;
     ai::session_closing(&session_id).await;
     // Invalidate any connect worker still handshaking for THIS key: bump the
     // generation before removing anything, so a late auth-success hits its
@@ -27989,6 +27994,14 @@ async fn clipboard_read_text(app: tauri::AppHandle) -> Result<String, String> {
 /// ship on both platforms — only the wrapping is different.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // `submarine mcp`: the program an AI agent starts to reach this app (the
+    // agent gateway's bridge). It talks to the running app and never becomes
+    // one: no window, no web view, no profile. Checked before anything else
+    // is set up, and it never returns.
+    #[cfg(desktop)]
+    if gateway::bridge::wanted() {
+        gateway::bridge::main();
+    }
     // Tauri 2 on Linux embeds webkit2gtk-4.1. Two failure modes have to be
     // headed off before the WebKit child process spawns, because once it's
     // up the env it inherited is the only one it sees:
@@ -28113,6 +28126,9 @@ pub fn run() {
         .setup(|app| {
             let cloud_state = cloud::CloudState::new(&app.handle());
             app.manage(cloud_state);
+            // The agent gateway: off unless this device's settings say on.
+            #[cfg(desktop)]
+            gateway::hub::setup(app.handle());
             // .rdp files an earlier run left behind.
             std::thread::spawn(rdp::clear_old_files);
             Ok(())
@@ -28138,6 +28154,8 @@ pub fn run() {
             ai::ai_last_chat, ai::ai_decide, ai::ai_level_get, ai::ai_level_set, ai::ai_always_list,
             ai::ai_always_remove, ai::ai_activity, ai::ai_terminal_replay, ai::ai_undo,
             ai::ai_level_info, ai::ai_server_levels, ai::ai_activity_clear, ai::ai_chat_stop, ai::ai_chat_continue, ai::ai_persist,
+            gateway::hub::gateway_overview, gateway::hub::gateway_configure, gateway::hub::gateway_approve, gateway::hub::gateway_deny,
+            gateway::hub::gateway_revoke, gateway::hub::gateway_disconnect, gateway::hub::gateway_decide, gateway::hub::gateway_events,
             check_db_exists, setup_master_db, persist_vault,
             quick_unlock::quick_unlock_support, quick_unlock::quick_unlock_status, quick_unlock::quick_unlock_enable,
             quick_unlock::quick_unlock_disable, quick_unlock::quick_unlock,
