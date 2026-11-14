@@ -44,7 +44,14 @@ type ImportedHost = {
   user: string;
   identity_file: string | null;
   proxy_jump: string | null;
+  // An FTP site from FileZilla's list: its kind and the password it kept.
+  protocol?: FtpProtocol;
+  password?: string;
 };
+
+// The kind a row says it is, for its badge.
+const importKind = (h: ImportedHost) =>
+  h.protocol === "ftp" ? "FTP" : h.protocol ? "FTPS" : "SSH";
 
 // What `import_ssh_key_file` hands back after putting a key file in the vault.
 type ImportedSshKey = {
@@ -164,7 +171,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
   // config (desktop only); `paste` = a text blob pasted from PuTTY /
   // MobaXterm / a JSON export — parsed by the auto-detecting Rust
   // command so the user doesn't have to say which client it came from.
-  const [importSource, setImportSource] = useState<"ssh" | "paste">("ssh");
+  const [importSource, setImportSource] = useState<"ssh" | "filezilla" | "paste">("ssh");
   const [importPasteText, setImportPasteText] = useState("");
 
   // Open the picker: fetch fresh from ~/.ssh/config every time so users who
@@ -212,17 +219,19 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
     }
   };
 
-  const switchImportSource = async (next: "ssh" | "paste") => {
+  const switchImportSource = async (next: "ssh" | "filezilla" | "paste") => {
     if (importBusy || importSource === next) return;
     setImportSource(next);
     setImportError(null);
     setImportNotice(null);
     setImportHosts([]);
     setImportSelected(new Set());
-    if (next === "ssh") {
+    if (next === "ssh" || next === "filezilla") {
       setImportLoading(true);
       try {
-        const hosts = await invoke<ImportedHost[]>("parse_ssh_config", { path: null });
+        const hosts = next === "ssh"
+          ? await invoke<ImportedHost[]>("parse_ssh_config", { path: null })
+          : await invoke<ImportedHost[]>("read_filezilla_sites");
         setImportHosts(hosts);
       } catch (e: any) {
         setImportError(typeof e === "string" ? e : (e?.message || String(e)));
@@ -287,10 +296,27 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
       ...new Set(importHosts.filter((h) => importSelected.has(h.host_alias) && h.identity_file).map((h) => h.identity_file as string)),
     ];
     let withKeys = true;
+    // FileZilla's site list keeps passwords: in a shared profile they would go
+    // to everyone it's shared with, so they are asked about too. The safe
+    // answer leaves them out (each server asks when connecting).
+    const withPasswordsAsked = importHosts.some((h) => importSelected.has(h.host_alias) && h.password);
+    const sharedProfile = keyFiles.length > 0 || withPasswordsAsked
+      ? await invoke<{ share_id: string | null }>("profile_share_status")
+          .then((s) => typeof s.share_id === "string" && s.share_id.length > 0)
+          .catch(() => false)
+      : false;
+    let withPasswords = true;
+    if (withPasswordsAsked && sharedProfile) {
+      withPasswords = await confirm({
+        title: "Add saved passwords to a shared profile?",
+        message: "This profile is shared. The passwords saved with these sites would go to everyone you share it with. Import the sites with them, or without (each one asks when connecting)?",
+        okLabel: "Import with passwords",
+        cancelLabel: "Without passwords",
+        safeDefault: true,
+      });
+    }
     if (keyFiles.length > 0) {
-      const shared = await invoke<{ share_id: string | null }>("profile_share_status")
-        .then((s) => typeof s.share_id === "string" && s.share_id.length > 0)
-        .catch(() => false);
+      const shared = sharedProfile;
       if (shared) {
         withKeys = await confirm({
           title: "Add your key files to a shared profile?",
@@ -329,15 +355,16 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
         }
       }
       try {
-        await invoke<number>("add_server", {
+        const id = await invoke<number>("add_server", {
           name: host.host_alias,
           host: host.hostname || host.host_alias,
-          port: host.port || 22,
+          port: host.port || (host.protocol ? USUAL_PORTS[host.protocol] : 22),
           // No user in the export (MobaXterm's <default>, an ssh_config
           // entry without User): leave it blank, so connecting asks
           // "Login as" - where empty still means root (#72).
           username: host.user ? host.user.trim() : "",
-          password: null,
+          // A password FileZilla kept (and, in a shared profile, allowed).
+          password: host.password && withPasswords && !key ? host.password : null,
           credentialId: null,
           folderId: null,
           proxyType: "none",
@@ -351,6 +378,10 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
           color: null,
           persist: false,
         });
+        // An FTP site from FileZilla's list: its kind goes with it.
+        if (host.protocol) {
+          await invoke("set_server_protocol", { id, value: host.protocol, persist: false });
+        }
         ok++;
       } catch (e: any) {
         failed++;
@@ -507,7 +538,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                 PuTTY / MobaXterm / JSON" source that doesn't need a local
                 ~/.ssh/config. The SSH-config tab still errors gracefully
                 there — the user just picks the paste tab. */}
-            {!isEditMode && isSsh && (
+            {!isEditMode && (isSsh || ftp) && (
               <button
                 onClick={openImportModal}
                 title="Import from ~/.ssh/config"
@@ -1378,6 +1409,19 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
               >
                 From ~/.ssh/config
               </button>
+              {!IS_ANDROID && (
+                <button
+                  onClick={() => switchImportSource("filezilla")}
+                  disabled={importBusy}
+                  className={`h-7 px-3 rounded-lg text-[10.5px] font-bold uppercase tracking-wider transition-all ${
+                    importSource === "filezilla"
+                      ? "bg-primary/10 text-primary border border-primary/30"
+                      : "text-zinc-400 border border-white/5 hover:text-white hover:bg-white/[0.04]"
+                  }`}
+                >
+                  From FileZilla
+                </button>
+              )}
               <button
                 onClick={() => switchImportSource("paste")}
                 disabled={importBusy}
@@ -1400,6 +1444,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                     <ul className="mt-1.5 ml-4 list-disc space-y-0.5 text-zinc-500 text-[10.5px]">
                       <li><b className="text-zinc-300">PuTTY</b> — export via <code className="text-zinc-300">regedit /e ... HKCU\Software\SimonTatham\PuTTY\Sessions</code>, open the .reg file, paste its contents.</li>
                       <li><b className="text-zinc-300">MobaXterm</b> — Export sessions → open <code className="text-zinc-300">.mxtsessions</code>, paste.</li>
+                      <li><b className="text-zinc-300">FileZilla</b> — File → Export in FileZilla (or its <code className="text-zinc-300">sitemanager.xml</code>): open it, paste.</li>
                       <li><b className="text-zinc-300">JSON</b> — an array of <code className="text-zinc-300">{`{name,host,port,user}`}</code> or Termius-style <code className="text-zinc-300">{`{label,address,port,username}`}</code>.</li>
                     </ul>
                   </div>
@@ -1424,7 +1469,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
 
               {importLoading && (
                 <div className="p-6 text-center text-[12px] text-zinc-400">
-                  {importSource === "ssh" ? "Reading ~/.ssh/config…" : "Parsing pasted text…"}
+                  {importSource === "ssh" ? "Reading ~/.ssh/config…" : importSource === "filezilla" ? "Reading FileZilla's site list…" : "Parsing pasted text…"}
                 </div>
               )}
 
@@ -1478,11 +1523,17 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                             className="mt-0.5 accent-primary shrink-0"
                           />
                           <div className="flex-1 min-w-0">
-                            <div className="text-[12.5px] font-bold text-white truncate">
-                              {h.host_alias}
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="text-[12.5px] font-bold text-white truncate">{h.host_alias}</span>
+                              {h.protocol && (
+                                <span className={`shrink-0 px-1 rounded text-[9px] font-bold tracking-wider leading-[14px] border ${h.protocol === "ftp" ? "text-amber-300 bg-amber-500/10 border-amber-500/20" : "text-teal-300 bg-teal-500/10 border-teal-500/20"}`}>
+                                  {importKind(h)}
+                                </span>
+                              )}
                             </div>
                             <div className="text-[11px] font-mono text-zinc-400 truncate">
                               {h.user ? `${h.user}@` : ""}{h.hostname}:{h.port}
+                              {h.password && <span className="ml-2 font-sans text-zinc-500">with password</span>}
                             </div>
                             {(h.identity_file || h.proxy_jump) && (
                               <div className="mt-0.5 text-[10.5px] text-zinc-600 truncate">
