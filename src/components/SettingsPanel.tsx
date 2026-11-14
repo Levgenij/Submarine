@@ -9,6 +9,8 @@ import {
   ShellSyncPair, localPathProblem, readShellSyncPairs, readShellSyncServers, remotePathProblem,
   setShellSyncServer, writeShellSyncPairs,
 } from "../util/shellSync";
+import { AiSettings } from "./ai/AiSettings";
+import { AgentSettings } from "./agents/AgentSettings";
 import FontPicker from "./FontPicker";
 import CopyValue from "./CopyValue";
 import { loadInstalledFonts } from "../util/systemFonts";
@@ -17,7 +19,7 @@ import {
   CUSTOM_THEME_ID, DEFAULT_THEME_ID, SCHEMES, TerminalScheme, XTERM_ANSI,
   parseWindowsTerminalScheme, schemeToWindowsTerminalJson,
 } from "../util/terminalTheme";
-import { IS_ANDROID } from "../util/platform";
+import { IS_ANDROID, IS_MOBILE } from "../util/platform";
 
 // Where this install keeps its data (see src-tauri/src/portable.rs). `portable`
 // means a `submarine-data` folder next to the executable is in use; `warning`
@@ -699,7 +701,7 @@ function SshConfigSetting({ settings, setSettings }: any) {
   );
 }
 
-const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any) => {
+const SettingsPanel = ({ settings, setSettings, onOpenLogs, onOpenAiChats, onOpenAgents, servers = [] }: any) => {
   const accentColors = [
     { name: 'Light Blue', value: '#60a5fa' },
     { name: 'Sky', value: '#38bdf8' },
@@ -884,6 +886,11 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs, servers = [] }: any)
             </div>
           </section>
         )}
+
+        <AiSettings servers={servers} onOpenChats={onOpenAiChats} />
+
+        {/* Agents on this computer reach servers through Submarine: desktop only. */}
+        {!IS_MOBILE && <AgentSettings onOpenPanel={onOpenAgents} />}
 
         {/* Cloud Section */}
         <section className="break-inside-avoid space-y-3 mb-4 sm:mb-8">

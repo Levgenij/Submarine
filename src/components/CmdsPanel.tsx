@@ -6,7 +6,7 @@ import { Play, RefreshCw, Search, X, Terminal, StickyNote, ClipboardCopy, Chevro
 import { CMD_HISTORY_CHANGED, relTime, type CmdHistoryEntry } from "./HistorySearchOverlay";
 import { useConfirm } from "../ui/confirm";
 import { serverRowChanged } from "../util/serverJson";
-import { pasteIntoTerminal, withoutPasteControls } from "../util/pasteText";
+import { writeToTerminal } from "../util/pasteText";
 
 // Side panel that opens from a terminal session and surfaces *both* the
 // user's saved Quick Commands and their Notes. Two patterns for editing:
@@ -364,32 +364,13 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
     }
   };
 
-  // Put `text` in the active terminal as a paste: no control characters, and
-  // bracketed when the program there asked for that. `execute=true` presses
-  // Enter after it so the shell runs it; false leaves the cursor at the end so
-  // the user can review / edit before pressing Enter themselves. Library text
-  // isn't typed here (in a shared profile it can be anyone's) and a card shows
-  // only the start of it, so what the card can't show is shown whole first:
-  // more than one line, a line with a run of blanks, or a line to be run that
-  // the card cuts short (`cut`). A long line that is only pasted can be read at
-  // the prompt before anything runs.
-  const writeToTerminal = async (text: string, execute: boolean, cut = false) => {
-    if (!activeTab) return;
-    const clean = withoutPasteControls(text).replace(/[\r\n]+$/, "");
-    if (!clean) return;
-    const lines = clean.split(/\r\n|\r|\n/).length;
-    if (lines > 1 || cut || /[ \t]{16,}/.test(clean)) {
-      const what = lines > 1 ? `these ${lines} lines` : "this line";
-      const ok = await confirm({
-        title: execute ? `Run ${what}?` : `Paste ${what}?`,
-        message: clean,
-        okLabel: execute ? "Run" : "Paste",
-        safeDefault: true,
-      });
-      if (!ok) return;
-    }
-    pasteIntoTerminal({ terminalId: activeTab, text: clean, enter: execute });
-  };
+  // Put `text` in the active terminal as a paste (util/pasteText).
+  // `execute=true` presses Enter after it so the shell runs it; false leaves
+  // the cursor at the end so the user can review / edit before pressing Enter
+  // themselves. A card shows only the start of a command: `cut` says its line
+  // was cut short there.
+  const toTerminal = (text: string, execute: boolean, cut = false) =>
+    void writeToTerminal({ terminalId: activeTab, text, enter: execute, cut, confirm });
 
   const copyToClipboard = async (text: string) => {
     try { await navigator.clipboard.writeText(text); }
@@ -732,14 +713,14 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
                     </div>
                     <div className="flex items-center gap-1.5 shrink-0">
                       <button
-                        onClick={(e) => writeToTerminal(h.command, true, cutOnCard(e.currentTarget))}
+                        onClick={(e) => toTerminal(h.command, true, cutOnCard(e.currentTarget))}
                         className="w-7 h-7 rounded-lg bg-primary/15 text-primary border border-primary/40 hover:bg-primary hover:text-zinc-950 hover:border-primary flex items-center justify-center transition-all"
                         title="Run in active terminal (writes + Enter)"
                       >
                         <Play size={12} fill="currentColor" />
                       </button>
                       <button
-                        onClick={() => writeToTerminal(h.command, false)}
+                        onClick={() => toTerminal(h.command, false)}
                         className="w-7 h-7 rounded-lg bg-white/[0.03] border border-white/10 hover:bg-white/10 hover:border-white/20 text-zinc-300 hover:text-white flex items-center justify-center transition-all"
                         title="Paste into active terminal (no Enter)"
                       >
@@ -900,14 +881,14 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
                       </div>
                       <div className="flex items-center gap-1.5 shrink-0">
                         <button
-                          onClick={(e) => writeToTerminal(c.content, true, cutOnCard(e.currentTarget))}
+                          onClick={(e) => toTerminal(c.content, true, cutOnCard(e.currentTarget))}
                           className="w-7 h-7 rounded-lg bg-primary/15 text-primary border border-primary/40 hover:bg-primary hover:text-zinc-950 hover:border-primary flex items-center justify-center transition-all"
                           title="Run in active terminal (writes + Enter)"
                         >
                           <Play size={12} fill="currentColor" />
                         </button>
                         <button
-                          onClick={() => writeToTerminal(c.content, false)}
+                          onClick={() => toTerminal(c.content, false)}
                           className="w-7 h-7 rounded-lg bg-white/[0.03] border border-white/10 hover:bg-white/10 hover:border-white/20 text-zinc-300 hover:text-white flex items-center justify-center transition-all"
                           title="Paste into active terminal (no Enter)"
                         >
@@ -1001,7 +982,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
                         <ClipboardCopy size={11} /> Copy
                       </button>
                       <button
-                        onClick={() => writeToTerminal(edit.body || "", false)}
+                        onClick={() => toTerminal(edit.body || "", false)}
                         className="flex-1 h-7 min-w-[64px] rounded-lg bg-white/[0.04] border border-white/10 hover:bg-white/10 hover:border-white/20 text-zinc-300 hover:text-white flex items-center justify-center gap-1.5 text-[10px] font-bold transition-all"
                         title="Paste body into active terminal (no Enter)"
                       >

@@ -23,3 +23,6 @@ export const IS_WINDOWS: boolean =
 // use — some UI may want to differentiate a browser preview from packaged app.
 export const IS_TAURI: boolean =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+// The fork has no iOS, so mobile is Android.
+export const IS_MOBILE = IS_ANDROID;

@@ -1,4 +1,4 @@
-import { Search, Plus, Server, Globe, Folder, FolderPlus, ChevronLeft, ChevronRight, ChevronDown, Trash2, Edit2, Zap, Check, X, Copy, GripVertical, KeyRound, ShieldAlert, ArrowUp, ArrowDown, LayoutGrid, ListTree, ArrowDownAZ, FolderTree } from "lucide-react";
+import { Search, Plus, Server, Globe, Folder, FolderPlus, ChevronLeft, ChevronRight, ChevronDown, Trash2, Edit2, Zap, Check, X, Copy, GripVertical, KeyRound, ShieldAlert, ArrowUp, ArrowDown, LayoutGrid, ListTree, ArrowDownAZ, FolderTree, Sparkles } from "lucide-react";
 import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, useId } from "react";
 import { createPortal } from "react-dom";
 import { useConfirm } from "../ui/confirm";
@@ -10,6 +10,8 @@ import { SORT_KEYS, sortServers, groupByLetter, type SortKey, type SortDir } fro
 import { useLastConnected } from "../util/lastConnected";
 import { onRovingKeyDown } from "../ui/rovingKeys";
 import { ServerTree, protocolTag } from "./ServerTree";
+import { ai, AI_LEVEL_EVENT, type Level } from "../util/aiApi";
+import { LevelMenu } from "./ai/LevelPicker";
 
 // How the list is shown, per device: Cards or Tree, the order, and whether
 // Cards split a name-sorted list into lettered groups.
@@ -33,6 +35,25 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp, onActiveFolderChange, onOpenServer, onEditServer, onAddClick, onQuickConnect, onRemoveServer, onRemoveFolder, onRenameFolder, onCreateFolder, onMoveServer, onMoveFolder, onCloneServer, onReorderServers, profile, keyChange, onAcceptKey, onAllowHeld, shareGrant, onUnlockSharing, heldDeletions, onResolveDeletions, isMobile }: any) => {
   const [search, setSearch] = useState("");
+  // The AI assistant's level per server, for the red mark on Auto and Full
+  // access. Only servers off the default are listed, and none when the
+  // assistant was never used: an error just leaves the marks off.
+  const [aiLevels, setAiLevels] = useState<Map<string, Level>>(() => new Map());
+  useEffect(() => {
+    let latest = 0;
+    const load = () => {
+      const n = ++latest;
+      ai.serverLevels()
+        .then((list) => { if (n === latest) setAiLevels(new Map(list.map((x) => [x.server_uuid, x.level]))); })
+        .catch(() => {});
+    };
+    load();
+    window.addEventListener(AI_LEVEL_EVENT, load);
+    return () => { latest = -1; window.removeEventListener(AI_LEVEL_EVENT, load); };
+  }, []);
+  // The card whose "AI permission level..." menu is open, and its button.
+  const [aiMenu, setAiMenu] = useState<{ uuid: string; name: string; anchor: HTMLElement } | null>(null);
+  const closeAiMenu = useCallback(() => setAiMenu(null), []);
   // Changes someone else made in a shared profile that this device holds
   // back until its user allows them (see HeldReview).
   const heldCount: number = (servers || []).reduce((n: number, s: any) => n + (s.held?.length || 0), 0);
@@ -525,6 +546,11 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
   const renderServer = (s: any) => {
     const accent = s.color || 'rgb(var(--primary))';
     const monogram = (s.name || '').trim().charAt(0).toUpperCase();
+    const aiLevel: Level | undefined = s.uuid ? aiLevels.get(s.uuid) : undefined;
+    // The assistant works in SSH and FTP sessions. A server with a level set
+    // keeps the item, so the level can still be changed back.
+    const aiOffered = !!s.uuid && (!['rdp', 'telnet', 'vnc'].includes(s.protocol) || aiLevel !== undefined);
+    const aiMenuOpen = !!aiMenu && aiMenu.uuid === s.uuid;
     if (dragId === s.id) {
       return (
         <div
@@ -576,6 +602,18 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
             <button type="button" className="max-w-full truncate text-left rounded outline-none focus-visible:ring-2 focus-visible:ring-primary/60">{s.name}</button>
           </h3>
           <div className="flex items-center gap-1 mt-0.5">
+            {/* Auto or Full access: red, like the SFTP root badge. */}
+            {(aiLevel === 'auto' || aiLevel === 'full') && (
+              <span
+                title={aiLevel === 'full'
+                  ? "Full access: the AI assistant runs every command on this server without asking, until the session tab closes"
+                  : "Auto: the AI assistant runs commands on this server without asking, except risky ones"}
+                className="shrink-0 inline-flex items-center gap-0.5 px-1 rounded text-[9px] font-black uppercase tracking-wider leading-[14px] text-rose-200 bg-rose-500/20 border border-rose-500/50"
+              >
+                <ShieldAlert size={9} className="shrink-0" />
+                {aiLevel === 'full' ? 'AI full' : 'AI auto'}
+              </span>
+            )}
             {protocolTag(s) ?? <Globe size={10} className="text-zinc-400 shrink-0" />}
             <span className="text-[10.5px] text-zinc-300 font-mono truncate">{s.host}</span>
           </div>
@@ -583,7 +621,23 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
 
         {/* Actions: absolute + hover-revealed on desktop so the name gets the
             full width; inline + always-visible on mobile (no hover there). */}
-        <div className="flex items-center gap-0.5 shrink-0 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-has-[:focus-visible]:opacity-100 [@media(hover:none)]:!opacity-100 sm:absolute sm:right-1.5 sm:top-1/2 sm:-translate-y-1/2 sm:pl-8 sm:bg-gradient-to-l sm:from-[#121216] sm:via-[#121216] sm:to-transparent transition-all duration-200">
+        <div className={`flex items-center gap-0.5 shrink-0 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:group-has-[:focus-visible]:opacity-100 [@media(hover:none)]:!opacity-100 sm:absolute sm:right-1.5 sm:top-1/2 sm:-translate-y-1/2 sm:pl-8 sm:bg-gradient-to-l sm:from-[#121216] sm:via-[#121216] sm:to-transparent transition-all duration-200 ${aiMenuOpen ? '!opacity-100' : ''}`}>
+          {aiOffered && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                const anchor = e.currentTarget;
+                setAiMenu(aiMenuOpen ? null : { uuid: s.uuid, name: s.name, anchor });
+              }}
+              title="AI permission level..."
+              aria-label="AI permission level..."
+              aria-haspopup="menu"
+              aria-expanded={aiMenuOpen}
+              className={`${isMobile ? 'h-10 px-2 flex items-center' : 'p-1.5'} rounded-lg text-zinc-500 hover:text-primary hover:bg-white/5 transition-all`}
+            >
+              <Sparkles size={13} />
+            </button>
+          )}
           {onCloneServer && (
             <button
               onClick={(e) => { e.stopPropagation(); onCloneServer(s.id); }}
@@ -1158,6 +1212,20 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
           </div>
         </div>,
         document.body
+      )}
+
+      {/* A card's AI level menu. Out here, not in the card: a click in it
+          would bubble to the card and open the server. */}
+      {aiMenu && (
+        <LevelMenu
+          key={aiMenu.uuid}
+          serverUuid={aiMenu.uuid}
+          serverName={aiMenu.name}
+          current={aiLevels.get(aiMenu.uuid) ?? 'ask'}
+          anchor={aiMenu.anchor}
+          compact={!!isMobile}
+          onClose={closeAiMenu}
+        />
       )}
     </div>
   );

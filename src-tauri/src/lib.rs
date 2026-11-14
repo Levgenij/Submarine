@@ -45,6 +45,8 @@ mod ftp_sftp;
 mod rdp_share;
 mod term_filter;
 mod vault_backup;
+mod ai;
+mod gateway;
 mod vnc_client;
 mod screen_flow;
 mod screen_link;
@@ -132,7 +134,7 @@ impl DbState {
 
     /// The current generation. Read it while holding `conn`'s lock, so it
     /// names the profile that lock gives access to.
-    fn generation_now(&self) -> u64 {
+    pub(crate) fn generation_now(&self) -> u64 {
         self.generation.load(std::sync::atomic::Ordering::SeqCst)
     }
 
@@ -348,7 +350,7 @@ fn derive_key(password: &str, salt_bytes: &[u8]) -> Result<[u8; 32], String> {
     Ok(key)
 }
 
-fn encrypt_with_key(plaintext: &[u8], key: &[u8; 32]) -> Result<(Vec<u8>, [u8; NONCE_LEN]), String> {
+pub(crate) fn encrypt_with_key(plaintext: &[u8], key: &[u8; 32]) -> Result<(Vec<u8>, [u8; NONCE_LEN]), String> {
     let cipher = Aes256Gcm::new(key.into());
     let mut nonce_bytes = [0u8; NONCE_LEN];
     rand::rng().fill_bytes(&mut nonce_bytes);
@@ -357,7 +359,7 @@ fn encrypt_with_key(plaintext: &[u8], key: &[u8; 32]) -> Result<(Vec<u8>, [u8; N
     Ok((ciphertext, nonce_bytes))
 }
 
-fn decrypt_with_key(ciphertext: &[u8], nonce_bytes: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
+pub(crate) fn decrypt_with_key(ciphertext: &[u8], nonce_bytes: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
     let nonce = Nonce::try_from(nonce_bytes).map_err(|_| "[CRYPTO] NONCE_LEN_INVALID".to_string())?;
     let cipher = Aes256Gcm::new(key.into());
     cipher.decrypt(&nonce, ciphertext)
@@ -384,7 +386,7 @@ fn parse_vault_blob(data: &[u8]) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> 
 /// Copies `data` into a sqlite-allocated buffer wrapped in `OwnedData`.
 /// `Connection::deserialize` requires a buffer allocated by `sqlite3_malloc`
 /// because it frees it via `SQLITE_DESERIALIZE_FREEONCLOSE`.
-fn to_sqlite_owned(data: &[u8]) -> Result<OwnedData, String> {
+pub(crate) fn to_sqlite_owned(data: &[u8]) -> Result<OwnedData, String> {
     let sz = data.len();
     let raw = unsafe { ffi::sqlite3_malloc64(sz as u64) } as *mut u8;
     let ptr = NonNull::new(raw).ok_or("[DATABASE] SQLITE_MALLOC_FAILED")?;
@@ -407,7 +409,7 @@ fn write_vault_blob(salt: &[u8; SALT_LEN], nonce: &[u8; NONCE_LEN], ciphertext: 
 /// Compress the plaintext SQLite serialisation for vault v2 writes.
 /// Errors here are surfaced as crypto-domain errors because the caller's
 /// invariant ("save the DB") is what's broken, not just I/O.
-fn vault_compress(plaintext: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn vault_compress(plaintext: &[u8]) -> Result<Vec<u8>, String> {
     zstd::stream::encode_all(plaintext, VAULT_COMPRESS_LEVEL)
         .map_err(|e| format!("[VAULT] COMPRESS_FAILED: {}", e))
 }
@@ -485,7 +487,7 @@ fn write_new_profile_file(dst: &Path, bytes: &[u8], name: &str) -> Result<(), St
 /// generous max-size guard so a corrupt or hostile file can't make us
 /// allocate gigabytes — a real Submarine SQLite snapshot is well under
 /// 64 MiB even with thousands of nodes.
-fn vault_decompress(compressed: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn vault_decompress(compressed: &[u8]) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     let mut decoder = zstd::stream::Decoder::new(compressed)
         .map_err(|e| format!("[VAULT] DECOMPRESS_INIT_FAILED: {}", e))?;
@@ -558,10 +560,17 @@ fn save_vault_blocking(
     let compressed = Zeroizing::new(vault_compress(&*serialized)?);
     let (ciphertext, nonce) = encrypt_with_key(&compressed, key)?;
     let blob = write_vault_blob(salt, &nonce, &ciphertext);
-    // Atomic write: tmp -> fsync -> rename. A crash / power loss in the
-    // middle of a direct fs::write would leave the vault truncated, and
-    // every saved credential would be unrecoverable on next launch.
-    let tmp_path = path.with_extension("submarine.tmp");
+    write_atomic(path, &path.with_extension("submarine.tmp"), &blob)
+}
+
+/// Atomic write: tmp -> fsync -> rename. A crash / power loss in the middle of
+/// a direct fs::write would leave the file truncated, and for the vault every
+/// saved credential would be unrecoverable on next launch. `tmp_path` is the
+/// caller's: each file that is saved this way needs a temp name of its own, or
+/// two saves at once would move one file's bytes over the other (the AI store,
+/// `<name>.submarine-ai`, would get the vault's own `<name>.submarine.tmp` from
+/// `with_extension`).
+pub(crate) fn write_atomic(path: &Path, tmp_path: &Path, blob: &[u8]) -> Result<(), String> {
     {
         use std::io::Write as _;
         // Drop any tmp left behind by a crashed save. Without this the
@@ -6568,6 +6577,11 @@ async fn teardown_profile(
     // isn't in a saveable state (partial init, crypto error) just log via
     // the returned Err and continue teardown — losing recent history is
     // preferable to leaking session state.
+    // The assistant goes first: its runs stop, and its store is saved and
+    // dropped with its key (ai::profile_closing). Before it, what outside
+    // agents were given ends, while the log can still say so.
+    gateway::hub::profile_closing().await;
+    ai::profile_closing(opened).await;
     let _ = save_vault_async(state).await;
 
     // 1. Stop monitor pollers: each is told to stop (one waiting on a server
@@ -6712,6 +6726,11 @@ async fn delete_profile(app_handle: tauri::AppHandle, name: String, state: tauri
     if let ProfileLock::New(probe) = try_lock_file(&lock_path)? {
         drop(probe);
     }
+    // The assistant's store beside it (keys, chats) and its own temp file go
+    // first: one that can't be removed fails the delete while the profile is
+    // still there to try again. A copy still in memory goes without being
+    // saved.
+    ai::delete_files(&path)?;
     if path.exists() {
         fs::remove_file(&path)
             .map_err(|e| format!("[FILE] DELETE_PROFILE_FAILED at {:?}: {}", path, e))?;
@@ -19014,6 +19033,7 @@ async fn ftp_connect(
             home: control.home.clone(),
             mlsd: control.features.mlst,
             mdtm: control.features.mdtm,
+            user: user.clone(),
         };
         let link = ftp_sftp::Link { dial, port, security, tls, cert, ca_valid, user, password };
         // No connection can be made any more: the tab hears it once.
@@ -19495,6 +19515,12 @@ async fn disconnect_session(
     // A refused id fails the disconnect before any teardown, so nothing is deleted.
     let session_temp_dir = session_sftp_dir(&session_id)?;
     let session_drag = session_drag_dir(&session_id)?;
+    // The assistant's runs on this session stop first, while every connection
+    // is still there: a running command gets TERM, since without a terminal
+    // the server doesn't stop it when the connection goes. The same for
+    // what an outside agent runs here: its grants on this session end.
+    gateway::hub::session_closing(&session_id).await;
+    ai::session_closing(&session_id).await;
     // Invalidate any connect worker still handshaking for THIS key: bump the
     // generation before removing anything, so a late auth-success hits its
     // "still wanted?" guard and drops instead of re-registering a transport the
@@ -27968,6 +27994,14 @@ async fn clipboard_read_text(app: tauri::AppHandle) -> Result<String, String> {
 /// ship on both platforms — only the wrapping is different.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // `submarine mcp`: the program an AI agent starts to reach this app (the
+    // agent gateway's bridge). It talks to the running app and never becomes
+    // one: no window, no web view, no profile. Checked before anything else
+    // is set up, and it never returns.
+    #[cfg(desktop)]
+    if gateway::bridge::wanted() {
+        gateway::bridge::main();
+    }
     // Tauri 2 on Linux embeds webkit2gtk-4.1. Two failure modes have to be
     // headed off before the WebKit child process spawns, because once it's
     // up the env it inherited is the only one it sees:
@@ -28092,6 +28126,9 @@ pub fn run() {
         .setup(|app| {
             let cloud_state = cloud::CloudState::new(&app.handle());
             app.manage(cloud_state);
+            // The agent gateway: off unless this device's settings say on.
+            #[cfg(desktop)]
+            gateway::hub::setup(app.handle());
             // .rdp files an earlier run left behind.
             std::thread::spawn(rdp::clear_old_files);
             Ok(())
@@ -28110,6 +28147,15 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            ai::ai_store_notice, ai::ai_providers_list, ai::ai_provider_save, ai::ai_provider_delete,
+            ai::ai_consent, ai::ai_consent_withdraw, ai::ai_provider_test, ai::ai_models, ai::ai_effort_levels,
+            ai::ai_chats_list, ai::ai_chat_create, ai::ai_chat_load, ai::ai_chat_settings, ai::ai_chat_rename,
+            ai::ai_chat_delete, ai::ai_chats_delete_all, ai::ai_send, ai::ai_retry, ai::ai_stop, ai::ai_stop_session,
+            ai::ai_last_chat, ai::ai_decide, ai::ai_level_get, ai::ai_level_set, ai::ai_always_list,
+            ai::ai_always_remove, ai::ai_activity, ai::ai_terminal_replay, ai::ai_undo,
+            ai::ai_level_info, ai::ai_server_levels, ai::ai_activity_clear, ai::ai_chat_stop, ai::ai_chat_continue, ai::ai_persist,
+            gateway::hub::gateway_overview, gateway::hub::gateway_configure, gateway::hub::gateway_approve, gateway::hub::gateway_deny,
+            gateway::hub::gateway_revoke, gateway::hub::gateway_disconnect, gateway::hub::gateway_decide, gateway::hub::gateway_events,
             check_db_exists, setup_master_db, persist_vault,
             quick_unlock::quick_unlock_support, quick_unlock::quick_unlock_status, quick_unlock::quick_unlock_enable,
             quick_unlock::quick_unlock_disable, quick_unlock::quick_unlock,
@@ -28206,6 +28252,8 @@ pub fn run() {
                 // since the last save (cmd_history_add doesn't save). With no
                 // profile open there is nothing to save, and this says so.
                 let _ = save_vault_internal(&_app.state::<DbState>());
+                // And the assistant's store (chats, settings).
+                ai::save_on_exit();
                 // The live-edit and drag copies this run staged go with it.
                 sweep_app_temp(true);
             }

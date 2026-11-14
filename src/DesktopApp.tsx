@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -31,7 +31,7 @@ import { AUTO_RECONNECT_KEY, DEFAULT_SESSION_KEEP, SEND_KEEPALIVES_KEY, forgetSe
 import { USE_SSH_CONFIG_KEY, readUseSshConfig } from "./util/sshConfig";
 import { DEFAULT_RDP_OPTIONS, forgetRdpOptions, readRdpOptions, writeRdpOptions } from "./util/rdpOptions";
 import { useIsNarrow } from "./hooks/useViewport";
-import { IS_ANDROID } from "./util/platform";
+import { IS_ANDROID, IS_MOBILE } from "./util/platform";
 import { DEFAULT_VNC_OPTIONS, forgetVncOptions, readVncOptions, writeVncOptions } from "./util/vncOptions";
 import { Sidebar } from "./components/Sidebar";
 import { NodeGrid } from "./components/NodeGrid";
@@ -51,6 +51,11 @@ import FtpSessionView from "./components/FtpSessionView";
 import { isFtp, serverProtocol, type ServerProtocol } from "./util/serverProtocol";
 import VncSessionView from "./components/VncSessionView";
 import MonitoringPanel from "./components/MonitoringPanel";
+import { AiPage } from "./components/ai/AiPage";
+import { AgentsPanel } from "./components/agents/AgentsPanel";
+import { clearUrlCache } from "./components/ai/markdownParse";
+import { ai, errText, AI_OPEN_EVENT, AI_OPEN_SERVER_EVENT, type AiOpenServerDetail } from "./util/aiApi";
+import { clearAiFocus, clearFeeds, requestAiFocus } from "./util/aiEvents";
 import { ErrorBoundary } from "./ui/ErrorBoundary";
 import { FormError, unsavedQuestion, useUnsavedGuard } from "./ui/slideOverForm";
 import { markConnected } from "./util/lastConnected";
@@ -1111,6 +1116,24 @@ function DesktopApp() {
         destructive: true,
       });
       if (!ok) return;
+    }
+    // The assistant's data is a file of its own, saved here before anything is
+    // torn down: the save the backend makes as the profile closes can't ask
+    // anything. If it fails, what changed since the last good save is only in
+    // memory, and locking throws that away: the user's call.
+    try { await ai.persist(); }
+    catch (e) {
+      const lockAnyway = await confirm({
+        title: "Lock without saving?",
+        message: `The AI assistant's chats and settings couldn't be saved: ${errText(e)}\n\nIf you lock now, what changed in them since the last good save is lost.`,
+        okLabel: "Lock anyway",
+        cancelLabel: "Stay",
+        destructive: true,
+        safeDefault: true,
+      });
+      if (!lockAnyway) return;
+    }
+    if (sessions.length > 0) {
       // Best-effort: tell the backend to clean up each session. We don't
       // bail if one fails — `close_profile` will drop the DB anyway, and
       // the OS will eventually reap the sockets. All at once and with a
@@ -1128,6 +1151,14 @@ function DesktopApp() {
     try { await invoke("close_profile"); }
     catch (e) { addLog(`LOGOUT_EXCEPTION: ${e}`, "error"); }
 
+    // A request to show a session's AI tab, the sessions' AI feeds and the
+    // links checked in replies mean nothing in the next profile, whose
+    // servers are numbered from 1 too. They go here, once the runs have
+    // stopped, and in the same step as the AI views below: until then a reply
+    // still streaming checks its links again.
+    clearAiFocus();
+    clearFeeds();
+    clearUrlCache();
     // Reset all client state so the picker starts fresh — no stale
     // servers/credentials/sessions leaking across profile contexts.
     restorePendingRef.current = false;
@@ -1170,7 +1201,7 @@ function DesktopApp() {
           cancelLabel: "Not now",
           safeDefault: true,
         });
-        if (!ok) return;
+        if (!ok) return false;
         await allowHeld(server.id, [moved]);
       }
       setSessions((prev: Session[]) => prev.some((s) => s.id === sessionId) ? prev : [...prev, {
@@ -1195,7 +1226,55 @@ function DesktopApp() {
     }
 
     setActiveView(sessionId);
+    return true;
   };
+
+  // The AI page's ways out: "All chats" shows it, and "Open the server" opens
+  // a server chat's session, then its AI tab on that chat.
+  const openServerRef = useRef(openServer);
+  openServerRef.current = openServer;
+  const serversRef = useRef(servers);
+  serversRef.current = servers;
+  useEffect(() => {
+    const showAi = () => setActiveView("ai");
+    const openForAi = (e: Event) => {
+      const { serverUuid, chatId } = (e as CustomEvent<AiOpenServerDetail>).detail ?? {};
+      const server = serversRef.current.find((s) => s.uuid === serverUuid);
+      if (!server) return;
+      void openServerRef.current(server).then((opened) => {
+        // Only SSH and FTP sessions have an AI tab to show.
+        const hasAiTab = !["rdp", "telnet", "vnc"].includes(server.protocol);
+        if (opened && hasAiTab) requestAiFocus(`session-${server.id}`, chatId ?? null);
+      });
+    };
+    window.addEventListener(AI_OPEN_EVENT, showAi);
+    window.addEventListener(AI_OPEN_SERVER_EVENT, openForAi);
+    return () => {
+      window.removeEventListener(AI_OPEN_EVENT, showAi);
+      window.removeEventListener(AI_OPEN_SERVER_EVENT, openForAi);
+    };
+  }, []);
+
+  // The connected SSH or FTP session of each saved server: a server's chat on the AI
+  // page acts through it, as in the session's AI tab.
+  const aiSessions = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const s of sessions) {
+      if (s.serverUuid && ((s.protocol ?? "ssh") === "ssh" || isFtp(s.protocol)) && sessionStatuses[s.id] === "connected") m[s.serverUuid] = s.id;
+    }
+    return m;
+  }, [sessions, sessionStatuses]);
+  const aiServerNames = useMemo(() => Object.fromEntries(servers.filter((s: any) => s.uuid).map((s: any) => [s.uuid, s.name])), [servers]);
+  // The agent gateway, for the rail: how much waits on the Agents page, and
+  // whether it is on at all (the page reports both).
+  const [agentsState, setAgentsState] = useState({ waiting: 0, enabled: false });
+  const onAgentsState = useCallback((waiting: number, enabled: boolean) => {
+    setAgentsState((a) => (a.waiting === waiting && a.enabled === enabled ? a : { waiting, enabled }));
+  }, []);
+  const openServerForAgent = useCallback((uuid: string) => {
+    const server = serversRef.current.find((s) => s.uuid === uuid);
+    if (server) void openServerRef.current(server);
+  }, []);
 
   // Spawn a session from inline Quick Connect auth AND leave behind a reusable
   // node in the root directory so the target can be reconnected later without
@@ -2278,7 +2357,7 @@ function DesktopApp() {
         // tab-order stays intuitive and <main> grabs the full screen width
         // (terminal gains the ~50px the vertical rail used to eat).
         <div inert={overlayOpen} className={`flex-1 flex ${isMobile ? 'flex-col-reverse' : ''} overflow-hidden pt-10`}>
-          <Sidebar activeTab={activeView.startsWith('session-') ? 'nodes' : activeView} setActiveTab={setActiveView} isMobile={isMobile} onLogout={handleLogout} profileName={activeProfile} syncing={cloudSyncing} />
+          <Sidebar activeTab={activeView.startsWith('session-') ? 'nodes' : activeView} setActiveTab={setActiveView} isMobile={isMobile} onLogout={handleLogout} profileName={activeProfile} syncing={cloudSyncing} agentsOn={agentsState.enabled} agentsWaiting={agentsState.waiting} />
 
           <main className="flex-1 flex flex-col min-w-0 min-h-0 bg-transparent relative">
             {activeView === "nodes" && (
@@ -2348,6 +2427,8 @@ function DesktopApp() {
                 servers={servers}
                 isMobile={isMobile}
                 onOpenLogs={() => setActiveView("logs")}
+                onOpenAiChats={() => setActiveView("ai")}
+                onOpenAgents={() => setActiveView("agents")}
               />
             )}
 
@@ -3125,6 +3206,32 @@ function DesktopApp() {
             <div className={`flex-1 flex flex-col overflow-hidden ${activeView === "monitor" ? "" : "hidden"}`}>
               <MonitoringPanel servers={servers} refreshServers={refreshServers} addLog={addLog} active={activeView === "monitor"} />
             </div>
+
+            {/* The AI page stays mounted too: a reply that is still coming in
+                keeps its Channel and its place while another view is open. */}
+            <div className={`flex-1 flex flex-col overflow-hidden ${activeView === "ai" ? "" : "hidden"}`}>
+              <ErrorBoundary label="AI">
+                <AiPage active={activeView === "ai"} openSessions={aiSessions} serverNames={aiServerNames} />
+              </ErrorBoundary>
+            </div>
+
+            {/* The Agents page (desktop) stays mounted as well: it hears a new
+                request while another view is open, and the rail counts it. */}
+            {!IS_MOBILE && (
+              <div className={`flex-1 flex flex-col overflow-hidden ${activeView === "agents" ? "" : "hidden"}`}>
+                <ErrorBoundary label="Agents">
+                  <AgentsPanel
+                    active={activeView === "agents"}
+                    servers={servers}
+                    openSessions={aiSessions}
+                    serverNames={aiServerNames}
+                    onOpenServer={openServerForAgent}
+                    onOpenSettings={() => setActiveView("settings")}
+                    onState={onAgentsState}
+                  />
+                </ErrorBoundary>
+              </div>
+            )}
 
             {/* Compare workspace — pick any subset of open sessions and
                 tile their currently-visible terminals in one canvas.
