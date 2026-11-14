@@ -19017,6 +19017,7 @@ async fn ftp_connect(
             home: control.home.clone(),
             mlsd: control.features.mlst,
             mdtm: control.features.mdtm,
+            user: user.clone(),
         };
         let link = ftp_sftp::Link { dial, port, security, tls, cert, ca_valid, user, password };
         // No connection can be made any more: the tab hears it once.
