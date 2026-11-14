@@ -1232,6 +1232,35 @@ const TerminalView = ({
     term.textarea?.addEventListener("compositionupdate", onCompositionUpdate);
     term.textarea?.addEventListener("compositionend", onCompositionEnd);
 
+    // Android (#314): a keyboard app that types a key without a composition
+    // (Gboard committing a key at once, keys that come in a fast burst) sends a
+    // keydown with keyCode 229, then the key as an input event. xterm answers
+    // that keydown by comparing its field's text before and after a zero-delay
+    // timer and sending the difference; when keys come fast, those timers run
+    // after the next keys have landed, and letters went out twice and out of
+    // order. Kept from xterm, the keydown starts no such timer, and xterm's own
+    // input handler sends each typed text as it is, once. A key that deletes
+    // comes the same way and only that timer turned it into a backspace, so it
+    // is sent here, one for each, as the timer did. Inside a composition
+    // nothing changes: the keydown still reaches xterm, and the word goes when
+    // the composition ends.
+    let imeKeyHidden = false;
+    const onAndroidKeyDown = (ev: KeyboardEvent) => {
+      imeKeyHidden = ev.keyCode === 229 && !ev.isComposing && !composingRef.current;
+      if (imeKeyHidden) ev.stopPropagation();
+    };
+    const onAndroidInput = (ev: Event) => {
+      const e = ev as InputEvent;
+      if (!imeKeyHidden || e.isComposing) return;
+      imeKeyHidden = false;
+      if (e.inputType.startsWith("delete")) inputRef.current?.("\x7f");
+      else if (e.inputType === "insertLineBreak" || e.inputType === "insertParagraph") inputRef.current?.("\r");
+    };
+    if (IS_ANDROID) {
+      term.element?.addEventListener("keydown", onAndroidKeyDown, true);
+      term.textarea?.addEventListener("input", onAndroidInput);
+    }
+
     // ---- Copy on select / paste on right-click --------------------------------
     // Selection-change fires per mouse move during a drag — that's noisy AND
     // it would clobber the clipboard mid-drag. We instead wait for the user
@@ -1681,6 +1710,8 @@ const TerminalView = ({
       onDataDisposable.dispose();
       term.textarea?.removeEventListener("compositionupdate", onCompositionUpdate);
       term.textarea?.removeEventListener("compositionend", onCompositionEnd);
+      term.element?.removeEventListener("keydown", onAndroidKeyDown, true);
+      term.textarea?.removeEventListener("input", onAndroidInput);
       if (inputRef.current === handleData) inputRef.current = null;
       onResizeDisposable.dispose();
       window.clearTimeout(sizeTimer);
