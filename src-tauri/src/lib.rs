@@ -10824,6 +10824,20 @@ fn base_session_id(session_id: &str) -> &str {
     }
 }
 
+/// Which of its tab's connections this is, for the lines its session watcher
+/// adds to the tab's Activity Log; none for the tab's own connection.
+fn connection_label(session_id: &str) -> Option<&'static str> {
+    if session_id.ends_with("::sftp") {
+        Some("dedicated SFTP session")
+    } else if session_id.ends_with("::fwd") {
+        Some("dedicated port forwarding session")
+    } else if base_session_id(session_id) != session_id {
+        Some("a terminal's own login")
+    } else {
+        None
+    }
+}
+
 /// How many times in a row a server may start a keyboard-interactive round with
 /// nothing to answer before the method is given up on (a real one has a
 /// banner, or two).
@@ -12323,6 +12337,15 @@ mod secret_prompt_tests {
     }
 
     #[test]
+    fn connection_label_names_the_tabs_other_connections() {
+        assert_eq!(connection_label("tab-1"), None);
+        assert_eq!(connection_label("tab-1::sftp"), Some("dedicated SFTP session"));
+        assert_eq!(connection_label("tab-1::fwd"), Some("dedicated port forwarding session"));
+        assert_eq!(connection_label("tab-1::term-tab-1-term-1729000000000"), Some("a terminal's own login"));
+        assert_eq!(connection_label("tab-1::other"), None);
+    }
+
+    #[test]
     fn cache_key_is_base_session_plus_target() {
         let target = "10.0.0.8:22|root|custom_pass|None|None";
         assert_eq!(
@@ -12952,7 +12975,8 @@ pub(crate) fn build_ssh_client_config() -> russh::client::Config {
     // covered without it: the session watcher pings about every 30s on a
     // primary connection and about every 60s on the dedicated `::sftp` /
     // `::fwd` connections, and OS TCP keepalive (apply_tcp_keepalive) probes
-    // the first hop after 30s of silence.
+    // the first hop after 30s of silence. For an SSH session, both only while
+    // "Send keepalives" is on (see `initiate_connection`).
     config.keepalive_interval = None;
     // russh closes the connection after `keepalive_max` unanswered keepalives
     // (default 3, i.e. ~80s of server silence). Kept OFF: liveness is decided
@@ -13827,6 +13851,8 @@ struct HopCtx<'a> {
     // retrying. Not for a host key, a login, or a setting: waiting will not
     // fix those.
     network_failed: &'a std::sync::atomic::AtomicBool,
+    // The connection's "Send keepalives" setting, for the sockets to its hops.
+    tcp_keepalive: bool,
     // The target session's connect attempt; the hops' prompts belong to it.
     attempt: &'a ssh_manager::ConnectAttempt,
     session_id: &'a str,
@@ -14188,7 +14214,7 @@ fn reach_hop<'a>(
                 {
                     Ok(Ok(s)) => {
                         let _ = s.set_nodelay(true);
-                        apply_tcp_keepalive(&s);
+                        if ctx.tcp_keepalive { apply_tcp_keepalive(&s); }
                         s
                     }
                     Ok(Err(e)) => {
@@ -14317,6 +14343,7 @@ async fn login_hop(
         attempt: attempt.clone(),
         // The watcher probes the session, not the bastion hop.
         last_heard: ssh_manager::LastHeard::default(),
+        server_goodbye: ssh_manager::ServerGoodbye::default(),
         host_trust,
         host_key_refusal: std::sync::Arc::clone(&host_key_refusal),
     };
@@ -14535,11 +14562,12 @@ const AGENT_DID_NOT_SIGN: &str =
 
 /// Fully tear down ONE connection map-entry by its exact key. Used to reap the
 /// dedicated `::sftp` / `::fwd` secondary connections the separate-sessions
-/// feature spins up, so disconnecting or reconnecting the PRIMARY never orphans
-/// them (a leaked secondary would hold a live TCP + SSH session forever). Safe
-/// to call on a key that doesn't exist — every step is then a no-op. Bumps the
-/// key's generation so the secondary's own health watcher observes the change on
-/// its next tick and bows out WITHOUT emitting a `session-disconnected-{key}`.
+/// feature spins up, so disconnecting, reconnecting or losing the PRIMARY never
+/// orphans them (a leaked secondary would hold a live TCP + SSH session
+/// forever). Safe to call on a key that doesn't exist — every step is then a
+/// no-op. Bumps the key's generation so the secondary's own health watcher
+/// observes the change on its next tick and bows out WITHOUT emitting a
+/// `session-disconnected-{key}`.
 async fn teardown_connection_key(state: &SshState, mirrors: &MirrorMap, key: &str) -> Result<(), String> {
     // Refuse a bad id before any cleanup. The temp folders are removed only
     // after this returns paths we just built.
@@ -14603,6 +14631,13 @@ async fn initiate_connection(
     // frontend says otherwise). Off, no agent is contacted for this
     // connection or its jump host.
     use_ssh_agent: Option<bool>,
+    // The "Send keepalives" setting (on unless the frontend says otherwise). Off,
+    // this connection starts no traffic of its own while idle, and an idle timeout
+    // can do its work. It still answers the server's keepalives and notices a
+    // connection that closes. Two exceptions: russh's key exchange once an hour,
+    // and a saved remote (R) forward the server refused, which the watcher asks
+    // for again every minute (its tunnel retry).
+    send_keepalives: Option<bool>,
 ) -> Result<(), String> {
     use tauri::Emitter;
     use tokio::time::Duration;
@@ -14611,6 +14646,7 @@ async fn initiate_connection(
     use tokio::sync::Mutex;
 
     let use_agent = use_ssh_agent.unwrap_or(true);
+    let keepalives = send_keepalives.unwrap_or(true);
 
     // Connection role + topology flags. Kept as plain locals so the whole
     // function (worker included) can branch on them without re-parsing.
@@ -14981,6 +15017,7 @@ async fn initiate_connection(
     // Stamped by the handler whenever the server sends something; read by the
     // session watcher below.
     let last_heard = ssh_manager::LastHeard::default();
+    let server_goodbye = ssh_manager::ServerGoodbye::default();
     // Second handle so the worker can read known_hosts before the handshake.
     // The handler below takes the other one.
     let db_for_key_order = Arc::clone(&db_conn_shared);
@@ -15001,6 +15038,7 @@ async fn initiate_connection(
         prompt_allowed: !is_secondary,
         attempt: attempt.clone(),
         last_heard: last_heard.clone(),
+        server_goodbye: server_goodbye.clone(),
         host_trust,
         host_key_refusal,
     };
@@ -15172,6 +15210,7 @@ async fn initiate_connection(
             allow_prompt: allow_kbi,
             auth_failed: &jump_auth_failed,
             network_failed: &jump_network_failed,
+            tcp_keepalive: keepalives,
             attempt: &attempt,
             session_id: &session_id_clone,
             use_agent,
@@ -15256,7 +15295,7 @@ async fn initiate_connection(
                         emit_log("SOCKS5 Proxy tunnel established successfully.", "success");
                         // Socks5Stream derefs to the inner TcpStream, so the
                         // kernel keepalive applies to the real proxy socket.
-                        apply_tcp_keepalive(&stream);
+                        if keepalives { apply_tcp_keepalive(&stream); }
                         Ok(Box::new(stream))
                     }
                     Ok(Err(e)) => {
@@ -15292,7 +15331,7 @@ async fn initiate_connection(
                         // round-trip latency. Ignore failures — set_nodelay is
                         // best-effort; some platforms / virtual NICs reject it.
                         let _ = tcp_stream.set_nodelay(true);
-                        apply_tcp_keepalive(&tcp_stream);
+                        if keepalives { apply_tcp_keepalive(&tcp_stream); }
                         if !http_connect_host_ok(&host) {
                             let err_msg = format!(
                                 "'{}' can't be asked of an HTTP proxy: a host has no spaces or control characters.",
@@ -15338,7 +15377,7 @@ async fn initiate_connection(
                         // See HTTP-proxy branch — SSH wants every packet on the
                         // wire immediately, no Nagle batching.
                         let _ = stream.set_nodelay(true);
-                        apply_tcp_keepalive(&stream);
+                        if keepalives { apply_tcp_keepalive(&stream); }
                         emit_log("Direct TCP Connection established successfully.", "success");
                         Ok(Box::new(stream))
                     }
@@ -15798,6 +15837,8 @@ async fn initiate_connection(
                         let state_specs_w = Arc::clone(&state_session_tunnel_specs);
                         let targets_w = Arc::clone(&session_forwarded_targets);
                         let last_heard_w = last_heard.clone();
+                        let server_goodbye_w = server_goodbye.clone();
+                        let attempt_w = attempt.clone();
                         let my_gen = connect_generation;
                         tauri::async_runtime::spawn(async move {
                             // Fallback liveness check for servers that do not
@@ -15877,6 +15918,26 @@ async fn initiate_connection(
                             // Set once this server has left a keepalive unanswered but answered
                             // a channel open: probe it that way from then on.
                             let mut ping_unanswered = false;
+                            // Why it was given up on, when it wasn't simply closed.
+                            let mut went_quiet = false;
+                            // For the Activity Log: without these a report of a
+                            // connection that keeps dropping can't be read. They
+                            // go to the tab, from its other connections too
+                            // (`via` names which one, `closed` marks its drop).
+                            // Not once a newer attempt (or a disconnect) has
+                            // replaced this one: they'd read as the newer one's.
+                            let log_event = format!("session-log-{}", base_session_id(&sid_w));
+                            let via = connection_label(&sid_w);
+                            let tell = |msg: &str, closed: bool| {
+                                if !attempt_w.is_current_now() {
+                                    return;
+                                }
+                                let _ = app_w.emit(
+                                    &log_event,
+                                    serde_json::json!({ "msg": msg, "type": "warn", "activity": true, "closed": closed, "via": via }),
+                                );
+                            };
+                            let say = |msg: &str| tell(msg, false);
                             loop {
                                 tokio::time::sleep(Duration::from_secs(2)).await;
                                 tick = tick.wrapping_add(1);
@@ -15909,7 +15970,7 @@ async fn initiate_connection(
 
                                 let mut dead = is_closed;
 
-                                if !dead && tick.is_multiple_of(probe_every) {
+                                if !dead && keepalives && tick.is_multiple_of(probe_every) {
                                     // Active probe: a round trip on the
                                     // shared handle (read-locked), so commands
                                     // and tunnels open their own channels
@@ -15958,6 +16019,7 @@ async fn initiate_connection(
                                                     // server does not reply to keepalive.
                                                     ChannelProbe::Answered => {
                                                         ping_unanswered = true;
+                                                        say("This server doesn't answer SSH keepalives. Checking on it by opening a channel from now on.");
                                                         true
                                                     }
                                                     // Traffic during the wait: still alive,
@@ -15969,13 +16031,23 @@ async fn initiate_connection(
                                             }
                                         }
                                     };
+                                    let closed = !alive && handle_arc.read().await.is_closed();
                                     if alive {
                                         probe_strikes = 0;
+                                    } else if closed {
+                                        // Not left unanswered: the connection
+                                        // closed while the probe waited (a
+                                        // device that drops it on a keepalive,
+                                        // #299). There's no asking again.
+                                        say("The connection closed while waiting for an answer to a keepalive.");
+                                        dead = true;
                                     } else {
                                         probe_strikes += 1;
                                         if probe_strikes >= 2 {
                                             dead = true;
+                                            went_quiet = true;
                                         } else {
+                                            say("No answer to a keepalive. Asking once more.");
                                             // One strike: re-probe on the
                                             // next 2s tick instead of a
                                             // full interval away, so a
@@ -15999,7 +16071,9 @@ async fn initiate_connection(
                                 // transports have their own migration/restore paths,
                                 // and the primary handle is the correct transport for
                                 // the default (shared) topology. Spawned so a slow
-                                // bind retry never delays death detection.
+                                // bind retry never delays death detection. An R
+                                // rule's retry is a request to the server, so it is
+                                // traffic even with keepalives off.
                                 if !dead && tick.is_multiple_of(30) && !sid_w.contains("::") {
                                     let specs = state_specs_w.lock().await.get(&sid_w).cloned().unwrap_or_default();
                                     if specs.iter().any(|spec| !spec.stopped) {
@@ -16084,10 +16158,37 @@ async fn initiate_connection(
                                     // this dead handle and hammers upload-fail on every future
                                     // FS event until the app is quit.
                                     mirror::stop_all_for_session(&state_mirrors_w, &sid_w).await;
+                                    // The tab's dedicated `::sftp` / `::fwd`
+                                    // connections go with it: nothing rides
+                                    // them while it's down, and no reconnect
+                                    // may come to reap them (reconnecting off,
+                                    // or cancelled). Their watchers bow out
+                                    // without a word. Not if a newer attempt
+                                    // has started meanwhile: that one reaps
+                                    // them, and may have opened new ones.
+                                    if !sid_w.contains("::") && attempt_w.is_current().await {
+                                        let ssh = app_w.state::<SshState>();
+                                        let _ = teardown_connection_key(ssh.inner(), &state_mirrors_w, &format!("{sid_w}::sftp")).await;
+                                        let _ = teardown_connection_key(ssh.inner(), &state_mirrors_w, &format!("{sid_w}::fwd")).await;
+                                    }
+                                    let reason = match server_goodbye_w.take() {
+                                        Some(said) if !said.is_empty() => format!("The server closed the connection: {said}"),
+                                        Some(_) => "The server closed the connection".to_string(),
+                                        None if went_quiet => "No answer to two keepalives in a row".to_string(),
+                                        None => "Connection lost".to_string(),
+                                    };
+                                    // Another of the tab's connections: the tab
+                                    // only resets a dot or writes a line in a
+                                    // terminal for it, so the reason goes to its
+                                    // Activity Log here. The tab logs its own
+                                    // connection's when it hears the event below.
+                                    if via.is_some() {
+                                        tell(&reason, true);
+                                    }
                                     let _ = app_w.emit(
                                         &format!("session-disconnected-{}", sid_w),
                                         serde_json::json!({
-                                            "reason": "Connection lost"
+                                            "reason": reason
                                         }),
                                     );
                                     break;
@@ -17381,6 +17482,7 @@ async fn initiate_rdp(
                     allow_prompt: true,
                     auth_failed: &auth_failed,
                     network_failed: &network_failed,
+                    tcp_keepalive: true,
                     attempt: &attempt,
                     session_id: &session_id,
                     use_agent,
@@ -18013,6 +18115,7 @@ async fn rdp_builtin_open(
                     allow_prompt: true,
                     auth_failed: &auth_failed,
                     network_failed: &network_failed,
+                    tcp_keepalive: true,
                     attempt: &attempt,
                     session_id: &session_id,
                     use_agent,
@@ -18434,6 +18537,7 @@ async fn telnet_connect(
                     allow_prompt: true,
                     auth_failed: &auth_failed,
                     network_failed: &network_failed,
+                    tcp_keepalive: true,
                     attempt: &attempt,
                     session_id: &session_id,
                     use_agent,
@@ -18659,6 +18763,7 @@ async fn vnc_open(
                     allow_prompt: true,
                     auth_failed: &auth_failed,
                     network_failed: &network_failed,
+                    tcp_keepalive: true,
                     attempt: &attempt,
                     session_id: &session_id,
                     use_agent,
