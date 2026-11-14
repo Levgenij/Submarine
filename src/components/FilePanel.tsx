@@ -13,6 +13,7 @@ import { FileEntry, FileProvider, LinkInfo } from "../fs/types";
 import { carryLinkState, mergePermissions, permissionOctal, safeLeafName, shellSingleQuote } from "../fs/dirContext";
 import { useConfirm, useOverwritePrompt, OverwriteChoice, OverwritePromptOptions } from "../ui/confirm";
 import { IS_ANDROID, IS_WINDOWS } from "../util/platform";
+import { writeTerminal } from "../util/terminalWrite";
 import { nameFilterMatcher } from "../util/nameFilter";
 import {
   acquireTransferSlot, dropQueued, enqueueTransfers, getQueued, isQueued, queueSignal, startQueued, waitForTurn,
@@ -2376,7 +2377,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
     }
     const line = `cd ${shellSingleQuote(currentPath)}\r`;
     const data = Array.from(new TextEncoder().encode(line));
-    await invoke("write_terminal_data", { terminalId, data });
+    writeTerminal(terminalId, data);
     onRevealTerminal?.();
   };
 
