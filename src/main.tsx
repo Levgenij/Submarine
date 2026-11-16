@@ -5,6 +5,12 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import "./App.css";
 // Registers the bundled terminal fonts (@font-face) before any terminal mounts.
 import "./util/bundledFonts";
+import { readFontFamily } from "./util/terminalFont";
+import { applyFonts, readUiFontFamily } from "./util/uiFont";
+
+// The fonts picked in Settings, before the first screen draws: the profile
+// list shows in them too, and nothing changes face once the app is up.
+applyFonts(readFontFamily(), readUiFontFamily());
 
 // Last-resort global handlers so a failure that escapes React (an async reject,
 // a listener throw) is at least recorded instead of vanishing silently. The
