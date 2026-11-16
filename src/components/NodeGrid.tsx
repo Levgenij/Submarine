@@ -1,4 +1,4 @@
-import { Search, Plus, Server, Globe, Folder, FolderPlus, ChevronLeft, ChevronRight, ChevronDown, Trash2, Edit2, Zap, Check, X, Copy, GripVertical, KeyRound, ShieldAlert, ArrowUp, ArrowDown, LayoutGrid, ListTree, ArrowDownAZ, FolderTree, Sparkles } from "lucide-react";
+import { Search, Plus, Globe, Folder, FolderPlus, ChevronLeft, ChevronRight, ChevronDown, Trash2, Edit2, Zap, Check, X, Copy, GripVertical, KeyRound, ShieldAlert, ArrowUp, ArrowDown, LayoutGrid, ListTree, ArrowDownAZ, FolderTree, Sparkles } from "lucide-react";
 import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, useId } from "react";
 import { createPortal } from "react-dom";
 import { useConfirm } from "../ui/confirm";
@@ -10,6 +10,7 @@ import { SORT_KEYS, sortServers, groupByLetter, type SortKey, type SortDir } fro
 import { useLastConnected } from "../util/lastConnected";
 import { onRovingKeyDown } from "../ui/rovingKeys";
 import { ServerTree, protocolTag } from "./ServerTree";
+import { PROTOCOL_ICON, tabDot, tabTitle, avatarStyle, hostPort, protocolOf } from "../util/serverLook";
 import { ai, AI_LEVEL_EVENT, type Level } from "../util/aiApi";
 import { LevelMenu } from "./ai/LevelPicker";
 
@@ -33,8 +34,24 @@ const SORT_LABELS: Record<SortKey, string> = { manual: "Manual order", name: "Na
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp, onActiveFolderChange, onOpenServer, onEditServer, onAddClick, onQuickConnect, onRemoveServer, onRemoveFolder, onRenameFolder, onCreateFolder, onMoveServer, onMoveFolder, onCloneServer, onReorderServers, profile, keyChange, onAcceptKey, onAllowHeld, shareGrant, onUnlockSharing, heldDeletions, onResolveDeletions, isMobile }: any) => {
+export const NodeGrid = ({ servers, folders, serverTabs, activeFolderId: activeFolderIdProp, onActiveFolderChange, onOpenServer, onEditServer, onAddClick, onQuickConnect, onRemoveServer, onRemoveFolder, onRenameFolder, onCreateFolder, onMoveServer, onMoveFolder, onCloneServer, onReorderServers, profile, keyChange, onAcceptKey, onAllowHeld, shareGrant, onUnlockSharing, heldDeletions, onResolveDeletions, isMobile }: any) => {
   const [search, setSearch] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
+  // "/" goes to the search, from anywhere but a field, a dialog, or a panel
+  // open over the page.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+      const el = e.target as HTMLElement | null;
+      if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return;
+      const box = searchRef.current;
+      if (!box || box.closest("[inert]") || document.querySelector('[aria-modal="true"]')) return;
+      e.preventDefault();
+      box.focus();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   // The AI assistant's level per server, for the red mark on Auto and Full
   // access. Only servers off the default are listed, and none when the
   // assistant was never used: an error just leaves the marks off.
@@ -536,16 +553,35 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
     }
   };
 
-  // Compact horizontal node card: a monogram avatar carries identity, the
-  // server projects its own colour as a left accent bar. Kept short (h-16) so
+  // A server's avatar: the icon of its kind of connection in its own colour,
+  // with a dot while its tab is open (`edge`: the card's colour around it, so
+  // the dot stands clear).
+  const serverAvatar = (s: any, edge: string) => {
+    const Icon = PROTOCOL_ICON[protocolOf(s)];
+    const tab: string | undefined = serverTabs?.[s.id];
+    return (
+      <div className="relative w-9 h-9 rounded-lg border flex items-center justify-center shadow-inner shrink-0" style={avatarStyle(s.color)}>
+        <Icon size={16} />
+        {tab && (
+          <span
+            role="img"
+            aria-label={tabTitle(tab)}
+            title={tabTitle(tab)}
+            className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 ${edge} ${tabDot(tab)}`}
+          />
+        )}
+      </div>
+    );
+  };
+
+  // Compact horizontal node card: an avatar with the kind of connection, in
+  // the server's own colour, carries identity. Kept short (h-16) so
   // name + host read clearly. Rendered as a plain keyed <div> (not a nested
   // component) so React reuses the same DOM node across renders — that's what
   // lets the FLIP effect measure and animate real positions. While this card is
   // the one being dragged it renders as a dashed placeholder holding the slot;
   // the floating clone (portal, below) is what the pointer carries.
   const renderServer = (s: any) => {
-    const accent = s.color || 'rgb(var(--primary))';
-    const monogram = (s.name || '').trim().charAt(0).toUpperCase();
     const aiLevel: Level | undefined = s.uuid ? aiLevels.get(s.uuid) : undefined;
     // The assistant works in SSH and FTP sessions. A server with a level set
     // keeps the item, so the level can still be changed back.
@@ -568,9 +604,6 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
         onClick={() => { if (draggedRef.current) return; onOpenServer(s); }}
         className="group relative flex items-center gap-3 h-16 pl-3.5 pr-2 rounded-xl bg-gradient-to-br from-[#17171c] to-[#121216] border border-white/5 hover:border-primary/40 hover:bg-white/[0.015] transition-colors duration-150 cursor-pointer overflow-hidden"
       >
-        {/* Per-server colour accent: a crisp left bar. */}
-        <span aria-hidden className="absolute left-0 top-0 bottom-0 w-[3px]" style={{ background: accent }} />
-
         {/* Drag handle (grip) - grab to reorder. Hidden until hover on desktop,
             always shown on touch (no hover there). touch-action:none stops the
             gesture from scrolling the list while dragging. Pointer only, so
@@ -588,12 +621,8 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
           </button>
         )}
 
-        {/* Monogram avatar. */}
-        <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-primary/25 to-primary/[0.03] border border-primary/20 flex items-center justify-center text-primary shadow-inner shrink-0">
-          {monogram
-            ? <span className="font-black text-[14px] leading-none">{monogram}</span>
-            : <Server size={14} />}
-        </div>
+        {/* Avatar: the kind of connection, the open tab's dot. */}
+        {serverAvatar(s, 'border-[#17171c]')}
 
         {/* Name + host — flex-1 + min-w-0 so long values truncate cleanly. */}
         <div className="min-w-0 flex-1">
@@ -615,7 +644,7 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
               </span>
             )}
             {protocolTag(s) ?? <Globe size={10} className="text-zinc-400 shrink-0" />}
-            <span className="text-[10.5px] text-zinc-300 font-mono truncate">{s.host}</span>
+            <span className="text-[10.5px] text-zinc-300 font-mono truncate">{hostPort(s)}</span>
           </div>
         </div>
 
@@ -852,13 +881,25 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
               straight to search. Not on a phone: it would pop the keyboard. */}
           <input
             type="text"
+            ref={searchRef}
             autoFocus={!isMobile}
             aria-label="Search servers"
             placeholder="Search name, host or folder…"
             className="w-full h-9 bg-[#1c1c21] border border-white/10 rounded-lg pl-9 pr-9 text-[13px] text-zinc-100 outline-none focus:border-primary/50 focus:bg-[#16161a] transition-all placeholder:text-zinc-600 shadow-inner"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Escape" && search) { e.preventDefault(); setSearch(""); } }}
+            onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing) return;
+              // Enter opens the first match as shown (in Tree, only a lone one:
+              // its rows are in another order); Escape empties the box.
+              if (e.key === "Enter" && isSearching) {
+                const first = isTree
+                  ? (filteredServers.length === 1 ? filteredServers[0] : undefined)
+                  : (grouped ? letterGroups.flatMap((g) => g.items) : cardItems).find((i: any) => i.server)?.server;
+                if (first) { e.preventDefault(); onOpenServer(first); }
+              }
+              else if (e.key === "Escape" && search) { e.preventDefault(); setSearch(""); }
+            }}
           />
           {search && (
             <button
@@ -1094,6 +1135,7 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
             dir={prefs.dir}
             onSort={sortBy}
             lastSeen={lastSeen}
+            serverTabs={serverTabs}
             profile={profile}
             isMobile={isMobile}
             onOpenServer={onOpenServer}
@@ -1175,17 +1217,12 @@ export const NodeGrid = ({ servers, folders, activeFolderId: activeFolderIdProp,
           }}
         >
           <div className="relative flex items-center gap-3 h-16 pl-3.5 pr-2 rounded-xl bg-gradient-to-br from-[#1b1b20] to-[#141418] border border-primary/50 ring-1 ring-primary/40 shadow-2xl shadow-black/60 overflow-hidden">
-            <span aria-hidden className="absolute left-0 top-0 bottom-0 w-[3px]" style={{ background: draggedServer.color || 'rgb(var(--primary))' }} />
-            <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-primary/25 to-primary/[0.03] border border-primary/20 flex items-center justify-center text-primary shadow-inner shrink-0">
-              {(draggedServer.name || '').trim().charAt(0)
-                ? <span className="font-black text-[14px] leading-none">{(draggedServer.name || '').trim().charAt(0).toUpperCase()}</span>
-                : <Server size={14} />}
-            </div>
+            {serverAvatar(draggedServer, 'border-[#1b1b20]')}
             <div className="min-w-0 flex-1">
               <h3 className="font-bold text-zinc-100 text-[13px] truncate tracking-tight leading-tight">{draggedServer.name}</h3>
               <div className="flex items-center gap-1 mt-0.5">
                 {protocolTag(draggedServer) ?? <Globe size={10} className="text-zinc-400 shrink-0" />}
-                <span className="text-[10.5px] text-zinc-300 font-mono truncate">{draggedServer.host}</span>
+                <span className="text-[10.5px] text-zinc-300 font-mono truncate">{hostPort(draggedServer)}</span>
               </div>
             </div>
           </div>
