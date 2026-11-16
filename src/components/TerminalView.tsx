@@ -208,6 +208,8 @@ const TerminalView = ({
   ownLogin = false,
   quickAuth = null,
   onFolder,
+  onClose,
+  onNewTerminal,
 }: {
   sessionId: string;
   terminalId: string;
@@ -283,6 +285,10 @@ const TerminalView = ({
   /// util/shellFolder), for the SFTP remote pane's Follow. Reported at every
   /// prompt; the parent keeps what changed.
   onFolder?: (terminalId: string, path: string, host: string) => void;
+  /// Closes this terminal (the parent's tab). Without it the close keys are not taken.
+  onClose?: () => void;
+  /// Opens another terminal in the parent session. Without it the plus keys are not taken.
+  onNewTerminal?: () => void;
 }) => {
   // The connection this terminal's shell runs on: its tab's, or its own
   // (`ownLogin`), `<tab>::term-<terminal>`, which the backend takes as the
@@ -491,6 +497,13 @@ const TerminalView = ({
   confirmRef.current = confirm;
   const onFolderRef = useRef(onFolder);
   onFolderRef.current = onFolder;
+  // The xterm setup effect lives as long as the terminal: the key handler
+  // reads the latest callbacks here, and whether the shell has ended.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const onNewTerminalRef = useRef(onNewTerminal);
+  onNewTerminalRef.current = onNewTerminal;
+  const shellEndedRef = useRef(false);
   // The terminal's input handler (what xterm's onData runs), for keys that
   // don't come from xterm itself - the mobile key bar's arrows and symbols.
   const inputRef = useRef<((data: string) => void) | null>(null);
@@ -623,6 +636,7 @@ const TerminalView = ({
     // again once the reopen succeeds. An open Wall tile keeps its own size.
     const syncSize = () => {
       if (!keepShell()) return;
+      shellEndedRef.current = false;
       releaseInput(true);
       resendPtySize(terminalId, term.cols, term.rows);
     };
@@ -701,6 +715,7 @@ const TerminalView = ({
   useEffect(() => {
     const off = listen(`terminal-closed-${terminalId}`, (e: any) => {
       if (!e.payload?.shell_ended) return;
+      shellEndedRef.current = true;
       xtermRef.current?.write("\r\n\x1b[33m── this shell has ended; + opens a new terminal ──\x1b[0m\r\n");
     });
     return () => { off.then((f) => f()); };
@@ -1096,6 +1111,7 @@ const TerminalView = ({
         const releaseInput = releaseInputRef.current ?? (() => {});
         const syncSize = () => {
           if (!keepShell()) return false;
+          shellEndedRef.current = false;
           releaseInput(true);
           resendPtySize(terminalId, term.cols, term.rows);
           return true;
@@ -1526,6 +1542,37 @@ const TerminalView = ({
       if (ev.type === 'keydown' && !ev.repeat) noKeySinceFocus = false;
       if (noKeySinceFocus && ev.repeat && !ev.isComposing && ev.keyCode !== 229) {
         ev.preventDefault();
+        return false;
+      }
+      // Ctrl/Cmd+Shift+W closes this terminal's tab (the last shell's closes the
+      // session). Plain Ctrl+W does so only once the shell has ended; while it
+      // runs, ^W stays the shell's (delete a word).
+      const primaryModifier = ev.ctrlKey || ev.metaKey;
+      if (
+        onCloseRef.current && ev.type === 'keydown' && !ev.repeat &&
+        primaryModifier && !ev.altKey && ev.code === 'KeyW' &&
+        (ev.shiftKey || shellEndedRef.current)
+      ) {
+        ev.preventDefault();
+        onCloseRef.current();
+        return false;
+      }
+      // Ctrl+Shift+Plus opens another terminal; Ctrl+Plus too once the shell has
+      // ended. Matched by the key's character, so only a plus key counts: "+",
+      // the keypad's, the US "=/+" key unshifted, and the German plus key with
+      // Shift ("*"). The same place on a US keyboard ("]" or "}") doesn't.
+      const isPlusKey =
+        ev.key === '+' ||
+        ev.code === 'NumpadAdd' ||
+        (ev.code === 'Equal' && ev.key === '=') ||
+        (ev.code === 'BracketRight' && ev.key === '*');
+      if (
+        onNewTerminalRef.current && ev.type === 'keydown' && !ev.repeat &&
+        primaryModifier && !ev.altKey && isPlusKey &&
+        (ev.shiftKey || shellEndedRef.current)
+      ) {
+        ev.preventDefault();
+        onNewTerminalRef.current();
         return false;
       }
       const noOtherMods = !ev.altKey && !ev.metaKey && ev.ctrlKey && ev.shiftKey;
