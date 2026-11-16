@@ -980,7 +980,7 @@ const InfoPanel = ({ sessionId, disabled, visible = true, onOpenContainerTermina
             onClick={() => fetchSection(tab)}
             disabled={activeState.loading || disabled}
             title="Refresh this tab"
-            className="h-9 sm:h-7 px-3 sm:px-2.5 rounded-lg flex items-center gap-1.5 text-[10.5px] font-bold uppercase tracking-wider text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+            className="h-9 sm:h-7 px-3 sm:px-2.5 rounded-lg flex items-center gap-1.5 text-[11.5px] font-semibold text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 disabled:cursor-not-allowed transition-all"
           >
             {activeState.loading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
             <span>Refresh</span>
@@ -1003,7 +1003,7 @@ const InfoPanel = ({ sessionId, disabled, visible = true, onOpenContainerTermina
             <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-red-500/5 border border-red-500/20 text-red-300 text-[11px]">
               <AlertCircle size={14} className="mt-0.5 shrink-0" />
               <div className="min-w-0">
-                <div className="font-bold uppercase tracking-wider">{e.title}</div>
+                <div className="font-semibold">{e.title}</div>
                 {e.hint && <div className="text-red-200/80 mt-0.5">{e.hint}</div>}
                 <div className="opacity-70 mt-0.5 font-mono break-all">{activeState.error}</div>
               </div>
@@ -1097,7 +1097,7 @@ const ConnectionCard = ({ sessionId, disabled }: { sessionId: string; disabled?:
             <KV label="Route" value={info.route} icon={<Globe size={11} />} />
             {info.has_password && (
               <div className="py-1 last:pb-0">
-                <div className="text-[9.5px] font-semibold uppercase tracking-wider text-zinc-500 flex items-center gap-1 mb-0.5">
+                <div className="text-[10.5px] font-semibold text-zinc-500 flex items-center gap-1 mb-0.5">
                   <KeyRound size={11} />Password
                 </div>
                 <div className="flex items-center gap-1.5 min-w-0">
@@ -1260,7 +1260,7 @@ const NetworkTab = ({ sessionId, data }: { sessionId: string; data: NetworkData 
         {filtered.length > NIC_INITIAL_CAP && (
           <button
             onClick={() => setShowAllNics(s => !s)}
-            className="mt-2 w-full h-8 rounded-lg border border-white/10 text-[10px] font-bold uppercase tracking-wider text-zinc-400 hover:bg-white/5 hover:text-white transition-all"
+            className="mt-2 w-full h-8 rounded-lg border border-white/10 text-[11px] font-semibold text-zinc-400 hover:bg-white/5 hover:text-white transition-all"
           >
             {showAllNics ? "Show fewer" : `Show all ${filtered.length}`}
           </button>
@@ -1360,9 +1360,9 @@ const FirewallCard = ({ sessionId, fw }: FirewallCardProps) => {
                   )}
                 </div>
                 <div className="space-y-1">
-                  {([["services", z.services], ["ports", z.ports]] as const).map(([label, items]) => (
+                  {([["Services", z.services], ["Ports", z.ports]] as const).map(([label, items]) => (
                     <div key={label} className="flex items-start gap-2">
-                      <span className="text-[9px] text-zinc-500 uppercase tracking-wide w-12 shrink-0 pt-1">{label}</span>
+                      <span className="text-[10px] text-zinc-500 w-12 shrink-0 pt-1">{label}</span>
                       {items.length ? (
                         <div className="flex flex-wrap gap-1">
                           {items.map((it) => (
@@ -1635,14 +1635,14 @@ const PortsTab = ({ data, sessionId, onRefresh }: { data: PortsData; sessionId: 
           <div className="overflow-x-auto custom-scrollbar -mx-1 px-1">
             <table className="w-full min-w-[460px] table-fixed border-collapse text-[11px] font-mono">
               <thead>
-                <tr className="text-left text-[9px] uppercase tracking-wider text-zinc-500 border-b border-white/10">
-                  <th className="font-bold px-2 py-1.5 w-[46px]">Proto</th>
-                  <th className="font-bold px-2 py-1.5 w-[54px]">Port</th>
-                  <th className="font-bold px-2 py-1.5">Address</th>
-                  <th className="font-bold px-2 py-1.5 w-[72px]">State</th>
-                  <th className="font-bold px-2 py-1.5">Process</th>
-                  <th className="font-bold px-2 py-1.5 w-[52px]">PID</th>
-                  <th className="font-bold px-1 py-1.5 w-[36px]"></th>
+                <tr className="text-left text-[10px] text-zinc-500 border-b border-white/10">
+                  <th className="font-semibold px-2 py-1.5 w-[46px]">Proto</th>
+                  <th className="font-semibold px-2 py-1.5 w-[54px]">Port</th>
+                  <th className="font-semibold px-2 py-1.5">Address</th>
+                  <th className="font-semibold px-2 py-1.5 w-[72px]">State</th>
+                  <th className="font-semibold px-2 py-1.5">Process</th>
+                  <th className="font-semibold px-2 py-1.5 w-[52px]">PID</th>
+                  <th className="font-semibold px-1 py-1.5 w-[36px]"></th>
                 </tr>
               </thead>
               <tbody>
@@ -1806,7 +1806,7 @@ const ProcessesTab = ({ sessionId, disabled, visible = true }: { sessionId: stri
               onClick={fetchNow}
               disabled={loading || disabled}
               title="Refresh now"
-              className="h-7 px-2 rounded-lg flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 transition-all"
+              className="h-7 px-2 rounded-lg flex items-center gap-1 text-[11px] font-semibold text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 transition-all"
             >
               {loading ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
             </button>
@@ -1824,14 +1824,14 @@ const ProcessesTab = ({ sessionId, disabled, visible = true }: { sessionId: stri
           <div className="overflow-x-auto custom-scrollbar -mx-1 px-1">
             <table className="w-full border-collapse text-[11px] font-mono whitespace-nowrap">
               <thead>
-                <tr className="text-left text-[9px] uppercase tracking-wider text-zinc-500 border-b border-white/10">
-                  <th className="font-bold px-2 py-1.5">PID</th>
-                  <th className="font-bold px-2 py-1.5">User</th>
-                  <th onClick={() => setSortKey("cpu")} className={`font-bold px-2 py-1.5 cursor-pointer hover:text-zinc-300 ${sortKey === "cpu" ? "text-primary" : ""}`}>CPU%</th>
-                  <th onClick={() => setSortKey("mem")} className={`font-bold px-2 py-1.5 cursor-pointer hover:text-zinc-300 ${sortKey === "mem" ? "text-primary" : ""}`}>MEM%</th>
-                  <th className="font-bold px-2 py-1.5">RSS</th>
-                  <th className="font-bold px-2 py-1.5">Command</th>
-                  <th className="font-bold px-1 py-1.5 w-[36px]"></th>
+                <tr className="text-left text-[10px] text-zinc-500 border-b border-white/10">
+                  <th className="font-semibold px-2 py-1.5">PID</th>
+                  <th className="font-semibold px-2 py-1.5">User</th>
+                  <th onClick={() => setSortKey("cpu")} className={`font-semibold px-2 py-1.5 cursor-pointer hover:text-zinc-300 ${sortKey === "cpu" ? "text-primary" : ""}`}>CPU%</th>
+                  <th onClick={() => setSortKey("mem")} className={`font-semibold px-2 py-1.5 cursor-pointer hover:text-zinc-300 ${sortKey === "mem" ? "text-primary" : ""}`}>MEM%</th>
+                  <th className="font-semibold px-2 py-1.5">RSS</th>
+                  <th className="font-semibold px-2 py-1.5">Command</th>
+                  <th className="font-semibold px-1 py-1.5 w-[36px]"></th>
                 </tr>
               </thead>
               <tbody>
@@ -1978,10 +1978,10 @@ const ServicesTab = ({ sessionId, data, onRefresh }: { sessionId: string; data: 
         toolbar={
           <div className="space-y-2">
             <div className="flex items-center gap-1.5 flex-wrap">
-              <CountPill active={stateFilter === "active"}   onClick={() => setStateFilter("active")}   tone="green"  count={counts.active}>active</CountPill>
-              <CountPill active={stateFilter === "inactive"} onClick={() => setStateFilter("inactive")} tone="zinc"   count={counts.inactive}>inactive</CountPill>
-              <CountPill active={stateFilter === "failed"}   onClick={() => setStateFilter("failed")}   tone="red"    count={counts.failed}>failed</CountPill>
-              <CountPill active={stateFilter === "all"}      onClick={() => setStateFilter("all")}      tone="primary" count={data.rows.length}>all</CountPill>
+              <CountPill active={stateFilter === "active"}   onClick={() => setStateFilter("active")}   tone="green"  count={counts.active}>Active</CountPill>
+              <CountPill active={stateFilter === "inactive"} onClick={() => setStateFilter("inactive")} tone="zinc"   count={counts.inactive}>Inactive</CountPill>
+              <CountPill active={stateFilter === "failed"}   onClick={() => setStateFilter("failed")}   tone="red"    count={counts.failed}>Failed</CountPill>
+              <CountPill active={stateFilter === "all"}      onClick={() => setStateFilter("all")}      tone="primary" count={data.rows.length}>All</CountPill>
             </div>
             <FilterInput value={filter} onChange={setFilter} placeholder="Filter services…" />
           </div>
@@ -2033,7 +2033,7 @@ const ServicesTab = ({ sessionId, data, onRefresh }: { sessionId: string; data: 
                   </div>
                   {result && (
                     <div className={`mt-1.5 text-[10px] px-2 py-1 rounded ${result.ok ? "bg-emerald-500/10 text-emerald-300 border border-emerald-500/20" : "bg-red-500/10 text-red-300 border border-red-500/20"}`}>
-                      <span className="font-bold uppercase tracking-wider mr-1">{result.ok ? "OK" : "Error"}</span>
+                      <span className="font-semibold mr-1">{result.ok ? "OK" : "Error"}</span>
                       <span className="font-mono whitespace-pre-wrap break-words">{result.msg}</span>
                     </div>
                   )}
@@ -2071,7 +2071,7 @@ const InfoCard = ({ title, icon, actions, toolbar, children, className = "", bod
       {/* Title row never wraps: the title truncates, small actions stay pinned. */}
       <div className="px-3 py-2 flex items-center gap-2 min-w-0">
         {icon && <span className="text-zinc-500 shrink-0">{icon}</span>}
-        <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 select-text truncate min-w-0 flex-1">{title}</span>
+        <span className="text-[11px] font-semibold text-zinc-400 select-text truncate min-w-0 flex-1">{title}</span>
         {actions && <div className="shrink-0 flex items-center gap-1.5">{actions}</div>}
       </div>
       {toolbar && <div className="px-3 pb-2">{toolbar}</div>}
@@ -2089,7 +2089,7 @@ interface KVProps { label: string; value: string; icon?: React.ReactNode; copyab
 // width.
 const KV = ({ label, value, icon, copyable }: KVProps) => (
   <div className="py-1 first:pt-0 last:pb-0 border-b border-white/[0.03] last:border-0">
-    <div className="text-[9.5px] font-semibold uppercase tracking-wider text-zinc-500 flex items-center gap-1 mb-0.5">
+    <div className="text-[10.5px] font-semibold text-zinc-500 flex items-center gap-1 mb-0.5">
       {icon}{label}
     </div>
     <div className="text-[11px] font-mono text-zinc-200 select-text break-words leading-snug">
@@ -2108,7 +2108,7 @@ const Meter = ({ label, used, total, compact }: MeterProps) => {
     <div className={compact ? "" : "py-1 first:pt-0 last:pb-0"}>
       {label && (
         <div className="flex items-baseline justify-between text-[10px] mb-1">
-          <span className="font-bold uppercase tracking-wider text-zinc-500">{label}</span>
+          <span className="font-semibold text-zinc-500">{label}</span>
           <span className="font-mono text-zinc-300 select-text">{formatBytes(used)} <span className="text-zinc-500">/ {formatBytes(total)}</span></span>
         </div>
       )}
@@ -2151,7 +2151,7 @@ const FilterInput = ({ value, onChange, placeholder }: { value: string; onChange
 const ProtoPill = ({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) => (
   <button
     onClick={onClick}
-    className={`h-9 sm:h-7 px-3 sm:px-2 rounded-lg text-[10.5px] font-bold uppercase tracking-wider transition-all border ${active ? "bg-primary/15 text-primary border-primary/30" : "bg-white/[0.04] text-zinc-400 border-white/10 hover:bg-white/[0.08] hover:text-white"}`}
+    className={`h-9 sm:h-7 px-3 sm:px-2 rounded-lg text-[11.5px] font-semibold transition-all border ${active ? "bg-primary/15 text-primary border-primary/30" : "bg-white/[0.04] text-zinc-400 border-white/10 hover:bg-white/[0.08] hover:text-white"}`}
   >
     {children}
   </button>
@@ -2166,7 +2166,7 @@ const CountPill = ({ active, onClick, tone, count, children }: { active: boolean
   return (
     <button
       onClick={onClick}
-      className={`h-9 sm:h-7 px-3 sm:px-2 rounded-lg text-[10.5px] font-bold uppercase tracking-wider transition-all border flex items-center gap-1.5 ${baseTone} hover:brightness-110`}
+      className={`h-9 sm:h-7 px-3 sm:px-2 rounded-lg text-[11.5px] font-semibold transition-all border flex items-center gap-1.5 ${baseTone} hover:brightness-110`}
     >
       <span>{children}</span>
       <span className="text-[9.5px] opacity-70">{count}</span>

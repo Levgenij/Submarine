@@ -128,8 +128,8 @@ const BUILTINS: Record<string, { label: string; unit: string; is_pct: boolean; c
   swap:    { label: "Swap",      unit: "%",    is_pct: true,  color: "rgb(192,132,252)" },
   disk:    { label: "Disk /",    unit: "%",    is_pct: true,  color: "rgb(251,191,36)" },
   load:    { label: "Load 1m",   unit: "",     is_pct: false, color: "rgb(244,114,182)" },
-  net_in:  { label: "Net In",    unit: "Mbps", is_pct: false, color: "rgb(34,211,238)" },
-  net_out: { label: "Net Out",   unit: "Mbps", is_pct: false, color: "rgb(251,113,133)" },
+  net_in:  { label: "Net in",    unit: "Mbps", is_pct: false, color: "rgb(34,211,238)" },
+  net_out: { label: "Net out",   unit: "Mbps", is_pct: false, color: "rgb(251,113,133)" },
 };
 
 const TOGGLE_KEYS: { key: string; sub_keys: string[]; label: string }[] = [
@@ -433,7 +433,7 @@ const MonitoringPanel = ({ servers, addLog, active = true }: Props) => {
           same breakpoint since it's the lowest-value piece of chrome. */}
       <div className="shrink-0 px-4 sm:px-6 py-3 sm:py-5 border-b border-white/5 flex items-center justify-between gap-2 sm:gap-3">
         <div className="min-w-0">
-          <h2 className="text-[16px] sm:text-[22px] font-bold text-white uppercase tracking-tight flex items-center gap-2">
+          <h2 className="text-[16px] sm:text-[22px] font-semibold text-white tracking-tight flex items-center gap-2">
             <Activity size={18} className="text-primary" /> Monitoring
           </h2>
           <p className="hidden md:block text-[12px] text-zinc-300 mt-0.5">
@@ -444,9 +444,9 @@ const MonitoringPanel = ({ servers, addLog, active = true }: Props) => {
           <button
             onClick={() => setAddOpen(true)}
             title="Add node"
-            className="h-9 px-2.5 sm:px-3.5 rounded-lg text-[12px] font-bold uppercase tracking-wider bg-primary/15 text-primary border border-primary/30 hover:bg-primary/25 flex items-center gap-1.5"
+            className="h-9 px-2.5 sm:px-3.5 rounded-lg text-[12px] font-semibold bg-primary/15 text-primary border border-primary/30 hover:bg-primary/25 flex items-center gap-1.5"
           >
-            <Plus size={14} /> <span className="hidden sm:inline">Add Node</span>
+            <Plus size={14} /> <span className="hidden sm:inline">Add node</span>
           </button>
           <div className="hidden sm:block h-7 w-px bg-white/10" />
           {anyRunning ? (
@@ -454,18 +454,18 @@ const MonitoringPanel = ({ servers, addLog, active = true }: Props) => {
               onClick={pauseAll}
               disabled={busy}
               title="Pause all"
-              className="h-9 px-2.5 sm:px-3.5 rounded-lg text-[12px] font-bold uppercase tracking-wider bg-amber-500/15 text-amber-200 border border-amber-500/40 hover:bg-amber-500/25 disabled:opacity-50 flex items-center gap-1.5"
+              className="h-9 px-2.5 sm:px-3.5 rounded-lg text-[12px] font-semibold bg-amber-500/15 text-amber-200 border border-amber-500/40 hover:bg-amber-500/25 disabled:opacity-50 flex items-center gap-1.5"
             >
-              <Pause size={14} /> <span className="hidden sm:inline">Pause All</span>
+              <Pause size={14} /> <span className="hidden sm:inline">Pause all</span>
             </button>
           ) : (
             <button
               onClick={resumeAll}
               disabled={busy || rows.length === 0}
               title={allPaused ? "Resume all" : "Start all"}
-              className="h-9 px-2.5 sm:px-3.5 rounded-lg text-[12px] font-bold uppercase tracking-wider bg-emerald-500/15 text-emerald-200 border border-emerald-500/40 hover:bg-emerald-500/25 disabled:opacity-50 flex items-center gap-1.5"
+              className="h-9 px-2.5 sm:px-3.5 rounded-lg text-[12px] font-semibold bg-emerald-500/15 text-emerald-200 border border-emerald-500/40 hover:bg-emerald-500/25 disabled:opacity-50 flex items-center gap-1.5"
             >
-              <Play size={14} /> <span className="hidden sm:inline">{allPaused ? "Resume All" : "Start All"}</span>
+              <Play size={14} /> <span className="hidden sm:inline">{allPaused ? "Resume all" : "Start all"}</span>
             </button>
           )}
           <button
@@ -494,7 +494,7 @@ const MonitoringPanel = ({ servers, addLog, active = true }: Props) => {
         {rows.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-zinc-300 text-[12px] font-mono gap-1 text-center px-4">
             <span>No monitored nodes yet.</span>
-            <span className="text-zinc-500 text-[11px]">Click "+ Add Node" to pick from your saved nodes.</span>
+            <span className="text-zinc-500 text-[11px]">Click "+ Add node" to pick from your saved nodes.</span>
           </div>
         ) : (
           <div className="grid gap-2 sm:gap-2.5" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 290px), 1fr))" }}>
@@ -550,7 +550,7 @@ const MonitoringPanel = ({ servers, addLog, active = true }: Props) => {
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-3" onClick={() => setAddOpen(false)}>
           <div className="w-full max-w-md max-h-[90vh] flex flex-col bg-[#121214] border border-white/10 rounded-xl shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="px-4 py-3 border-b border-white/5 flex items-center justify-between">
-              <span className="text-[12px] font-bold uppercase tracking-widest text-white">Add Node to Monitor</span>
+              <span className="text-[12px] font-semibold text-white">Add node to monitor</span>
               <button aria-label="Close" onClick={() => setAddOpen(false)} className="text-zinc-400 hover:text-white"><X size={16} /></button>
             </div>
             <div className="p-2 flex-1 overflow-y-auto custom-scrollbar">
@@ -726,7 +726,7 @@ const CompactBuiltinRow = ({ metricKey, meta, value, hist }: {
   metricKey: string; meta?: any; value?: number; hist: number[];
 }) => (
   <div className="flex items-center gap-2 px-1.5 h-[22px] bg-white/[0.025] rounded hover:bg-white/[0.04] transition-colors">
-    <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-300 w-[58px] shrink-0 truncate">
+    <span className="text-[11px] font-semibold text-zinc-300 w-[58px] shrink-0 truncate">
       {meta?.label || metricKey}
     </span>
     <span className="text-[11px] font-mono font-bold text-zinc-50 w-[82px] shrink-0 text-right tabular-nums">
@@ -805,8 +805,8 @@ const SettingsModal = ({ onClose, onSaved }: {
     <div className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm flex items-center justify-center p-3" onClick={onClose}>
       <div className="w-full max-w-md max-h-[90vh] flex flex-col bg-[#121214] border border-white/10 rounded-xl shadow-2xl" onClick={(e) => e.stopPropagation()}>
         <div className="px-4 py-3 border-b border-white/5 flex items-center justify-between">
-          <span className="text-[12px] font-bold uppercase tracking-widest text-white flex items-center gap-2">
-            <SettingsIcon size={13} className="text-primary" /> Monitor Settings
+          <span className="text-[12px] font-semibold text-white flex items-center gap-2">
+            <SettingsIcon size={13} className="text-primary" /> Monitor settings
           </span>
           <button aria-label="Close" onClick={onClose} className="text-zinc-400 hover:text-white"><X size={16} /></button>
         </div>
@@ -816,25 +816,25 @@ const SettingsModal = ({ onClose, onSaved }: {
           ) : (
             <>
               <NumberRow
-                label="Poll Interval"
+                label="Poll interval"
                 hint="Seconds between samples (per node). Changes apply on next cycle."
                 value={s.interval_secs} min={1} max={600} step={1} suffix="s"
                 onChange={(v) => setS({ ...s, interval_secs: v })}
               />
               <NumberRow
-                label="Connect Timeout"
+                label="Connect timeout"
                 hint="How long to wait for TCP + SSH handshake before giving up."
                 value={s.connect_timeout_secs} min={2} max={120} step={1} suffix="s"
                 onChange={(v) => setS({ ...s, connect_timeout_secs: v })}
               />
               <NumberRow
-                label="Poll Timeout"
+                label="Poll timeout"
                 hint="How long to wait for the probe script's stdout each cycle."
                 value={s.poll_timeout_secs} min={2} max={120} step={1} suffix="s"
                 onChange={(v) => setS({ ...s, poll_timeout_secs: v })}
               />
               <NumberRow
-                label="Outage Threshold"
+                label="Outage threshold"
                 hint="Consecutive failures before declaring an outage and logging it."
                 value={s.outage_threshold} min={1} max={100} step={1} suffix="× polls"
                 onChange={(v) => setS({ ...s, outage_threshold: v })}
@@ -861,7 +861,7 @@ const SettingsModal = ({ onClose, onSaved }: {
                 <div className="flex items-center gap-2">
                   <Volume2 size={14} className={s.beep_on_outage ? "text-amber-300" : "text-zinc-400"} />
                   <div>
-                    <div className="text-[12px] font-bold text-zinc-100">Beep on Outage</div>
+                    <div className="text-[12px] font-bold text-zinc-100">Beep on outage</div>
                     <div className="text-[10.5px] text-zinc-400">Play a short tone when a node goes offline. Cross-platform synth — no system sound file required.</div>
                   </div>
                 </div>
@@ -870,7 +870,7 @@ const SettingsModal = ({ onClose, onSaved }: {
                     type="button"
                     onClick={(e) => { e.preventDefault(); beepNow(); }}
                     title="Play a test beep"
-                    className="h-7 px-2 rounded-lg text-[10px] font-bold uppercase tracking-wider bg-white/5 text-zinc-200 border border-white/10 hover:bg-white/10"
+                    className="h-7 px-2 rounded-lg text-[11px] font-semibold bg-white/5 text-zinc-200 border border-white/10 hover:bg-white/10"
                   >
                     Test
                   </button>
@@ -883,7 +883,7 @@ const SettingsModal = ({ onClose, onSaved }: {
                 </div>
               </label>
               <NumberRow
-                label="Beep Cooldown"
+                label="Beep cooldown"
                 hint="Minimum seconds between consecutive beeps — collapses a burst of outages into a single alert."
                 value={s.beep_cooldown_secs} min={0} max={600} step={1} suffix="s"
                 onChange={(v) => setS({ ...s, beep_cooldown_secs: v })}
@@ -895,11 +895,11 @@ const SettingsModal = ({ onClose, onSaved }: {
                 <button
                   onClick={save}
                   disabled={saving}
-                  className="flex-1 h-9 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-primary/25 text-primary border border-primary/50 hover:bg-primary/35 disabled:opacity-50"
+                  className="flex-1 h-9 rounded-lg text-[12px] font-semibold bg-primary/25 text-primary border border-primary/50 hover:bg-primary/35 disabled:opacity-50"
                 >
                   {saving ? "Saving…" : "Apply"}
                 </button>
-                <button onClick={onClose} className="h-9 px-3 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-white/5 text-zinc-200 border border-white/10 hover:bg-white/10">
+                <button onClick={onClose} className="h-9 px-3 rounded-lg text-[12px] font-semibold bg-white/5 text-zinc-200 border border-white/10 hover:bg-white/10">
                   Cancel
                 </button>
               </div>
@@ -978,7 +978,7 @@ const ConfigureSlideover = ({ row, busy, onClose, onSetMetrics, onSetCustoms }: 
       <div className="w-full max-w-[480px] bg-[#121214] border-l border-white/10 h-full flex flex-col" onClick={(e) => e.stopPropagation()}>
         <div className="shrink-0 px-4 py-3 border-b border-white/5 flex items-center justify-between">
           <div>
-            <div className="text-[12px] font-bold uppercase tracking-widest text-white">Configure</div>
+            <div className="text-[12px] font-semibold text-white">Configure</div>
             <div className="text-[12px] text-zinc-300 font-mono mt-0.5">{row.name} <span className="text-zinc-500">· {row.host}:{row.port}</span></div>
           </div>
           <button aria-label="Close" onClick={onClose} className="text-zinc-400 hover:text-white"><X size={16} /></button>
@@ -986,7 +986,7 @@ const ConfigureSlideover = ({ row, busy, onClose, onSetMetrics, onSetCustoms }: 
 
         <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-5">
           <section>
-            <div className="text-[10px] font-bold uppercase tracking-widest text-zinc-300 mb-2">Built-in Metrics</div>
+            <div className="text-[11px] font-semibold text-zinc-300 mb-2">Built-in metrics</div>
             <div className="flex flex-wrap gap-1.5">
               {TOGGLE_KEYS.map(({ key, label }) => {
                 const on = row.enabled_metrics.includes(key);
@@ -995,7 +995,7 @@ const ConfigureSlideover = ({ row, busy, onClose, onSetMetrics, onSetCustoms }: 
                     key={key}
                     onClick={() => toggleBuiltin(key)}
                     disabled={busy}
-                    className={`h-7 px-2.5 rounded-lg text-[10.5px] font-bold uppercase tracking-wider border transition-colors ${
+                    className={`h-7 px-2.5 rounded-lg text-[11.5px] font-semibold border transition-colors ${
                       on
                         ? "bg-primary/15 text-primary border-primary/40 hover:bg-primary/25"
                         : "bg-white/[0.03] text-zinc-300 border-white/10 hover:bg-white/[0.06] hover:text-zinc-100"
@@ -1010,9 +1010,9 @@ const ConfigureSlideover = ({ row, busy, onClose, onSetMetrics, onSetCustoms }: 
 
           <section>
             <div className="flex items-center justify-between mb-2">
-              <div className="text-[10px] font-bold uppercase tracking-widest text-zinc-300">Custom Commands</div>
+              <div className="text-[11px] font-semibold text-zinc-300">Custom commands</div>
               <button onClick={addDraft}
-                className="h-6 px-2 rounded text-[10.5px] font-bold uppercase tracking-wider bg-amber-500/15 text-amber-200 border border-amber-500/40 hover:bg-amber-500/25 flex items-center gap-1">
+                className="h-6 px-2 rounded text-[11.5px] font-semibold bg-amber-500/15 text-amber-200 border border-amber-500/40 hover:bg-amber-500/25 flex items-center gap-1">
                 <Plus size={10} /> Add
               </button>
             </div>
@@ -1046,7 +1046,7 @@ const ConfigureSlideover = ({ row, busy, onClose, onSetMetrics, onSetCustoms }: 
                     />
                     <div className="grid grid-cols-3 gap-2 text-[10px]">
                       <label className="space-y-1">
-                        <span className="text-zinc-400 uppercase tracking-wider font-bold">Parse</span>
+                        <span className="text-zinc-400 font-semibold">Parse</span>
                         <select value={cm.parse}
                           onChange={(e) => updateDraft(idx, { parse: e.target.value as any })}
                           className="w-full h-7 px-1.5 bg-white/[0.04] border border-white/10 rounded-lg text-[11px] text-zinc-100 outline-none">
@@ -1056,7 +1056,7 @@ const ConfigureSlideover = ({ row, busy, onClose, onSetMetrics, onSetCustoms }: 
                         </select>
                       </label>
                       <label className="space-y-1">
-                        <span className="text-zinc-400 uppercase tracking-wider font-bold">Display</span>
+                        <span className="text-zinc-400 font-semibold">Display</span>
                         <select value={cm.display}
                           onChange={(e) => updateDraft(idx, { display: e.target.value as any })}
                           disabled={cm.parse === "text"}
@@ -1067,7 +1067,7 @@ const ConfigureSlideover = ({ row, busy, onClose, onSetMetrics, onSetCustoms }: 
                         </select>
                       </label>
                       <label className="space-y-1">
-                        <span className="text-zinc-400 uppercase tracking-wider font-bold">Unit</span>
+                        <span className="text-zinc-400 font-semibold">Unit</span>
                         <input value={cm.unit || ""}
                           onChange={(e) => updateDraft(idx, { unit: e.target.value })}
                           placeholder="%"
@@ -1086,8 +1086,8 @@ const ConfigureSlideover = ({ row, busy, onClose, onSetMetrics, onSetCustoms }: 
             )}
             {dirty && (
               <button onClick={() => onSetCustoms(draft)} disabled={busy}
-                className="mt-3 w-full h-9 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-primary/25 text-primary border border-primary/50 hover:bg-primary/35 disabled:opacity-50">
-                Apply Custom Commands
+                className="mt-3 w-full h-9 rounded-lg text-[12px] font-semibold bg-primary/25 text-primary border border-primary/50 hover:bg-primary/35 disabled:opacity-50">
+                Apply custom commands
               </button>
             )}
           </section>

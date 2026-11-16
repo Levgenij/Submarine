@@ -339,7 +339,7 @@ const TunnelsPanel = ({ sessionId, serverId, disabled = false }: TunnelsPanelPro
           ) : rule?.name ? (
             <span className="flex-1 min-w-0 truncate font-bold text-zinc-100" title={rule.name}>{rule.name}</span>
           ) : (
-            <span className="flex-1 min-w-0 truncate font-bold uppercase tracking-wider text-[10px] opacity-80">{KIND_LABEL[type]}</span>
+            <span className="flex-1 min-w-0 truncate capitalize font-semibold text-[11px] opacity-80">{KIND_LABEL[type]}</span>
           )}
           {live && (
             <button
@@ -422,7 +422,7 @@ const TunnelsPanel = ({ sessionId, serverId, disabled = false }: TunnelsPanelPro
   return (
     <div className="flex-1 flex flex-col h-full bg-[#09090b] overflow-hidden relative">
       {disabled && (
-        <div className="absolute inset-0 z-30 bg-black/55 backdrop-blur-[1px] flex items-center justify-center text-zinc-300 text-xs font-mono uppercase">
+        <div className="absolute inset-0 z-30 bg-black/55 backdrop-blur-[1px] flex items-center justify-center text-zinc-300 text-xs font-mono">
           <span className="px-3 py-1.5 bg-red-500/15 border border-red-500/30 rounded-lg text-red-300">
             Session disconnected
           </span>
@@ -431,14 +431,14 @@ const TunnelsPanel = ({ sessionId, serverId, disabled = false }: TunnelsPanelPro
 
       {/* Header: counts + add button */}
       <div className="shrink-0 px-3 py-2 flex items-center justify-between gap-2 border-b border-white/5 bg-[#121214]">
-        <div className="flex items-center gap-2 min-w-0 text-[10px] font-bold uppercase tracking-widest text-zinc-400">
+        <div className="flex items-center gap-2 min-w-0 text-[11px] font-semibold text-zinc-400">
           <Activity size={12} className="shrink-0" />
           <span className="whitespace-nowrap">{total} {total === 1 ? "forward" : "forwards"}</span>
           {total > 0 && <span className="text-zinc-600 font-normal whitespace-nowrap truncate">· {runningCount} running</span>}
         </div>
         <button
           onClick={() => { setAdding((a) => !a); setError(null); }}
-          className="h-6 px-2.5 rounded text-[10px] font-bold uppercase tracking-wider bg-primary/15 text-primary border border-primary/30 hover:bg-primary/25 flex items-center gap-1.5 shrink-0"
+          className="h-6 px-2.5 rounded text-[11px] font-semibold bg-primary/15 text-primary border border-primary/30 hover:bg-primary/25 flex items-center gap-1.5 shrink-0"
         >
           {adding ? <X size={11} /> : <Plus size={11} />}
           <span>{adding ? "Cancel" : "Add"}</span>
@@ -461,7 +461,7 @@ const TunnelsPanel = ({ sessionId, serverId, disabled = false }: TunnelsPanelPro
             <select
               value={draft.type}
               onChange={(e) => setDraft({ ...draft, type: e.target.value as "D" | "L" | "R" })}
-              className="h-7 px-1.5 bg-white/[0.04] border border-white/10 rounded-lg text-[11px] text-primary font-bold uppercase shrink-0"
+              className="h-7 px-1.5 bg-white/[0.04] border border-white/10 rounded-lg text-[12px] text-primary font-semibold shrink-0"
             >
               <option value="D" className="bg-[#1a1a1e]">Dynamic</option>
               <option value="L" className="bg-[#1a1a1e]">Local</option>
@@ -498,7 +498,7 @@ const TunnelsPanel = ({ sessionId, serverId, disabled = false }: TunnelsPanelPro
             <button
               onClick={addTunnel}
               disabled={busy}
-              className="h-7 px-3 rounded-lg text-[10px] font-bold uppercase tracking-wider bg-primary/15 text-primary border border-primary/30 hover:bg-primary/25 disabled:opacity-50 shrink-0"
+              className="h-7 px-3 rounded-lg text-[11px] font-semibold bg-primary/15 text-primary border border-primary/30 hover:bg-primary/25 disabled:opacity-50 shrink-0"
             >
               {busy ? "…" : "Start"}
             </button>
@@ -539,7 +539,7 @@ const TunnelsPanel = ({ sessionId, serverId, disabled = false }: TunnelsPanelPro
         <div className="px-3 py-1.5 flex items-center justify-between border-b border-white/5">
           <button
             onClick={() => setLogsOpen((o) => !o)}
-            className="text-[10px] font-bold uppercase tracking-widest text-zinc-400 hover:text-zinc-200 flex items-center gap-1.5"
+            className="text-[11px] font-semibold text-zinc-400 hover:text-zinc-200 flex items-center gap-1.5"
           >
             <FileText size={11} />
             <span>Log</span>
@@ -555,7 +555,7 @@ const TunnelsPanel = ({ sessionId, serverId, disabled = false }: TunnelsPanelPro
               <button
                 onClick={() => setLogFilter(null)}
                 title="Show all tunnels"
-                className="px-1.5 text-[9px] uppercase tracking-wider text-zinc-500 hover:text-zinc-200"
+                className="px-1.5 text-[10px] text-zinc-500 hover:text-zinc-200"
               >
                 Clear filter
               </button>

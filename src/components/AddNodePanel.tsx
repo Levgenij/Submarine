@@ -874,7 +874,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
               <div className="grid grid-cols-4 gap-3 animate-in fade-in">
                 <input
                   className="col-span-3 h-9 bg-[#1a1a1e] rounded-lg px-3 text-[12px] text-white border border-white/10 outline-none focus:border-primary/50 transition-all shadow-inner"
-                  placeholder="Proxy Host"
+                  placeholder="Proxy host"
                   value={newNode.proxyHost || ""}
                   onChange={e => setNewNode({ ...newNode, proxyHost: e.target.value })}
                 />
@@ -1060,7 +1060,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                   <div key={t.rid ?? idx} className="p-2 bg-[#1a1a1e] rounded-lg border border-white/5 group transition-all hover:border-primary/30 space-y-1.5">
                     <div className="flex items-center gap-2">
                       <select
-                        className="bg-transparent text-[11px] font-black outline-none text-primary uppercase tracking-wider cursor-pointer pl-1"
+                        className="bg-transparent text-[12px] font-semibold outline-none text-primary cursor-pointer pl-1"
                         value={t.type}
                         onChange={e => updateTunnel(idx, 'type', e.target.value)}
                       >
@@ -1115,7 +1115,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                         title={t.stopped
                           ? "Kept, but not started on connect. Click to start it on connect."
                           : "Started on connect. Click to keep it stopped."}
-                        className={`h-5 px-1.5 rounded text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 shrink-0 transition-colors ${
+                        className={`h-5 px-1.5 rounded text-[11px] font-semibold flex items-center gap-1 shrink-0 transition-colors ${
                           t.stopped
                             ? "text-zinc-500 bg-white/5 hover:text-zinc-300"
                             : "text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20"
@@ -1377,7 +1377,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
             <div className="flex items-center justify-between p-4 border-b border-white/5 shrink-0">
               <div className="flex items-center gap-2">
                 <Download size={14} className="text-primary" />
-                <h3 id="ssh-import-title" className="text-[12px] font-black uppercase tracking-widest text-zinc-100">
+                <h3 id="ssh-import-title" className="text-[12px] font-semibold text-zinc-100">
                   Import SSH hosts
                 </h3>
               </div>
@@ -1401,7 +1401,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
               <button
                 onClick={() => switchImportSource("ssh")}
                 disabled={importBusy}
-                className={`h-7 px-3 rounded-lg text-[10.5px] font-bold uppercase tracking-wider transition-all ${
+                className={`h-7 px-3 rounded-lg text-[11.5px] font-semibold transition-all ${
                   importSource === "ssh"
                     ? "bg-primary/10 text-primary border border-primary/30"
                     : "text-zinc-400 border border-white/5 hover:text-white hover:bg-white/[0.04]"
@@ -1413,7 +1413,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                 <button
                   onClick={() => switchImportSource("filezilla")}
                   disabled={importBusy}
-                  className={`h-7 px-3 rounded-lg text-[10.5px] font-bold uppercase tracking-wider transition-all ${
+                  className={`h-7 px-3 rounded-lg text-[11.5px] font-semibold transition-all ${
                     importSource === "filezilla"
                       ? "bg-primary/10 text-primary border border-primary/30"
                       : "text-zinc-400 border border-white/5 hover:text-white hover:bg-white/[0.04]"
@@ -1425,7 +1425,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
               <button
                 onClick={() => switchImportSource("paste")}
                 disabled={importBusy}
-                className={`h-7 px-3 rounded-lg text-[10.5px] font-bold uppercase tracking-wider transition-all ${
+                className={`h-7 px-3 rounded-lg text-[11.5px] font-semibold transition-all ${
                   importSource === "paste"
                     ? "bg-primary/10 text-primary border border-primary/30"
                     : "text-zinc-400 border border-white/5 hover:text-white hover:bg-white/[0.04]"
@@ -1459,7 +1459,7 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
                     <button
                       onClick={parsePastedImport}
                       disabled={!importPasteText.trim()}
-                      className="h-8 px-3 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-primary/10 text-primary border border-primary/30 hover:bg-primary/20 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                      className="h-8 px-3 rounded-lg text-[12px] font-semibold bg-primary/10 text-primary border border-primary/30 hover:bg-primary/20 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                     >
                       Parse pasted text
                     </button>
@@ -1567,14 +1567,14 @@ const AddNodePanel = ({ isOpen, onClose, newNode, setNewNode, onSave, credential
               <button
                 onClick={closeImportModal}
                 disabled={importBusy}
-                className="px-3 h-8 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 disabled:cursor-not-allowed"
+                className="px-3 h-8 rounded-lg text-[12px] font-semibold bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 Cancel
               </button>
               <button
                 onClick={importSelectedHosts}
                 disabled={importBusy || importSelected.size === 0 || importLoading}
-                className="px-3 h-8 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-primary/15 border border-primary/40 text-primary hover:bg-primary/25 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
+                className="px-3 h-8 rounded-lg text-[12px] font-semibold bg-primary/15 border border-primary/40 text-primary hover:bg-primary/25 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
               >
                 <Download size={11} />
                 {importBusy ? "Importing…" : `Import ${importSelected.size} selected`}
