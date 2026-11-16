@@ -12,7 +12,7 @@ import { useBroadcast } from '../ui/broadcast';
 import HistorySearchOverlay, { CMD_HISTORY_CHANGED } from './HistorySearchOverlay';
 import { bundledAlias, fontFamilyCss, readFontFamily, readFontSize } from '../util/terminalFont';
 import { readScrollback } from '../util/terminalScrollback';
-import { TERMINAL_PASTE, withoutPasteControls, type TerminalPaste } from '../util/pasteText';
+import { TERMINAL_CLEAR, TERMINAL_PASTE, clearTerminal, withoutPasteControls, type TerminalPaste } from '../util/pasteText';
 import { TERMINAL_READ, TERMINAL_READ_REPLY, type TerminalRead, type TerminalReadReply } from '../util/terminalRead';
 import { READABLE_CONTRAST, readBoldBright, readMinContrast, readScheme } from '../util/terminalTheme';
 import { readUseLocalShell } from '../util/terminalShell';
@@ -817,7 +817,9 @@ const TerminalView = ({
   // those on and stops them from bubbling, so they never reach here; the
   // shifted ones would go the same way, so the key handler on the terminal
   // lets them through (see attachCustomKeyEventHandler). The webview's own
-  // reload on Ctrl+Shift+R is cancelled app-wide (main.tsx).
+  // reload on Ctrl+Shift+R is cancelled app-wide (main.tsx). Ctrl+Shift+K /
+  // Cmd+Shift+K clears the terminal in the app (see clearLocalTerminal), the
+  // key other terminals use for it; it goes the same way, and only here.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey) || !e.shiftKey) return;
@@ -837,11 +839,14 @@ const TerminalView = ({
       } else if (e.keyCode === 82) {
         e.preventDefault();
         setShowHistory(true);
+      } else if (e.keyCode === 75) {
+        e.preventDefault();
+        if (!e.repeat) clearTerminal(terminalId);
       }
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [terminalId]);
 
   // Close + clear search decorations. Refocuses xterm so the user's next
   // keystroke goes to the shell, not to nowhere.
@@ -1586,12 +1591,13 @@ const TerminalView = ({
         ev.preventDefault();
         return false;
       }
-      // Ctrl+Shift+F opens the search chip and Ctrl+Shift+R the command
-      // history overlay. Not sent to the shell (they'd arrive as plain
-      // Ctrl+F / Ctrl+R) and left to bubble up to the document-level
-      // listener that opens them. By keyCode, the layout's F and R keys,
-      // which are also what xterm turns into Ctrl+F / Ctrl+R.
-      if (noOtherMods && (ev.keyCode === 70 || ev.keyCode === 82)) {
+      // Ctrl+Shift+F opens the search chip, Ctrl+Shift+R the command history
+      // overlay and Ctrl+Shift+K clears the terminal. Not sent to the shell
+      // (they'd arrive as plain Ctrl+F / Ctrl+R / Ctrl+K) and left to bubble up
+      // to the document-level listener that acts on them. By keyCode, the
+      // layout's F, R and K keys, which are also what xterm turns into Ctrl+F /
+      // Ctrl+R / Ctrl+K.
+      if (noOtherMods && (ev.keyCode === 70 || ev.keyCode === 82 || ev.keyCode === 75)) {
         ev.preventDefault();
         return false;
       }
@@ -1645,6 +1651,12 @@ const TerminalView = ({
       void pasteText(text, false, { enter });
     };
     window.addEventListener(TERMINAL_PASTE, onPasteRequest);
+    // A clear request (see TERMINAL_CLEAR). Every view of the terminal takes it,
+    // a Wall tile too: it only changes what this xterm shows.
+    const onClearRequest = (e: Event) => {
+      if ((e as CustomEvent<string>).detail === terminalId) clearLocalTerminalRef.current();
+    };
+    window.addEventListener(TERMINAL_CLEAR, onClearRequest);
     // The last `count` lines of the buffer, scrollback included, a wrapped
     // line rebuilt into one as buildSelectedText does. The blank lines at the
     // end (the rows under the prompt) are left out.
@@ -1899,6 +1911,7 @@ const TerminalView = ({
       document.removeEventListener('mouseup', onDocMouseUp);
       window.removeEventListener('blur', onWindowBlur);
       window.removeEventListener(TERMINAL_PASTE, onPasteRequest);
+      window.removeEventListener(TERMINAL_CLEAR, onClearRequest);
       window.removeEventListener(TERMINAL_READ, onReadRequest);
       window.visualViewport?.removeEventListener('resize', onVvResize);
       if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
@@ -1930,6 +1943,27 @@ const TerminalView = ({
       }
     };
   }, [sessionId, terminalId]);
+
+  // Local presentation only: never send input or reset the terminal modes.
+  // xterm keeps the row with the cursor; everything else goes, for good.
+  const clearLocalTerminal = () => {
+    const term = xtermRef.current;
+    if (!term) return;
+    // Full-screen applications own their alternate-screen layout. Clearing
+    // it locally would leave their idea of the screen out of sync.
+    if (term.buffer.active.type === 'alternate') {
+      notify('Not while a full-screen app runs', 'err');
+      return;
+    }
+    searchAddonRef.current?.clearDecorations?.();
+    term.clearSelection();
+    term.clear();
+    notify('Cleared');
+  };
+  // The clear request's listener lives as long as the xterm; it calls the
+  // latest one.
+  const clearLocalTerminalRef = useRef(clearLocalTerminal);
+  clearLocalTerminalRef.current = clearLocalTerminal;
 
   return (
     // flex-col so the MobileKeyBar can pin to the bottom of the terminal

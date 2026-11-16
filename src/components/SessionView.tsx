@@ -17,7 +17,7 @@ import { AiPanel } from "./ai/AiPanel";
 import { AiTerminal } from "./ai/AiTerminal";
 import { createFeed, registerFeed, AI_FOCUS_EVENT, takeAiFocus } from "../util/aiEvents";
 import { ai, AI_LEVEL_EVENT, type AiLevelDetail } from "../util/aiApi";
-import { writeToTerminal } from "../util/pasteText";
+import { clearTerminal, writeToTerminal } from "../util/pasteText";
 import { readTerminal } from "../util/terminalRead";
 import { useIsCompact, useViewportWidth } from "../hooks/useViewport";
 import { RenameInput } from "../ui/renameInput";
@@ -2400,7 +2400,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
               onContextMenu={(e) => { e.preventDefault(); setTermMenu(null); }}
             />
             <div
-              style={{ left: Math.min(termMenu.x, window.innerWidth - 240), top: Math.min(termMenu.y, window.innerHeight - 60) }}
+              style={{ left: Math.min(termMenu.x, window.innerWidth - 240), top: Math.min(termMenu.y, window.innerHeight - 90) }}
               className="fixed z-[9999] w-[220px] bg-[#15151a] border border-white/10 rounded-lg shadow-2xl py-1 text-[11.5px]"
             >
               {termMenu.renaming ? (
@@ -2415,12 +2415,21 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   onCancel={() => setTermMenu(null)}
                 />
               ) : (
-                <button
-                  onClick={() => setTermMenu(m => m && { ...m, renaming: true })}
-                  className="w-full flex items-center gap-2.5 px-3 py-1.5 hover:bg-white/[0.06] text-zinc-200 hover:text-white text-left"
-                >
-                  <span className="flex-1">Rename tab</span>
-                </button>
+                <>
+                  <button
+                    onClick={() => setTermMenu(m => m && { ...m, renaming: true })}
+                    className="w-full flex items-center gap-2.5 px-3 py-1.5 hover:bg-white/[0.06] text-zinc-200 hover:text-white text-left"
+                  >
+                    <span className="flex-1">Rename tab</span>
+                  </button>
+                  <button
+                    onClick={() => { clearTerminal(termMenu.termId); setTermMenu(null); requestTerminalFocus(); }}
+                    title="Clears the display and scrollback in this app (Ctrl+Shift+K, Cmd+Shift+K on a Mac) and keeps the line with the cursor. Sends nothing to the server."
+                    className="w-full flex items-center gap-2.5 px-3 py-1.5 hover:bg-white/[0.06] text-zinc-200 hover:text-white text-left"
+                  >
+                    <span className="flex-1">Clear terminal</span>
+                  </button>
+                </>
               )}
             </div>
           </>,
