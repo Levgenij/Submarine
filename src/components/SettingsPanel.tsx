@@ -45,6 +45,85 @@ const PrefToggle = ({ checked, onToggle, label }: { checked: boolean; onToggle: 
 // Slider covers the everyday range; the number field takes anything 1-99.
 const SLIDER_MAX = 40;
 
+// Families installed on this device, lower case: the list a font picker
+// shows. The canvas probe in isFontAvailable can miss a font the webview does
+// draw (seen on macOS, #59), and a font picked under "Installed on this
+// device" must not then be called missing. Null until the list is in, so a
+// warning can't flash on and off; if the list can't be read, it is empty and
+// the probe decides alone.
+function useListedFonts(): Set<string> | null {
+  const [listed, setListed] = useState<Set<string> | null>(null);
+  useEffect(() => {
+    let alive = true;
+    loadInstalledFonts().then(
+      (fonts) => { if (alive) setListed(new Set(fonts.map((f) => f.family.toLowerCase()))); },
+      () => { if (alive) setListed(new Set()); },
+    );
+    return () => { alive = false; };
+  }, []);
+  return listed;
+}
+
+// The interface font: menus, panels and forms, on this device. Text set in
+// columns follows the terminal font, with this one for the characters that
+// font lacks (util/uiFont). Applied ~0.5 s after you stop typing, like the
+// terminal font: a change restyles the whole page.
+function InterfaceFontSetting({ settings, setSettings }: any) {
+  const family: string = settings.uiFontFamily || "";
+  const [draft, setDraft] = useState(family);
+  useEffect(() => setDraft(family), [family]);
+  const commitTimer = useRef<number | null>(null);
+  useEffect(() => () => { if (commitTimer.current) window.clearTimeout(commitTimer.current); }, []);
+  const commit = (v: string) => {
+    if (commitTimer.current) { window.clearTimeout(commitTimer.current); commitTimer.current = null; }
+    const clean = sanitizeFontFamily(v);
+    setSettings((s: any) => (s.uiFontFamily === clean ? s : { ...s, uiFontFamily: clean }));
+  };
+  const onChange = (v: string) => {
+    setDraft(v);
+    if (commitTimer.current) window.clearTimeout(commitTimer.current);
+    commitTimer.current = window.setTimeout(() => commit(v), 500);
+  };
+  const listed = useListedFonts();
+  const installed = useMemo(
+    () => !draft.trim() || listed === null || listed.has(primaryFontName(draft).toLowerCase()) || isFontAvailable(draft),
+    [draft, listed],
+  );
+
+  return (
+    <div className="space-y-2 pt-6 border-t border-white/5">
+      <div className="flex justify-between items-center gap-2">
+        <label htmlFor="ui-font-family" className="text-[11px] font-black text-zinc-500 uppercase tracking-wider">Interface font</label>
+        {draft && (
+          <button
+            type="button"
+            onClick={() => { setDraft(""); commit(""); }}
+            className="text-[11px] font-semibold text-zinc-400 hover:text-white transition-colors"
+          >
+            Use default
+          </button>
+        )}
+      </div>
+      <FontPicker
+        kind="interface"
+        id="ui-font-family"
+        value={draft}
+        onChange={onChange}
+        onCommit={commit}
+        placeholder="Default - pick from the list or type a font name"
+      />
+      {!installed && (
+        <p className="text-[11.5px] text-amber-400/90">
+          "{primaryFontName(draft)}" doesn't seem to be installed on this device, so the default font is used instead.
+        </p>
+      )}
+      <p className="text-[11.5px] text-zinc-500 leading-relaxed">
+        The font of menus, panels and forms on this device. Paths and figures set in columns use the terminal font, and this one for any character the terminal font doesn't have, such as Chinese.
+      </p>
+    </div>
+  );
+}
+
 // Terminal font face + size. Both are drafts while you type: the size field
 // can sit empty mid-edit (it used to snap back to 14 the moment it was
 // cleared, which made small sizes impossible to type on Android), and the
@@ -74,21 +153,7 @@ function TerminalFontSettings({ settings, setSettings }: any) {
     commitTimer.current = window.setTimeout(() => commitFamily(v), 500);
   };
 
-  // Families installed on this device: the list the picker shows. The canvas
-  // probe in isFontAvailable can miss a font the webview does draw (seen on
-  // macOS, #59), and a font picked under "Installed on this device" must not
-  // then be called missing. No warning until the list is in, so it can't
-  // flash on and off; if the list can't be read, the probe decides alone.
-  const [listed, setListed] = useState<Set<string> | null>(null);
-  useEffect(() => {
-    let alive = true;
-    loadInstalledFonts().then(
-      (fonts) => { if (alive) setListed(new Set(fonts.map((f) => f.family.toLowerCase()))); },
-      () => { if (alive) setListed(new Set()); },
-    );
-    return () => { alive = false; };
-  }, []);
-
+  const listed = useListedFonts();
   const installed = useMemo(
     () => listed === null || listed.has(primaryFontName(familyDraft).toLowerCase()) || isFontAvailable(familyDraft),
     [familyDraft, listed],
@@ -814,6 +879,8 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs, onOpenAiChats, onOpe
                 ))}
               </div>
             </div>
+
+            <InterfaceFontSetting settings={settings} setSettings={setSettings} />
           </div>
         </section>
 
@@ -982,7 +1049,7 @@ const SettingsPanel = ({ settings, setSettings, onOpenLogs, onOpenAiChats, onOpe
             <button
               onClick={() => {
                 if(window.confirm('Reset all UI customizations?')) {
-                  setSettings((s: any) => ({ ...s, primaryColor: '#60a5fa', backgroundColor: '#0a0a0c', terminalFontSize: 14, terminalFontFamily: '' }));
+                  setSettings((s: any) => ({ ...s, primaryColor: '#60a5fa', backgroundColor: '#0a0a0c', terminalFontSize: 14, terminalFontFamily: '', uiFontFamily: '' }));
                 }
               }}
               className="px-4 h-9 bg-zinc-900 border border-white/5 text-zinc-300 rounded-lg text-xs font-bold uppercase hover:bg-white/5 transition-all w-full"
