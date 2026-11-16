@@ -18,6 +18,7 @@ import QuickConnectModal, { QuickAuth } from "./components/QuickConnectModal";
 import { useConfirm, useTextPrompt } from "./ui/confirm";
 import { useSlideOverFocus } from "./ui/slideOverFocus";
 import { RenameInput } from "./ui/renameInput";
+import { OpenServerMenu } from "./components/OpenServerMenu";
 import { buildSnapshot, parseSnapshot, snapshotKey, type SnapTerm } from "./sessionSnapshot";
 import { FONT_FAMILY_KEY, FONT_SIZE_KEY, readFontFamily, readFontSize } from "./util/terminalFont";
 import { UI_FONT_FAMILY_KEY, applyFonts, readUiFontFamily } from "./util/uiFont";
@@ -250,6 +251,30 @@ function DesktopApp() {
     }
     return open;
   }, [sessions, sessionStatuses, promptSessions]);
+  // The tabs' order on the strip, by session id: dragging a tab changes it,
+  // and a new tab goes at the end. `sessions` keeps its own order, so the
+  // views are never moved around in the page.
+  const [tabOrder, setTabOrder] = useState<string[]>([]);
+  const orderedSessions = useMemo(() => {
+    const byId = new Map(sessions.map((s) => [s.id, s]));
+    const out: Session[] = [];
+    for (const id of tabOrder) {
+      const s = byId.get(id);
+      if (s) { out.push(s); byId.delete(id); }
+    }
+    for (const s of sessions) if (byId.has(s.id)) out.push(s);
+    return out;
+  }, [sessions, tabOrder]);
+  // However a session goes (x, shell exit, error reset, lock), its place goes:
+  // a reopened `session-N` starts at the end.
+  useEffect(() => setTabOrder(p => {
+    const next = p.filter(id => sessions.some(s => s.id === id));
+    return next.length === p.length ? p : next;
+  }), [sessions]);
+  // The tab being dragged along the strip, once it has moved.
+  const [draggingTab, setDraggingTab] = useState<string | null>(null);
+  // The + after the tabs: its menu opens under it.
+  const [openServerAnchor, setOpenServerAnchor] = useState<HTMLElement | null>(null);
 
   // Maximize state mirrored from the OS window so the title-bar button can
   // swap its icon (single square = maximize, overlapping squares = restore)
@@ -1552,6 +1577,108 @@ function DesktopApp() {
     question: (opened) => unsavedQuestion("SSH key", !opened.id, opened.name),
   });
 
+  // Closing a tab, from its x, a middle click, its menu or the phone's list:
+  // the connection goes, with the tab's broadcast, split, Wall and rename
+  // places. With `ask`, a live connection is asked about first.
+  const closeTab = async (sid: string, ask: boolean) => {
+    if (ask && sessionStatuses[sid] === "connected") {
+      const ok = await confirm({
+        title: "Close this session?",
+        message: "The connection will be dropped.",
+        okLabel: "Close",
+        destructive: true,
+      });
+      if (!ok) return;
+    }
+    invoke("disconnect_session", { sessionId: sid }).catch(() => {});
+    setSessions(prev => prev.filter(x => x.id !== sid));
+    setSessionStatuses(prev => { const { [sid]: _, ...rest } = prev; return rest; });
+    setTabMenu(m => (m?.sessionId === sid ? null : m));
+    broadcast.removeSession(sid);
+    setMergedSessionIds(prev => {
+      const next = prev.filter(id => id !== sid);
+      return next.length < 2 ? [] : next;
+    });
+    unpinSessionFromWall(sid);
+    setActiveView(prev => (prev === sid ? "nodes" : prev));
+  };
+
+  // Ctrl+Tab goes to the next tab, Ctrl+Shift+Tab to the one before. A
+  // terminal gets no Tab from it, so the shell loses nothing; a remote
+  // desktop keeps the keys as the remote's own (switching its windows).
+  const orderedSessionsRef = useRef(orderedSessions);
+  orderedSessionsRef.current = orderedSessions;
+  const activeViewRef = useRef(activeView);
+  activeViewRef.current = activeView;
+  // The slide-over panels and Quick connect carry no aria-modal.
+  const overlayOpenRef = useRef(overlayOpen);
+  overlayOpenRef.current = overlayOpen;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Tab" || !e.ctrlKey || e.altKey || e.metaKey) return;
+      if (overlayOpenRef.current) return;
+      if ((e.target as HTMLElement | null)?.closest?.("[data-remote-keys]")) return;
+      if (document.querySelector('[aria-modal="true"], [data-open-server-menu]')) return;
+      const list = orderedSessionsRef.current;
+      if (list.length === 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const at = list.findIndex((s) => s.id === activeViewRef.current);
+      const step = e.shiftKey ? -1 : 1;
+      const next = list[at < 0 ? (step > 0 ? 0 : list.length - 1) : (at + step + list.length) % list.length];
+      setMergedSessionIds((prev) => (prev.includes(next.id) ? prev : []));
+      setActiveView(next.id);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+
+  // Dragging a tab along the strip: it moves past a neighbour once the
+  // pointer crosses that neighbour's middle. A drag doesn't select the tab.
+  const tabDrag = useRef<{ id: string; x: number; moved: boolean } | null>(null);
+  const tabDragged = useRef(false);
+  const startTabDrag = (e: { button: number; clientX: number; target: EventTarget }, id: string) => {
+    if (e.button !== 0 || (e.target as HTMLElement).closest("[data-tab-close]")) return;
+    tabDrag.current = { id, x: e.clientX, moved: false };
+  };
+  useEffect(() => {
+    const move = (e: PointerEvent) => {
+      const d = tabDrag.current;
+      if (!d) return;
+      if (!d.moved) {
+        if (Math.abs(e.clientX - d.x) < 6) return;
+        d.moved = true;
+        setDraggingTab(d.id);
+      }
+      const strip = tabStripEl.current;
+      if (!strip) return;
+      const tabs = [...strip.querySelectorAll<HTMLElement>("[data-tab-id]")];
+      const now = tabs.map((el) => el.dataset.tabId as string);
+      const others = tabs.filter((el) => el.dataset.tabId !== d.id);
+      const at = others.filter((el) => { const r = el.getBoundingClientRect(); return r.left + r.width / 2 < e.clientX; }).length;
+      const next = others.map((el) => el.dataset.tabId as string);
+      next.splice(at, 0, d.id);
+      if (next.join("\n") !== now.join("\n")) setTabOrder(next);
+    };
+    const end = () => {
+      const d = tabDrag.current;
+      tabDrag.current = null;
+      if (!d?.moved) return;
+      setDraggingTab(null);
+      // The click that ends a drag doesn't select the tab.
+      tabDragged.current = true;
+      setTimeout(() => { tabDragged.current = false; }, 0);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+    };
+  }, []);
+
   // Render helper, NOT a component — it is invoked as `{TitleBar()}` below,
   // never as `<TitleBar />`. Rendering it as a JSX element would give it a
   // fresh function identity on every DesktopApp render, so React would treat
@@ -1648,7 +1775,7 @@ function DesktopApp() {
                   role="listbox"
                   className="absolute z-[70] top-8 left-0 right-0 bg-[#15151a] border border-white/10 rounded-xl shadow-2xl p-1.5 max-h-[60vh] overflow-y-auto custom-scrollbar"
                 >
-                  {sessions.map(s => {
+                  {orderedSessions.map(s => {
                     const st = sessionStatuses[s.id] ?? 'connecting';
                     const dot =
                       promptSessions.has(s.id) ? 'bg-primary animate-pulse-brief' :
@@ -1710,17 +1837,7 @@ function DesktopApp() {
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            const sid = s.id;
-                            invoke('disconnect_session', { sessionId: sid }).catch(() => {});
-                            setSessions(prev => prev.filter(x => x.id !== sid));
-                            setSessionStatuses(prev => { const { [sid]: _, ...rest } = prev; return rest; });
-                            broadcast.removeSession(sid);
-                            setMergedSessionIds(prev => {
-                              const next = prev.filter(id => id !== sid);
-                              return next.length < 2 ? [] : next;
-                            });
-                            unpinSessionFromWall(sid);
-                            setActiveView(prev => (prev === sid ? 'nodes' : prev));
+                            void closeTab(s.id, false);
                           }}
                           title="Close session"
                           className="h-10 w-10 sm:h-8 sm:w-8 shrink-0 rounded-lg flex items-center justify-center text-zinc-400 hover:text-red-400 hover:bg-white/[0.06] transition-all"
@@ -1767,10 +1884,13 @@ function DesktopApp() {
           the horizontal scroll is replaced by the dropdown above; the
           strip below is hidden on mobile. */}
       <div data-tauri-drag-region className={`${isMobile ? 'hidden' : 'flex'} relative flex-1 min-w-0 h-full`}>
+      {/* The strip and its arrows: as wide as the tabs, at most the row, so
+          the + follows the last tab and stays in view when they don't fit. */}
+      <div className="relative flex min-w-0 h-full">
       <div
         ref={tabStripRef}
         data-tauri-drag-region
-        className="flex flex-1 min-w-0 gap-1 overflow-x-auto no-scrollbar h-full items-end pb-1"
+        className="flex min-w-0 gap-1 overflow-x-auto no-scrollbar h-full items-end pb-1"
         onWheel={(e) => {
           // A mouse wheel scrolls the strip sideways; a touchpad's sideways
           // swipe does by itself. A wheel that counts in lines or pages
@@ -1780,7 +1900,7 @@ function DesktopApp() {
           e.currentTarget.scrollLeft += e.deltaY * unit;
         }}
       >
-        {sessions.map(s => {
+        {orderedSessions.map(s => {
           const st = sessionStatuses[s.id] ?? "connecting";
           // Dot palette: green = connected, amber = connecting, red = failed
           // or disconnected. The pulse animation only runs while connecting
@@ -1812,7 +1932,10 @@ function DesktopApp() {
             <div
               key={s.id}
               data-tab-id={s.id}
+              onPointerDown={(e) => startTabDrag(e, s.id)}
               onClick={(e) => {
+                // The click that ends a drag along the strip selects nothing.
+                if (tabDragged.current) return;
                 // Ctrl/⌘-click toggles this tab in the split beside the
                 // currently-active session view — a quick keyboard-free
                 // way to tile two servers together without going through
@@ -1838,6 +1961,14 @@ function DesktopApp() {
                 setActiveView(s.id);
               }}
               ref={(el) => { if (el) sessionTabRefs.current.set(s.id, el); else sessionTabRefs.current.delete(s.id); }}
+              // A middle click closes the tab, as in a browser, asking first
+              // for a live connection. The wheel button's autoscroll doesn't start.
+              onMouseDown={(e) => { if (e.button === 1) e.preventDefault(); }}
+              onAuxClick={(e) => {
+                if (e.button !== 1) return;
+                e.preventDefault();
+                void closeTab(s.id, true);
+              }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setTabMenu({ x: e.clientX, y: e.clientY, sessionId: s.id });
@@ -1861,7 +1992,7 @@ function DesktopApp() {
                   : isMergedTab
                     ? 'bg-primary/[0.05] text-primary/80 border border-primary/25 hover:bg-primary/10'
                     : 'bg-white/[0.06] text-zinc-300 border border-white/10 hover:bg-white/[0.1] hover:border-white/20 hover:text-white'
-              }`}
+              } ${draggingTab === s.id ? 'opacity-60' : ''}`}
             >
               <span
                 title={dotTitle}
@@ -1923,31 +2054,13 @@ function DesktopApp() {
                   in SessionView, so the corners nest in both strips. */}
               <button
                 type="button"
+                data-tab-close=""
                 aria-label="Close session"
                 className="hidden sm:flex ml-1 h-5 w-5 items-center justify-center rounded hover:bg-white/10 shrink-0 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 text-zinc-400 hover:text-red-400 transition-opacity"
-                onClick={async (e) => {
+                onClick={(e) => {
                   e.stopPropagation();
-                  // Only confirm when there's an actual live connection to
-                  // drop — connecting/failed/disconnected close instantly.
-                  // Status source of truth is the same sessionStatuses map
-                  // that drives the coloured dot above.
-                  if (sessionStatuses[s.id] === "connected") {
-                    const ok = await confirm({
-                      title: "Close this session?",
-                      message: "The connection will be dropped.",
-                      okLabel: "Close",
-                      destructive: true,
-                    });
-                    if (!ok) return;
-                  }
-                  setSessions(prev => prev.filter(sess => sess.id !== s.id));
-                  setSessionStatuses(prev => {
-                    const { [s.id]: _, ...rest } = prev;
-                    return rest;
-                  });
-                  broadcast.removeSession(s.id);
-                  unpinSessionFromWall(s.id);
-                  setActiveView(prev => (prev === s.id ? "nodes" : prev));
+                  // A live connection is asked about first; the others close at once.
+                  void closeTab(s.id, true);
                 }}
               >
                 <X size={12} />
@@ -1980,6 +2093,36 @@ function DesktopApp() {
         </button>
       )}
       </div>
+      {/* The + after the last tab: a saved server from anywhere, without
+          going back to the Servers page. */}
+      {isUnlocked && (
+        <button
+          type="button"
+          // A click leaves the focus where it was (a terminal, say): the
+          // menu gives it back there when Escape closes it.
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={(e) => setOpenServerAnchor(openServerAnchor ? null : e.currentTarget)}
+          title="Open a server"
+          aria-label="Open a server"
+          aria-haspopup="dialog"
+          aria-expanded={!!openServerAnchor}
+          className={`no-drag shrink-0 self-center ml-1 w-7 h-7 rounded-lg flex items-center justify-center transition-colors ${openServerAnchor ? 'bg-white/[0.08] text-white' : 'text-zinc-400 hover:text-white hover:bg-white/[0.08]'}`}
+        >
+          <Plus size={15} />
+        </button>
+      )}
+      </div>
+      {openServerAnchor && (
+        <OpenServerMenu
+          servers={servers}
+          folders={folders}
+          serverTabs={serverTabs}
+          anchor={openServerAnchor}
+          onOpen={(server) => { void openServer(server); }}
+          onQuickConnect={() => setIsQuickConnectOpen(true)}
+          onClose={() => setOpenServerAnchor(null)}
+        />
+      )}
       {/* Wall trigger — moved OUT of the scrollable tab strip and next
           to the Broadcast button so both multi-session affordances live
           in the same "utility cluster" at the right edge of the title
@@ -2109,7 +2252,7 @@ function DesktopApp() {
                   </span>
                 </div>
                 <div className="max-h-[240px] overflow-y-auto custom-scrollbar mt-2 space-y-0.5">
-                  {sessions.map(s => {
+                  {orderedSessions.map(s => {
                     const checked = broadcast.targetSessionIds.has(s.id);
                     const st = sessionStatuses[s.id] ?? "connecting";
                     return (
@@ -2346,17 +2489,7 @@ function DesktopApp() {
             <button
               className="w-full text-left px-3 py-1.5 hover:bg-rose-500/15 hover:text-rose-300 text-zinc-200"
               onClick={() => {
-                const sid = targetId;
-                invoke("disconnect_session", { sessionId: sid }).catch(() => {});
-                setSessions(prev => prev.filter(sess => sess.id !== sid));
-                setSessionStatuses(prev => { const { [sid]: _, ...rest } = prev; return rest; });
-                broadcast.removeSession(sid);
-                setMergedSessionIds(prev => {
-                  const next = prev.filter(id => id !== sid);
-                  return next.length < 2 ? [] : next;
-                });
-                unpinSessionFromWall(sid);
-                setActiveView(prev => (prev === sid ? "nodes" : prev));
+                void closeTab(targetId, false);
                 setTabMenu(null);
               }}
             >Close tab</button>
@@ -2992,7 +3125,7 @@ function DesktopApp() {
                         </div>
                       ) : (
                         <div className="overflow-y-auto custom-scrollbar space-y-1 pr-1">
-                          {sessions.map(s => {
+                          {orderedSessions.map(s => {
                             const terms = sessionTerminals[s.id] ?? [];
                             const st = sessionStatuses[s.id] ?? 'connecting';
                             return (
