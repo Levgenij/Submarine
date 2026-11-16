@@ -41,6 +41,8 @@ const CANCELLED: &str = "CANCELLED";
 /// How long a cancelled remote job gets to stop its tool and clean up before
 /// the channel is closed on it.
 const CANCEL_GRACE_SECS: u64 = 20;
+/// How long a server gets to take a remote job's script.
+const START_SECS: u64 = 60;
 /// How much of a remote job's output is kept, from its end.
 const OUTPUT_TAIL: usize = 8 * 1024;
 
@@ -1482,14 +1484,8 @@ async fn run_remote_job(
     use russh::ChannelMsg;
     use std::time::{Duration, Instant};
     let mut channel = crate::shell_sftp::open_session_channel(session).await?;
-    channel
-        .exec(true, "sh -s".as_bytes())
-        .await
-        .map_err(|e| e.to_string())?;
-    channel
-        .data(script.as_bytes())
-        .await
-        .map_err(|e| e.to_string())?;
+    let start_deadline = tokio::time::Instant::now() + Duration::from_secs(START_SECS);
+    crate::remote_sh::start_script(&channel, script, start_deadline).await?;
     let mut out: Vec<u8> = Vec::new();
     let mut code: Option<u32> = None;
     let mut stop_sent: Option<Instant> = None;
