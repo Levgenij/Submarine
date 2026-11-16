@@ -422,7 +422,7 @@ export const ConfirmProvider = ({ children }: { children: React.ReactNode }) => 
             <div className="flex items-start justify-between gap-3 mb-3">
               <div className="flex items-center gap-2">
                 <AlertTriangle size={14} className="text-amber-400" />
-                <span id="overwrite-modal-title" className="text-[11px] font-black uppercase tracking-widest text-zinc-200">
+                <span id="overwrite-modal-title" className="text-[12px] font-semibold text-zinc-200">
                   {owState.opts.direction === "download" ? "Local file exists" : "Remote file exists"}
                 </span>
               </div>
@@ -440,21 +440,21 @@ export const ConfirmProvider = ({ children }: { children: React.ReactNode }) => 
             </p>
             <div className="grid grid-cols-2 gap-2">
               <button onClick={() => closeOverwrite("overwrite")} data-default-focus
-                      className="h-10 sm:h-9 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-primary/15 border border-primary/40 text-primary hover:bg-primary/25">
+                      className="h-10 sm:h-9 rounded-lg text-[12px] font-semibold bg-primary/15 border border-primary/40 text-primary hover:bg-primary/25">
                 Overwrite
               </button>
               <button onClick={() => closeOverwrite("skip")}
-                      className="h-10 sm:h-9 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/[0.08] hover:text-white">
+                      className="h-10 sm:h-9 rounded-lg text-[12px] font-semibold bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/[0.08] hover:text-white">
                 Skip
               </button>
               {owState.opts.batchSize > 1 && (
                 <>
                   <button onClick={() => closeOverwrite("overwrite-all")}
-                          className="h-10 sm:h-9 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-primary/10 border border-primary/30 text-primary hover:bg-primary/20">
+                          className="h-10 sm:h-9 rounded-lg text-[12px] font-semibold bg-primary/10 border border-primary/30 text-primary hover:bg-primary/20">
                     Overwrite all
                   </button>
                   <button onClick={() => closeOverwrite("skip-all")}
-                          className="h-10 sm:h-9 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-white/[0.03] border border-white/10 text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200">
+                          className="h-10 sm:h-9 rounded-lg text-[12px] font-semibold bg-white/[0.03] border border-white/10 text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200">
                     Skip all
                   </button>
                 </>
@@ -462,7 +462,7 @@ export const ConfirmProvider = ({ children }: { children: React.ReactNode }) => 
             </div>
             <div className="mt-3 flex justify-end">
               <button onClick={() => closeOverwrite("cancel")}
-                      className="px-3 h-7 rounded-lg text-[10px] font-bold uppercase tracking-wider bg-rose-500/10 border border-rose-500/30 text-rose-300 hover:bg-rose-500/20">
+                      className="px-3 h-7 rounded-lg text-[11px] font-semibold bg-rose-500/10 border border-rose-500/30 text-rose-300 hover:bg-rose-500/20">
                 Cancel batch
               </button>
             </div>
@@ -484,7 +484,7 @@ export const ConfirmProvider = ({ children }: { children: React.ReactNode }) => 
             <div className="flex items-start justify-between gap-3 mb-3">
               <div className="flex items-center gap-2">
                 <AlertTriangle size={14} className={state.opts.destructive ? "text-rose-400" : "text-amber-400"} />
-                <span id="confirm-modal-title" className="text-[11px] font-black uppercase tracking-widest text-zinc-200">
+                <span id="confirm-modal-title" className="text-[12px] font-semibold text-zinc-200">
                   {state.opts.title || (state.opts.destructive ? "Confirm action" : "Are you sure?")}
                 </span>
               </div>
@@ -500,12 +500,12 @@ export const ConfirmProvider = ({ children }: { children: React.ReactNode }) => 
             <div className="flex justify-end gap-2">
               <button onClick={() => close(false)}
                       data-default-focus={state.opts.safeDefault ? true : undefined}
-                      className="px-3 h-10 sm:h-8 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/[0.08] hover:text-white">
+                      className="px-3 h-10 sm:h-8 rounded-lg text-[12px] font-semibold bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/[0.08] hover:text-white">
                 {state.opts.cancelLabel || "Cancel"}
               </button>
               <button onClick={() => close(true)} ref={confirmOkRef}
                       data-default-focus={state.opts.safeDefault ? undefined : true}
-                      className={`px-3 h-10 sm:h-8 rounded-lg text-[11px] font-bold uppercase tracking-wider border ${
+                      className={`px-3 h-10 sm:h-8 rounded-lg text-[12px] font-semibold border ${
                         state.opts.destructive
                           ? "bg-rose-500/15 border-rose-500/40 text-rose-300 hover:bg-rose-500/25"
                           : "bg-primary/15 border-primary/40 text-primary hover:bg-primary/25"
@@ -529,7 +529,7 @@ export const ConfirmProvider = ({ children }: { children: React.ReactNode }) => 
                onClick={(e) => e.stopPropagation()}
                className="w-full max-w-[400px] bg-[#121214] border border-white/10 rounded-xl shadow-2xl p-4 font-mono text-[12px] animate-in zoom-in-95 fade-in duration-150">
             <div className="flex items-start justify-between gap-3 mb-3">
-              <span id="text-prompt-modal-title" className="text-[11px] font-black uppercase tracking-widest text-zinc-200">
+              <span id="text-prompt-modal-title" className="text-[12px] font-semibold text-zinc-200">
                 {tpState.opts.title || "Enter value"}
               </span>
               <button aria-label="Close" onClick={() => closeTextPrompt(null)} className="p-[14px] -m-[14px] sm:p-0 sm:m-0 text-zinc-500 hover:text-white shrink-0">
@@ -555,11 +555,11 @@ export const ConfirmProvider = ({ children }: { children: React.ReactNode }) => 
             )}
             <div className="flex justify-end gap-2 mt-2">
               <button onClick={() => closeTextPrompt(null)}
-                      className="px-3 h-10 sm:h-8 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/[0.08] hover:text-white">
+                      className="px-3 h-10 sm:h-8 rounded-lg text-[12px] font-semibold bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/[0.08] hover:text-white">
                 {tpState.opts.cancelLabel || "Cancel"}
               </button>
               <button onClick={submitTextPrompt}
-                      className="px-3 h-10 sm:h-8 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-primary/15 border border-primary/40 text-primary hover:bg-primary/25">
+                      className="px-3 h-10 sm:h-8 rounded-lg text-[12px] font-semibold bg-primary/15 border border-primary/40 text-primary hover:bg-primary/25">
                 {tpState.opts.okLabel || "OK"}
               </button>
             </div>
@@ -585,7 +585,7 @@ export const ConfirmProvider = ({ children }: { children: React.ReactNode }) => 
             <div className="flex items-start justify-between gap-3 mb-3">
               <div className="flex items-center gap-2">
                 <AlertTriangle size={14} className="text-amber-400" />
-                <span id="unsaved-modal-title" className="text-[11px] font-black uppercase tracking-widest text-zinc-200">
+                <span id="unsaved-modal-title" className="text-[12px] font-semibold text-zinc-200">
                   {usState.opts.title || "Unsaved changes"}
                 </span>
               </div>
@@ -598,16 +598,16 @@ export const ConfirmProvider = ({ children }: { children: React.ReactNode }) => 
             </p>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <button data-choice="discard" onClick={(e) => clickUnsaved(e, "discard")}
-                      className="px-3 h-10 sm:h-8 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-rose-500/10 border border-rose-500/30 text-rose-300 hover:bg-rose-500/20">
+                      className="px-3 h-10 sm:h-8 rounded-lg text-[12px] font-semibold bg-rose-500/10 border border-rose-500/30 text-rose-300 hover:bg-rose-500/20">
                 {usState.opts.discardLabel || "Discard"}
               </button>
               <div className="ml-auto flex gap-2">
                 <button data-choice="cancel" onClick={(e) => clickUnsaved(e, "cancel")}
-                        className="px-3 h-10 sm:h-8 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/[0.08] hover:text-white">
+                        className="px-3 h-10 sm:h-8 rounded-lg text-[12px] font-semibold bg-white/[0.04] border border-white/10 text-zinc-300 hover:bg-white/[0.08] hover:text-white">
                   {usState.opts.cancelLabel || "Keep editing"}
                 </button>
                 <button data-choice="save" data-default-focus onClick={(e) => clickUnsaved(e, "save")}
-                        className="px-3 h-10 sm:h-8 rounded-lg text-[11px] font-bold uppercase tracking-wider bg-primary/15 border border-primary/40 text-primary hover:bg-primary/25">
+                        className="px-3 h-10 sm:h-8 rounded-lg text-[12px] font-semibold bg-primary/15 border border-primary/40 text-primary hover:bg-primary/25">
                   {usState.opts.saveLabel || "Save"}
                 </button>
               </div>

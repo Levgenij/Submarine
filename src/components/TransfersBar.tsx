@@ -190,7 +190,7 @@ const TransfersView = ({ transfers, queued, collapsed, onToggleCollapsed, onCanc
         title={collapsed ? "Show transfers" : "Hide transfers"}
         className="w-full h-9 sm:h-8 px-3 flex items-center gap-2 text-[10.5px] text-zinc-400 hover:bg-white/[0.03] text-left"
       >
-        <span className="font-bold uppercase tracking-wider text-[9.5px] text-zinc-100 shrink-0">Transfers</span>
+        <span className="font-semibold text-[10.5px] text-zinc-100 shrink-0">Transfers</span>
         <span className="w-px h-3 bg-white/10 shrink-0" />
         <span className="truncate min-w-0 flex-1">{summary}</span>
         {totalSpeed > 0 && <span className="text-zinc-200 shrink-0">{formatSpeed(totalSpeed)}</span>}

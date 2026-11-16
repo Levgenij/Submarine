@@ -112,7 +112,7 @@ const SepToggle = ({ on, onToggle, status, hint, onReconnect, showLabel = true }
           }}
           className="fixed z-[9999] pointer-events-none bg-[#15151a] border border-white/10 rounded-lg shadow-2xl px-3 py-2 text-[11px] leading-snug text-zinc-300"
         >
-          <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-zinc-100">Dedicated session</div>
+          <div className="mb-1 text-[11px] font-semibold text-zinc-100">Dedicated session</div>
           <p>{hint}</p>
           <p className="mt-1 text-zinc-400">When it is off, or that connection can't be opened, the terminal's connection is used.</p>
           <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-zinc-400">
@@ -1902,15 +1902,15 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
               the whole header fits in two compact rows at any width. */}
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4 sm:mb-6">
             <div>
-              <h2 className="text-base sm:text-xl font-black uppercase tracking-wider sm:tracking-[0.2em] break-words">
+              <h2 className="text-base sm:text-xl font-black break-words">
                 {session.customName || session.serverName}
               </h2>
-              <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest mt-1">
+              <p className="text-[11px] text-zinc-500 font-semibold mt-1">
                 {status === 'connecting'
-                  ? (reconnectAttempt > 0 ? `Trying again · attempt ${reconnectAttempt}` : 'Establishing Connection...')
+                  ? (reconnectAttempt > 0 ? `Trying again · attempt ${reconnectAttempt}` : 'Establishing connection...')
                   : retryWaiting
                     ? <>Connection failed · trying again in {retryIn}s</>
-                    : 'Connection Failed'}
+                    : 'Connection failed'}
               </p>
             </div>
             {status === 'failed' && (
@@ -1920,7 +1920,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                     onClick={cancelReconnect}
                     title="Stop trying again"
                     aria-label="Stop trying again"
-                    className="flex-1 sm:flex-none px-4 py-2 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white rounded-lg text-xs font-bold uppercase tracking-wider transition-colors"
+                    className="flex-1 sm:flex-none px-4 py-2 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white rounded-lg text-xs font-semibold transition-colors"
                   >
                     Cancel
                   </button>
@@ -1937,11 +1937,11 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                     }}
                   />
                 )}
-                <button onClick={reconnect} className="flex-1 sm:flex-none px-4 py-2 bg-primary/10 text-primary hover:bg-primary/20 rounded-lg text-xs font-bold uppercase tracking-wider transition-colors">
+                <button onClick={reconnect} className="flex-1 sm:flex-none px-4 py-2 bg-primary/10 text-primary hover:bg-primary/20 rounded-lg text-xs font-semibold transition-colors">
                   Reconnect
                 </button>
-                <button onClick={onClose} className="flex-1 sm:flex-none px-4 py-2 bg-red-500/10 text-red-500 hover:bg-red-500/20 rounded-lg text-xs font-bold uppercase tracking-wider transition-colors">
-                  Close Session
+                <button onClick={onClose} className="flex-1 sm:flex-none px-4 py-2 bg-red-500/10 text-red-500 hover:bg-red-500/20 rounded-lg text-xs font-semibold transition-colors">
+                  Close session
                 </button>
               </div>
             )}
@@ -2370,7 +2370,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
             style={{ left: Math.max(8, Math.min(dockMenu.x - 210, window.innerWidth - 218)), top: Math.min(dockMenu.y, window.innerHeight - 170) }}
             className="fixed z-[9999] w-[210px] bg-[#15151a] border border-white/10 rounded-lg shadow-2xl py-1 text-[11.5px]"
           >
-            <div className="px-3 pt-1 pb-1.5 text-[9.5px] font-bold uppercase tracking-wider text-zinc-500">Panel position</div>
+            <div className="px-3 pt-1 pb-1.5 text-[10.5px] font-semibold text-zinc-500">Panel position</div>
             {DOCK_OPTIONS.map(({ id, label, Icon }) => (
               <button
                 key={id}
@@ -2470,7 +2470,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
           return (
             <div inert={shellInert} className={`shrink-0 border-b animate-in fade-in ${tone}`}>
               <div className="px-4 py-2 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider">
+                <div className="flex items-center gap-2 text-[12px] font-semibold">
                   {trying ? <ReconnectIcon running={isAttempting} animate={animate} /> : <AlertTriangle size={14} />}
                   <span>{heading}</span>
                   {isAttempting && <span className="opacity-70 font-normal tracking-normal">· <Elapsed key={reconnectAttempt} /></span>}
@@ -2481,14 +2481,14 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                 </div>
                 <div className="flex items-center gap-2">
                   {isWaiting && (
-                    <button onClick={cancelReconnect} className="px-3 py-1.5 sm:py-1 min-h-8 sm:min-h-6 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white rounded-lg text-[10px] font-bold uppercase tracking-wider transition-colors">
+                    <button onClick={cancelReconnect} className="px-3 py-1.5 sm:py-1 min-h-8 sm:min-h-6 bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white rounded-lg text-[11px] font-semibold transition-colors">
                       Cancel
                     </button>
                   )}
-                  <button onClick={reconnect} className="px-3 py-1.5 sm:py-1 min-h-8 sm:min-h-6 bg-primary/10 text-primary hover:bg-primary/20 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-colors flex items-center gap-1.5">
+                  <button onClick={reconnect} className="px-3 py-1.5 sm:py-1 min-h-8 sm:min-h-6 bg-primary/10 text-primary hover:bg-primary/20 rounded-lg text-[11px] font-semibold transition-colors flex items-center gap-1.5">
                     <Play size={12} /> {isWaiting ? "Now" : "Reconnect"}
                   </button>
-                  <button onClick={onClose} className="px-3 py-1.5 sm:py-1 min-h-8 sm:min-h-6 bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-white rounded-lg text-[10px] font-bold uppercase tracking-wider transition-colors">
+                  <button onClick={onClose} className="px-3 py-1.5 sm:py-1 min-h-8 sm:min-h-6 bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-white rounded-lg text-[11px] font-semibold transition-colors">
                     Close
                   </button>
                 </div>

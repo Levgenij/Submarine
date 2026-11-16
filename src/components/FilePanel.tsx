@@ -60,9 +60,9 @@ const TOOLBAR_BUTTONS: { id: ToolbarButtonId; label: string; Icon: typeof File; 
   { id: "bookmark", label: "Bookmark", Icon: Bookmark, iconClass: "text-zinc-200" },
   { id: "refresh", label: "Refresh", Icon: RefreshCw, iconClass: "text-zinc-200" },
   { id: "browse", label: "Browse for folder", Icon: FolderSearch, iconClass: "text-emerald-300", only: "local" },
-  { id: "newfile", label: "New File", Icon: File, iconClass: "text-zinc-300" },
-  { id: "mkdir", label: "New Folder", Icon: Folder, iconClass: "text-indigo-300" },
-  { id: "terminal", label: "Open in Terminal", Icon: Terminal, iconClass: "text-emerald-300", only: "remote" },
+  { id: "newfile", label: "New file", Icon: File, iconClass: "text-zinc-300" },
+  { id: "mkdir", label: "New folder", Icon: Folder, iconClass: "text-indigo-300" },
+  { id: "terminal", label: "Open in terminal", Icon: Terminal, iconClass: "text-emerald-300", only: "remote" },
   { id: "follow", label: "Follow the terminal's folder", Icon: FolderSync, iconClass: "text-emerald-300", only: "remote" },
   { id: "selectall", label: "Select all", Icon: CheckSquare, iconClass: "text-zinc-300" },
 ];
@@ -2492,14 +2492,14 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         );
       case "newfile":
         return (
-          <button key={id} onClick={() => setModal({ type: "newfile", v1: "" })} title="New File"
+          <button key={id} onClick={() => setModal({ type: "newfile", v1: "" })} title="New file"
             className={`${plain} text-zinc-300`}>
             <File size={11} />
           </button>
         );
       case "mkdir":
         return (
-          <button key={id} onClick={() => setModal({ type: "mkdir", v1: "" })} title="New Folder"
+          <button key={id} onClick={() => setModal({ type: "mkdir", v1: "" })} title="New folder"
             className={`${plain} text-indigo-300`}>
             <Folder size={11} />
           </button>
@@ -2510,7 +2510,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             key={id}
             onClick={() => void openDirInTerminal().catch((err) => notify(String(err), "error"))}
             disabled={!terminalId || !currentPath}
-            title={terminalId ? "Open in Terminal" : "No terminal is open for this session"}
+            title={terminalId ? "Open in terminal" : "No terminal is open for this session"}
             className={`${plain} text-emerald-300 disabled:opacity-30 disabled:cursor-not-allowed`}
           >
             <Terminal size={11} />
@@ -2822,14 +2822,14 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       >
         {recentShown.length > 0 && (
           <>
-            <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-zinc-500 font-bold">Recent</div>
+            <div className="px-2 py-1 text-[10px] text-zinc-500 font-semibold">Recent</div>
             {recentShown.map((p) => dirRow(p))}
           </>
         )}
         {recentShown.length > 0 && shownRows.session.length > 0 && <div className="my-1 h-px bg-white/10" />}
         {shownRows.session.length > 0 && (
           <>
-            <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-zinc-500 font-bold">Bookmarks</div>
+            <div className="px-2 py-1 text-[10px] text-zinc-500 font-semibold">Bookmarks</div>
             {shownRows.session.map((p) => dirRow(p, "session"))}
           </>
         )}
@@ -2838,7 +2838,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
         )}
         {shownRows.global.length > 0 && (
           <>
-            <div className="px-2 py-1 text-[9px] uppercase tracking-wider text-emerald-500/80 font-bold">Global bookmarks</div>
+            <div className="px-2 py-1 text-[10px] text-emerald-500/80 font-semibold">Global bookmarks</div>
             {shownRows.global.map((p) => dirRow(p, "global"))}
           </>
         )}
@@ -2862,7 +2862,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       className="flex-1 flex flex-col h-full bg-[#09090b] p-1.5 gap-1.5 overflow-hidden relative select-none"
     >
       {disabled && (
-        <div className="absolute inset-0 z-[80] bg-black/55 backdrop-blur-[1px] flex items-center justify-center text-zinc-300 text-xs font-mono uppercase">
+        <div className="absolute inset-0 z-[80] bg-black/55 backdrop-blur-[1px] flex items-center justify-center text-zinc-300 text-xs font-mono">
           <span className="px-3 py-1.5 bg-red-500/15 border border-red-500/30 rounded-lg text-red-300">
             Session disconnected
           </span>
@@ -2875,7 +2875,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
       <div onContextMenu={onHeaderMenu} className={`relative w-full flex flex-wrap items-center gap-x-1.5 gap-y-1 p-1.5 border rounded-lg shrink-0 shadow-lg ${
         rootMode ? "bg-rose-950/30 border-rose-500/40" : "bg-[#121214] border-white/5"
       }`}>
-        <span className="text-[10px] font-black uppercase tracking-widest text-zinc-300 px-1.5 shrink-0">
+        <span className="text-[11px] font-semibold text-zinc-300 px-1.5 shrink-0">
           {provider.label}
         </span>
         {viaShell && (
@@ -3108,26 +3108,26 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             {allSelected ? <CheckSquare size={12} className="text-indigo-300" /> : <Square size={12} className="text-zinc-500" />}
           </div>
           <div className="bg-[#161619] cursor-pointer hover:text-white py-1.5" onClick={() => toggleSort("name")}>
-            NAME {sortIcon("name")}
+            Name {sortIcon("name")}
           </div>
           {showDetails && (
             <>
               <div className="bg-[#161619] cursor-pointer hover:text-white text-right py-1.5" onClick={() => toggleSort("size")}>
-                SIZE {sortIcon("size")}
+                Size {sortIcon("size")}
               </div>
               <div className="bg-[#161619] cursor-pointer hover:text-white text-right py-1.5" onClick={() => toggleSort("modified")}>
-                CHANGED {sortIcon("modified")}
+                Changed {sortIcon("modified")}
               </div>
             </>
           )}
           {showOwnerColumn && (
             <div className="bg-[#161619] cursor-pointer hover:text-white text-left py-1.5" onClick={() => toggleSort("owner")}>
-              OWNER {sortIcon("owner")}
+              Owner {sortIcon("owner")}
             </div>
           )}
           {showRightsColumn && (
             <div className="bg-[#161619] cursor-pointer hover:text-white text-right py-1.5" onClick={() => toggleSort("permissions")}>
-              RIGHTS {sortIcon("permissions")}
+              Rights {sortIcon("permissions")}
             </div>
           )}
         </div>
@@ -3597,7 +3597,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
 
           <button onClick={() => { setContextMenu(null); setModal({ type: "mkdir", v1: "" }); }}
             className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white">
-            <Plus size={11} className="text-indigo-300" /><span>New Folder</span>
+            <Plus size={11} className="text-indigo-300" /><span>New folder</span>
           </button>
           {!multi && (
             <button onClick={() => { setContextMenu(null); setModal({ type: "rename", entry: contextMenu.entry, v1: contextMenu.entry.name }); }}
@@ -3702,13 +3702,13 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             onClick={() => { setDirMenu(null); setModal({ type: "newfile", v1: "" }); }}
             className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white"
           >
-            <File size={11} className="text-zinc-300" /><span>New File</span>
+            <File size={11} className="text-zinc-300" /><span>New file</span>
           </button>
           <button
             onClick={() => { setDirMenu(null); setModal({ type: "mkdir", v1: "" }); }}
             className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white"
           >
-            <Plus size={11} className="text-indigo-300" /><span>New Folder</span>
+            <Plus size={11} className="text-indigo-300" /><span>New folder</span>
           </button>
           {!isRemote && !IS_ANDROID && (
             <>
@@ -3727,7 +3727,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             onClick={() => { setDirMenu(null); setModal({ type: "symlink", v1: "", v2: "" }); }}
             className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white"
           >
-            <Link size={11} className="text-sky-300" /><span>New Symbolic Link</span>
+            <Link size={11} className="text-sky-300" /><span>New symbolic link</span>
           </button>
           <div className="h-px bg-white/5 my-1" />
           <button
@@ -3737,7 +3737,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             }}
             className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white"
           >
-            <Terminal size={11} className="text-emerald-300" /><span>Open in Terminal</span>
+            <Terminal size={11} className="text-emerald-300" /><span>Open in terminal</span>
           </button>
           <button
             onClick={() => {
@@ -3746,7 +3746,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
             }}
             className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-white/10 text-left hover:text-white"
           >
-            <Shield size={11} /><span>Folder Properties</span>
+            <Shield size={11} /><span>Folder properties</span>
           </button>
           </>
           )}
@@ -3766,7 +3766,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           style={{ left: toolbarMenu.x, top: toolbarMenu.y }}
           onMouseDown={(e) => e.stopPropagation()}
         >
-          <div className="px-1.5 py-1 text-[9.5px] font-bold uppercase tracking-wider text-zinc-500">Toolbar layout</div>
+          <div className="px-1.5 py-1 text-[10.5px] font-semibold text-zinc-500">Toolbar layout</div>
           <div aria-hidden className="mx-1 mb-1 flex items-center gap-1 p-1 rounded bg-[#121214] border border-white/5">
             {toolbarShown.map((id) => {
               const { Icon, iconClass } = TOOLBAR_BUTTONS.find((b) => b.id === id)!;
@@ -3838,11 +3838,11 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
           <div onClick={(e) => e.stopPropagation()}
             className="w-full max-w-[320px] bg-[#121214] border border-white/5 rounded-xl shadow-2xl p-4 font-mono text-[11px]">
             <div className="flex items-center justify-between mb-3">
-              <span className="font-black uppercase tracking-wider text-zinc-300">
+              <span className="font-semibold text-zinc-300">
                 {modal.type === "rename" ? "Rename" :
-                 modal.type === "mkdir" ? "New Folder" :
-                 modal.type === "newfile" ? "New File" :
-                 modal.type === "symlink" ? "New Symbolic Link" :
+                 modal.type === "mkdir" ? "New folder" :
+                 modal.type === "newfile" ? "New file" :
+                 modal.type === "symlink" ? "New symbolic link" :
                  modal.type === "move" ? "Move to…" :
                  modal.type === "duplicate" ? "Duplicate" :
                  modal.type === "archive" ? ((modal.items?.length ?? 0) > 1 ? `Archive ${modal.items!.length} items` : "Add to archive") :
@@ -3878,7 +3878,7 @@ const FilePanel = forwardRef<FilePanelHandle, FilePanelProps>(({
                     };
                     return (
                       <div className="pt-1">
-                        <label className="text-[10px] text-zinc-400 block mb-1.5 uppercase tracking-wider">Permissions</label>
+                        <label className="text-[11px] text-zinc-400 block mb-1.5">Permissions</label>
                         <div className="grid grid-cols-[60px_repeat(3,1fr)] gap-1 text-center text-[10px] text-zinc-400 font-mono">
                           <div />
                           {bits.map((b) => <div key={b.key} className="font-bold">{b.label}</div>)}

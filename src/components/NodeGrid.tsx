@@ -753,7 +753,7 @@ export const NodeGrid = ({ servers, folders, serverTabs, activeFolderId: activeF
               <h3 className="font-bold text-zinc-100 text-[13px] truncate tracking-tight leading-tight">
                 <button type="button" className="max-w-full truncate text-left rounded outline-none focus-visible:ring-2 focus-visible:ring-primary/60">{f.name}</button>
               </h3>
-              <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-[0.12em]">
+              <span className="text-[11px] text-zinc-500 font-semibold">
                 {contents}
               </span>
             </>
@@ -994,7 +994,7 @@ export const NodeGrid = ({ servers, folders, serverTabs, activeFolderId: activeF
           </span>
           <button
             onClick={reviewKey}
-            className="shrink-0 px-2.5 h-7 rounded-lg text-[10.5px] font-bold uppercase tracking-wider bg-amber-400/10 border border-amber-400/30 text-amber-200 hover:bg-amber-400/20"
+            className="shrink-0 px-2.5 h-7 rounded-lg text-[11.5px] font-semibold bg-amber-400/10 border border-amber-400/30 text-amber-200 hover:bg-amber-400/20"
           >
             Review
           </button>
@@ -1016,7 +1016,7 @@ export const NodeGrid = ({ servers, folders, serverTabs, activeFolderId: activeF
           {shareGrant === "locked" && onUnlockSharing && (
             <button
               onClick={onUnlockSharing}
-              className="shrink-0 px-2.5 h-7 rounded-lg text-[10.5px] font-bold uppercase tracking-wider bg-amber-400/10 border border-amber-400/30 text-amber-200 hover:bg-amber-400/20"
+              className="shrink-0 px-2.5 h-7 rounded-lg text-[11.5px] font-semibold bg-amber-400/10 border border-amber-400/30 text-amber-200 hover:bg-amber-400/20"
             >
               Unlock sharing
             </button>
@@ -1034,7 +1034,7 @@ export const NodeGrid = ({ servers, folders, serverTabs, activeFolderId: activeF
           </span>
           <button
             onClick={() => setReviewOpen(true)}
-            className="shrink-0 px-2.5 h-7 rounded-lg text-[10.5px] font-bold uppercase tracking-wider bg-amber-400/10 border border-amber-400/30 text-amber-200 hover:bg-amber-400/20"
+            className="shrink-0 px-2.5 h-7 rounded-lg text-[11.5px] font-semibold bg-amber-400/10 border border-amber-400/30 text-amber-200 hover:bg-amber-400/20"
           >
             Review
           </button>
@@ -1052,7 +1052,7 @@ export const NodeGrid = ({ servers, folders, serverTabs, activeFolderId: activeF
           </span>
           <button
             onClick={() => setDeletionsOpen(true)}
-            className="shrink-0 px-2.5 h-7 rounded-lg text-[10.5px] font-bold uppercase tracking-wider bg-amber-400/10 border border-amber-400/30 text-amber-200 hover:bg-amber-400/20"
+            className="shrink-0 px-2.5 h-7 rounded-lg text-[11.5px] font-semibold bg-amber-400/10 border border-amber-400/30 text-amber-200 hover:bg-amber-400/20"
           >
             Review
           </button>

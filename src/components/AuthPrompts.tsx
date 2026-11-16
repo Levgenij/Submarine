@@ -66,8 +66,8 @@ export function AuthPrompts({
         <div className="flex items-start gap-3">
           <ShieldAlert className={`${accent} mt-1`} size={20} />
           <div>
-            <h3 className={`text-sm font-bold ${accent} uppercase tracking-widest`}>
-              {isMismatch ? (isCert ? "Certificate has CHANGED" : "Host key has CHANGED") : "Unknown host fingerprint"}
+            <h3 className={`text-sm font-semibold ${accent}`}>
+              {isMismatch ? (isCert ? "Certificate has changed" : "Host key has changed") : "Unknown host fingerprint"}
             </h3>
             {isMismatch ? (
               <p className="text-zinc-300 mt-2 mb-4 leading-relaxed">
@@ -94,13 +94,13 @@ export function AuthPrompts({
             <div className="flex gap-3">
               <button
                 onClick={() => handleFingerprintResponse(true)}
-                className={`px-6 py-2 ${acceptBtn} font-bold text-xs uppercase tracking-wider rounded-lg transition-colors flex items-center gap-2`}
+                className={`px-6 py-2 ${acceptBtn} font-semibold text-xs rounded-lg transition-colors flex items-center gap-2`}
               >
                 <Check size={14} /> {isMismatch ? `Accept new ${what}` : "Accept & save"}
               </button>
               <button
                 onClick={() => handleFingerprintResponse(false)}
-                className="px-6 py-2 bg-white/5 text-zinc-300 font-bold text-xs uppercase tracking-wider rounded-lg hover:bg-white/10 transition-colors flex items-center gap-2"
+                className="px-6 py-2 bg-white/5 text-zinc-300 font-semibold text-xs rounded-lg hover:bg-white/10 transition-colors flex items-center gap-2"
               >
                 <X size={14} /> {isMismatch ? "Abort" : "Reject"}
               </button>
@@ -121,7 +121,7 @@ export function AuthPrompts({
         <div className="flex items-start gap-3">
           <KeyRound className="text-primary mt-1" size={20} />
           <div className="flex-1 min-w-0">
-            <h3 className="text-sm font-bold text-primary uppercase tracking-widest">
+            <h3 className="text-sm font-semibold text-primary">
               {kbiPrompt.name && String(kbiPrompt.name).trim() ? kbiPrompt.name : "Verification required"}
             </h3>
             <p className="mt-0.5 text-[11.5px] text-zinc-500 truncate" title={asked}>
@@ -180,13 +180,13 @@ export function AuthPrompts({
             <div className="flex gap-3 mt-4">
               <button
                 onClick={() => void submit()}
-                className="px-6 py-2 bg-primary text-black font-bold text-xs uppercase tracking-wider rounded-lg hover:bg-primary/80 transition-colors flex items-center gap-2"
+                className="px-6 py-2 bg-primary text-black font-semibold text-xs rounded-lg hover:bg-primary/80 transition-colors flex items-center gap-2"
               >
                 <Check size={14} /> Submit
               </button>
               <button
                 onClick={handleKbiCancel}
-                className="px-6 py-2 bg-white/5 text-zinc-300 font-bold text-xs uppercase tracking-wider rounded-lg hover:bg-white/10 transition-colors flex items-center gap-2"
+                className="px-6 py-2 bg-white/5 text-zinc-300 font-semibold text-xs rounded-lg hover:bg-white/10 transition-colors flex items-center gap-2"
               >
                 <X size={14} /> Cancel
               </button>

@@ -883,7 +883,7 @@ const ProfileSelectPage = ({ onUnlocked }: Props) => {
           /* ---- Your profiles (local + cloud, one list) ---- */
           <div className="space-y-3">
             <div className="flex items-center justify-between px-0.5">
-              <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500">Your profiles</span>
+              <span className="text-[11px] font-semibold text-zinc-500">Your profiles</span>
               {cloudStatus.signed_in && (
                 <button
                   onClick={refreshCloud}

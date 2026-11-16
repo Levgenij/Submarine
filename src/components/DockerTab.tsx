@@ -288,7 +288,7 @@ const DockerTab = ({ sessionId, disabled, onOpenContainerTerminal }: DockerTabPr
           <button
             onClick={refreshActive}
             title="Refresh this tab"
-            className="h-7 px-2 rounded-lg text-[10px] font-bold uppercase tracking-wider text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white flex items-center gap-1.5 transition-all"
+            className="h-7 px-2 rounded-lg text-[11px] font-semibold text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white flex items-center gap-1.5 transition-all"
           >
             <RefreshCw size={11} /> Refresh
           </button>
@@ -427,9 +427,9 @@ const ContainersView = ({
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-1.5 flex-wrap">
-        <CountPill active={stateFilter === "running"} tone="green"   count={counts.running} onClick={() => setStateFilter("running")}>running</CountPill>
-        <CountPill active={stateFilter === "stopped"} tone="zinc"    count={counts.stopped} onClick={() => setStateFilter("stopped")}>stopped</CountPill>
-        <CountPill active={stateFilter === "all"}     tone="primary" count={counts.all}     onClick={() => setStateFilter("all")}>all</CountPill>
+        <CountPill active={stateFilter === "running"} tone="green"   count={counts.running} onClick={() => setStateFilter("running")}>Running</CountPill>
+        <CountPill active={stateFilter === "stopped"} tone="zinc"    count={counts.stopped} onClick={() => setStateFilter("stopped")}>Stopped</CountPill>
+        <CountPill active={stateFilter === "all"}     tone="primary" count={counts.all}     onClick={() => setStateFilter("all")}>All</CountPill>
         <div className="ml-auto">
           <FilterInput value={filter} onChange={setFilter} placeholder="Name / image / id" />
         </div>
@@ -492,7 +492,7 @@ const ContainersView = ({
                 </div>
                 {result && (
                   <div className={`mt-1.5 text-[10px] px-2 py-1 rounded ${result.ok ? "bg-emerald-500/10 text-emerald-300 border border-emerald-500/20" : "bg-red-500/10 text-red-300 border border-red-500/20"}`}>
-                    <span className="font-bold uppercase tracking-wider mr-1">{result.ok ? "OK" : "Error"}</span>
+                    <span className="font-semibold mr-1">{result.ok ? "OK" : "Error"}</span>
                     <span className="font-mono whitespace-pre-wrap break-words">{result.msg}</span>
                   </div>
                 )}
@@ -518,7 +518,7 @@ const ImagesView = ({ state }: { state: TabState<ImageRow[]> }) => {
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[10px] uppercase tracking-wider text-zinc-500 font-bold">{filtered.length} images</span>
+        <span className="text-[11px] text-zinc-500 font-semibold">{filtered.length} images</span>
         <FilterInput value={filter} onChange={setFilter} placeholder="repo:tag" />
       </div>
       {filtered.length === 0 ? <Empty>No images.</Empty> : (
@@ -533,7 +533,7 @@ const ImagesView = ({ state }: { state: TabState<ImageRow[]> }) => {
             </div>
           ))}
           {filtered.length > 30 && (
-            <button onClick={() => setShowAll(s => !s)} className="w-full h-7 rounded-lg border border-white/10 text-[10px] font-bold uppercase tracking-wider text-zinc-400 hover:bg-white/5 hover:text-white">
+            <button onClick={() => setShowAll(s => !s)} className="w-full h-7 rounded-lg border border-white/10 text-[11px] font-semibold text-zinc-400 hover:bg-white/5 hover:text-white">
               {showAll ? "Show fewer" : `Show all ${filtered.length}`}
             </button>
           )}
@@ -556,7 +556,7 @@ const VolumesView = ({ state }: { state: TabState<VolumeRow[]> }) => {
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[10px] uppercase tracking-wider text-zinc-500 font-bold">{filtered.length} volumes</span>
+        <span className="text-[11px] text-zinc-500 font-semibold">{filtered.length} volumes</span>
         <FilterInput value={filter} onChange={setFilter} placeholder="Name" />
       </div>
       {filtered.length === 0 ? <Empty>No volumes.</Empty> : (
@@ -568,7 +568,7 @@ const VolumesView = ({ state }: { state: TabState<VolumeRow[]> }) => {
             </div>
           ))}
           {filtered.length > 30 && (
-            <button onClick={() => setShowAll(s => !s)} className="w-full h-7 rounded-lg border border-white/10 text-[10px] font-bold uppercase tracking-wider text-zinc-400 hover:bg-white/5 hover:text-white">
+            <button onClick={() => setShowAll(s => !s)} className="w-full h-7 rounded-lg border border-white/10 text-[11px] font-semibold text-zinc-400 hover:bg-white/5 hover:text-white">
               {showAll ? "Show fewer" : `Show all ${filtered.length}`}
             </button>
           )}
@@ -584,7 +584,7 @@ const NetworksView = ({ state }: { state: TabState<NetworkRow[]> }) => {
   if (!state.data) return null;
   return (
     <div className="space-y-1">
-      <span className="text-[10px] uppercase tracking-wider text-zinc-500 font-bold">{state.data.length} networks</span>
+      <span className="text-[11px] text-zinc-500 font-semibold">{state.data.length} networks</span>
       {state.data.length === 0 ? <Empty>No networks.</Empty> : (
         <div className="space-y-1 mt-1">
           {state.data.map((n, i) => (
@@ -663,7 +663,7 @@ const ComposeView = ({
                 <div className="px-3 py-2 border-b border-white/5 bg-white/[0.02]">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-[11px] font-mono font-bold text-white truncate">{project}</span>
-                    <span className="text-[9px] uppercase tracking-wider text-zinc-500">{conts.length} container{conts.length === 1 ? "" : "s"}</span>
+                    <span className="text-[10px] text-zinc-500">{conts.length} container{conts.length === 1 ? "" : "s"}</span>
                   </div>
                   {files.map((f, i) => (
                     <div key={i} className="text-[10px] font-mono text-zinc-500/80 mt-0.5 truncate select-text" title={f}>{f}</div>
@@ -769,10 +769,10 @@ const PruneView = ({ sessionId }: { sessionId: string }) => {
   const confirm = useConfirm();
 
   const scopes: { key: string; label: string; description: string; warning?: string }[] = [
-    { key: "containers", label: "Stopped Containers", description: "Removes containers that are not running. Safe — restartable containers are unaffected." },
-    { key: "images",     label: "Dangling Images",    description: "Removes images with no tag and no container referencing them. Tagged images are untouched." },
-    { key: "networks",   label: "Unused Networks",    description: "Removes user-created networks no container is attached to. Default bridge/host/none are untouched." },
-    { key: "builder",    label: "Build Cache",        description: "Clears Docker BuildKit cache. Future builds re-download / rebuild base layers." },
+    { key: "containers", label: "Stopped containers", description: "Removes containers that are not running. Safe — restartable containers are unaffected." },
+    { key: "images",     label: "Dangling images",    description: "Removes images with no tag and no container referencing them. Tagged images are untouched." },
+    { key: "networks",   label: "Unused networks",    description: "Removes user-created networks no container is attached to. Default bridge/host/none are untouched." },
+    { key: "builder",    label: "Build cache",        description: "Clears Docker BuildKit cache. Future builds re-download / rebuild base layers." },
     { key: "system",     label: "Everything (safe)",  description: "Runs all of the above. Does NOT touch named volumes or tagged images.", warning: "Combines all safe prune scopes in one go." },
   ];
 
@@ -802,7 +802,7 @@ const PruneView = ({ sessionId }: { sessionId: string }) => {
       <div className="px-3 py-2 rounded-lg bg-amber-500/5 border border-amber-500/20 text-amber-300 text-[10.5px] flex items-start gap-2">
         <ShieldAlert size={14} className="mt-0.5 shrink-0" />
         <div>
-          <div className="font-bold uppercase tracking-wider">Safe prune only</div>
+          <div className="font-semibold">Safe prune only</div>
           <div className="text-amber-200/80 mt-0.5">Submarine never runs <code className="font-mono px-1">prune -a</code> or <code className="font-mono px-1">--volumes</code>. Named volumes and tagged images are always preserved.</div>
         </div>
       </div>
@@ -819,7 +819,7 @@ const PruneView = ({ sessionId }: { sessionId: string }) => {
               <button
                 onClick={() => run(s.key, s.label)}
                 disabled={busy !== null}
-                className="shrink-0 h-7 px-2.5 rounded-lg text-[10px] font-bold uppercase tracking-wider text-rose-300 bg-rose-500/10 border border-rose-500/30 hover:bg-rose-500/20 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 transition-all"
+                className="shrink-0 h-7 px-2.5 rounded-lg text-[11px] font-semibold text-rose-300 bg-rose-500/10 border border-rose-500/30 hover:bg-rose-500/20 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 transition-all"
               >
                 {busy === s.key ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
                 Prune
@@ -827,7 +827,7 @@ const PruneView = ({ sessionId }: { sessionId: string }) => {
             </div>
             {r && (
               <div className={`mt-1.5 text-[10px] px-2 py-1 rounded font-mono whitespace-pre-wrap break-words ${r.ok ? "bg-emerald-500/10 text-emerald-300 border border-emerald-500/20" : "bg-red-500/10 text-red-300 border border-red-500/20"}`}>
-                <span className="font-bold uppercase tracking-wider mr-1 not-italic">{r.ok ? "OK" : "Error"}</span>
+                <span className="font-semibold mr-1 not-italic">{r.ok ? "OK" : "Error"}</span>
                 {r.msg}
               </div>
             )}
@@ -1045,9 +1045,9 @@ const ContainerDetailsModal = ({
     <ModalShell title={`Container · ${name}`} onClose={onClose} actions={
       <button
         onClick={() => onOpenContainerTerminal(name, false)}
-        className="h-7 px-2.5 rounded-lg text-[10px] font-bold uppercase tracking-wider text-sky-200 bg-sky-500/15 border border-sky-500/30 hover:bg-sky-500/25 flex items-center gap-1.5 transition-all"
+        className="h-7 px-2.5 rounded-lg text-[11px] font-semibold text-sky-200 bg-sky-500/15 border border-sky-500/30 hover:bg-sky-500/25 flex items-center gap-1.5 transition-all"
       >
-        <Terminal size={11} /> Open Terminal
+        <Terminal size={11} /> Open terminal
       </button>
     }>
       <div className="px-3 pt-2 pb-1 bg-black/20 border-b border-white/5 shrink-0">
@@ -1057,7 +1057,7 @@ const ContainerDetailsModal = ({
             options: [
               { value: "logs", label: "Logs" },
               { value: "stats", label: "Stats" },
-              { value: "config", label: "Env · Mounts · Ports" },
+              { value: "config", label: "Env · mounts · ports" },
               { value: "inspect", label: "Inspect" },
             ],
             onChange: setTab,
@@ -1090,20 +1090,20 @@ const ContainerDetailsModal = ({
               <button
                 onClick={() => fetchLogs(logsTail)}
                 disabled={logsLoading || live}
-                className="h-7 px-2 rounded-lg text-[10px] font-bold uppercase tracking-wider text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
+                className="h-7 px-2 rounded-lg text-[11px] font-semibold text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
               >
                 {logsLoading ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} Reload
               </button>
               <button
                 onClick={live ? stopLive : startLive}
-                className={`h-7 px-2 rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center gap-1.5 transition-all ${live ? "bg-rose-500/15 text-rose-300 border border-rose-500/30 hover:bg-rose-500/25" : "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/25"}`}
+                className={`h-7 px-2 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 transition-all ${live ? "bg-rose-500/15 text-rose-300 border border-rose-500/30 hover:bg-rose-500/25" : "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/25"}`}
               >
                 {live ? <><Square size={11} /> Stop live</> : <><Play size={11} /> Go live</>}
               </button>
               {live && <span className="text-[10px] text-emerald-400 font-mono animate-pulse-brief">● streaming</span>}
               <button
                 onClick={() => { navigator.clipboard.writeText(logs).catch(() => {}); }}
-                className="ml-auto h-7 px-2 rounded-lg text-[10px] font-bold uppercase tracking-wider text-zinc-400 hover:text-white hover:bg-white/5 flex items-center gap-1.5"
+                className="ml-auto h-7 px-2 rounded-lg text-[11px] font-semibold text-zinc-400 hover:text-white hover:bg-white/5 flex items-center gap-1.5"
               >
                 <Copy size={11} /> Copy
               </button>
@@ -1138,7 +1138,7 @@ const ContainerDetailsModal = ({
             <button
               onClick={fetchOneStats}
               disabled={oneStats.loading}
-              className="h-7 px-2.5 rounded-lg text-[10px] font-bold uppercase tracking-wider text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 flex items-center gap-1.5"
+              className="h-7 px-2.5 rounded-lg text-[11px] font-semibold text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 flex items-center gap-1.5"
             >
               {oneStats.loading ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} Refresh
             </button>
@@ -1159,13 +1159,13 @@ const ContainerDetailsModal = ({
               <button
                 onClick={fetchInspect}
                 disabled={inspect.loading}
-                className="h-7 px-2 rounded-lg text-[10px] font-bold uppercase tracking-wider text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 flex items-center gap-1.5"
+                className="h-7 px-2 rounded-lg text-[11px] font-semibold text-zinc-300 bg-white/[0.04] border border-white/10 hover:bg-white/[0.08] hover:text-white disabled:opacity-40 flex items-center gap-1.5"
               >
                 {inspect.loading ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />} Refresh
               </button>
               <button
                 onClick={() => { if (inspect.text) navigator.clipboard.writeText(inspect.text).catch(() => {}); }}
-                className="ml-auto h-7 px-2 rounded-lg text-[10px] font-bold uppercase tracking-wider text-zinc-400 hover:text-white hover:bg-white/5 flex items-center gap-1.5"
+                className="ml-auto h-7 px-2 rounded-lg text-[11px] font-semibold text-zinc-400 hover:text-white hover:bg-white/5 flex items-center gap-1.5"
               >
                 <Copy size={11} /> Copy JSON
               </button>
@@ -1313,13 +1313,13 @@ const ComposeViewerModal = ({
     <ModalShell title={`compose.yaml · ${container.containerName}`} onClose={onClose}>
       <div className="px-3 py-2 border-b border-white/5 bg-black/20 shrink-0 space-y-1">
         <div className="flex items-center gap-2">
-          <span className="text-[9px] uppercase tracking-wider text-zinc-500 font-bold shrink-0">Container</span>
+          <span className="text-[10px] text-zinc-500 font-semibold shrink-0">Container</span>
           <code className="text-[10.5px] font-mono text-zinc-200 truncate select-text">{container.containerName}</code>
           <span className="text-[9px] text-zinc-500 ml-2 shrink-0">project: <span className="text-zinc-300 font-mono">{container.project}</span></span>
           {container.service && <span className="text-[9px] text-zinc-500 ml-1 shrink-0">· service: <span className="text-zinc-300 font-mono">{container.service}</span></span>}
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-[9px] uppercase tracking-wider text-zinc-500 font-bold shrink-0">File</span>
+          <span className="text-[10px] text-zinc-500 font-semibold shrink-0">File</span>
           <code className="text-[10.5px] font-mono text-zinc-200 truncate select-text flex-1 min-w-0">{filePath || "(no compose file label)"}</code>
           {filePath && (
             <button onClick={copyPath} title="Copy path" className="shrink-0 p-1 rounded text-zinc-500 hover:text-white hover:bg-white/5">
@@ -1336,7 +1336,7 @@ const ComposeViewerModal = ({
           <Card title="compose.yaml" actions={
             yaml.data && (
               <button onClick={() => { navigator.clipboard.writeText(yaml.data!).catch(() => {}); }}
-                className="h-6 px-2 rounded text-[10px] font-bold uppercase tracking-wider text-zinc-400 hover:text-white hover:bg-white/5 flex items-center gap-1">
+                className="h-6 px-2 rounded text-[11px] font-semibold text-zinc-400 hover:text-white hover:bg-white/5 flex items-center gap-1">
                 <Copy size={10} /> Copy
               </button>
             )
@@ -1386,7 +1386,7 @@ const CountPill = ({ active, onClick, tone, count, children }: { active: boolean
     : tone === "primary" ? (active ? "bg-primary/15 text-primary border-primary/30" : "bg-white/[0.04] text-zinc-400 border-white/10")
     : (active ? "bg-zinc-500/20 text-zinc-200 border-zinc-500/30" : "bg-white/[0.04] text-zinc-400 border-white/10");
   return (
-    <button onClick={onClick} className={`h-9 sm:h-7 px-3 sm:px-2 rounded-lg text-[10.5px] font-bold uppercase tracking-wider transition-all border flex items-center gap-1.5 ${baseTone} hover:brightness-110`}>
+    <button onClick={onClick} className={`h-9 sm:h-7 px-3 sm:px-2 rounded-lg text-[11.5px] font-semibold transition-all border flex items-center gap-1.5 ${baseTone} hover:brightness-110`}>
       <span>{children}</span>
       <span className="text-[9.5px] opacity-70">{count}</span>
     </button>
@@ -1417,7 +1417,7 @@ const ProjectActionBtn = ({ busy, onClick, tone, children }: { busy: boolean; on
     : "text-zinc-300 bg-white/[0.04] border-white/10 hover:bg-white/[0.08]";
   return (
     <button disabled={busy} onClick={onClick}
-      className={`h-9 sm:h-7 px-3 sm:px-2.5 rounded-lg text-[10.5px] font-bold uppercase tracking-wider border flex items-center gap-1.5 disabled:opacity-40 ${cls}`}>
+      className={`h-9 sm:h-7 px-3 sm:px-2.5 rounded-lg text-[11.5px] font-semibold border flex items-center gap-1.5 disabled:opacity-40 ${cls}`}>
       {busy && <Loader2 size={11} className="animate-spin" />}
       {children}
     </button>
@@ -1435,7 +1435,7 @@ const StatusBadge = ({ tone, children }: { tone: "green" | "amber" | "red" | "zi
 const Card = ({ title, actions, children }: { title: string; actions?: React.ReactNode; children: React.ReactNode }) => (
   <section className="bg-[#121215] border border-white/5 rounded-xl overflow-hidden">
     <div className="px-3 py-1.5 border-b border-white/5 bg-white/[0.02] flex items-center gap-2">
-      <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 select-text">{title}</span>
+      <span className="text-[11px] font-semibold text-zinc-400 select-text">{title}</span>
       {actions && <div className="ml-auto">{actions}</div>}
     </div>
     <div className="p-3 select-text">{children}</div>
@@ -1444,7 +1444,7 @@ const Card = ({ title, actions, children }: { title: string; actions?: React.Rea
 
 const StatTile = ({ label, value, sub }: { label: string; value: string; sub?: string }) => (
   <div className="bg-black/30 border border-white/5 rounded-lg p-2">
-    <div className="text-[9px] font-bold uppercase tracking-wider text-zinc-500">{label}</div>
+    <div className="text-[10px] font-semibold text-zinc-500">{label}</div>
     <div className="text-[14px] font-mono font-bold text-white mt-0.5 select-text">{value || "—"}</div>
     {sub && <div className="text-[10px] text-zinc-500 font-mono mt-0.5 select-text">{sub}</div>}
   </div>
@@ -1462,14 +1462,14 @@ const ErrorBanner = ({ err, onRetry }: { err: string; onRetry?: () => void }) =>
     <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-red-500/5 border border-red-500/20 text-red-300 text-[11px]">
       <AlertCircle size={14} className="mt-0.5 shrink-0" />
       <div className="min-w-0 flex-1">
-        <div className="font-bold uppercase tracking-wider">{e.title}</div>
+        <div className="font-semibold">{e.title}</div>
         {e.hint && <div className="text-red-200/80 mt-0.5">{e.hint}</div>}
         <div className="opacity-70 mt-0.5 font-mono break-all">{err}</div>
       </div>
       {onRetry && (
         <button
           onClick={onRetry}
-          className="shrink-0 h-6 px-2 rounded text-[10px] font-bold uppercase tracking-wider text-red-200 bg-red-500/10 border border-red-500/30 hover:bg-red-500/20 flex items-center gap-1"
+          className="shrink-0 h-6 px-2 rounded text-[11px] font-semibold text-red-200 bg-red-500/10 border border-red-500/30 hover:bg-red-500/20 flex items-center gap-1"
         >
           <RefreshCw size={10} /> Retry
         </button>
@@ -1490,7 +1490,7 @@ const ModalShell = ({ title, onClose, actions, children }: { title: string; onCl
   <div className="fixed inset-0 z-[9999] bg-black/60 backdrop-blur-sm flex sm:items-center sm:justify-center sm:p-3 animate-in fade-in" onClick={onClose}>
     <div onClick={(e) => e.stopPropagation()} className="bg-[#0c0c0e] sm:border sm:border-white/10 sm:rounded-xl w-full sm:max-w-3xl h-full sm:h-[80vh] flex flex-col overflow-hidden shadow-2xl">
       <div className="shrink-0 h-11 sm:h-10 px-3 flex items-center justify-between border-b border-white/5 bg-white/[0.02]">
-        <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-300 truncate select-text">{title}</span>
+        <span className="text-[12px] font-semibold text-zinc-300 truncate select-text">{title}</span>
         <div className="flex items-center gap-2 shrink-0">
           {actions}
           {/* h-9 w-9 = 36 px touch target on phone, vs the old icon
