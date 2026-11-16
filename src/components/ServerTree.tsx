@@ -4,6 +4,7 @@ import { ArrowRight, ArrowUp, ArrowDown, ChevronDown, ChevronRight, ChevronsDown
 import type { FolderTree } from "../util/folderTree";
 import { placeAt, sortFolders, sortServers, relativeTime, type SortDir, type SortKey } from "../util/serverOrder";
 import { useStoredList } from "../util/storedJson";
+import { PROTOCOL_ICON, tabDot, tabTitle, accentOf, hostPort, protocolOf } from "../util/serverLook";
 
 // The Tree view of the server list: every folder and server in one tree grid
 // (WAI-ARIA treegrid, one Tab stop, arrows move between rows). Folders come
@@ -48,6 +49,7 @@ export function ServerTree(props: {
   dir: SortDir;
   onSort: (key: SortKey) => void;
   lastSeen: Record<string, number>;
+  serverTabs?: Record<number, string>;   // server id -> state of its open tab, for the dot
   profile: string | null | undefined;
   isMobile?: boolean;
   onOpenServer: (s: any) => void;
@@ -482,6 +484,8 @@ export function ServerTree(props: {
 
     const s = r.s;
     const seen = s.uuid ? lastSeen[s.uuid] : undefined;
+    const Icon = PROTOCOL_ICON[protocolOf(s)];
+    const tab = props.serverTabs?.[s.id];
     return (
       <div key={r.key} {...common} aria-level={r.level} aria-selected={r.key === current}
         onDoubleClick={() => props.onOpenServer(s)}
@@ -493,16 +497,26 @@ export function ServerTree(props: {
         {dropLine(r, pad + (r.parent === "ungrouped" ? 0 : 20))}
         {/* The icon lines up with the folder icons beside it (past their chevron). */}
         <div role="gridcell" className="min-w-0 flex items-center gap-2 py-1.5 pr-2" style={{ paddingLeft: pad + (r.parent === "ungrouped" ? 0 : 20) }}>
-          <Server size={18} className={`shrink-0 ${s.color ? "" : "text-primary"}`} style={{ color: s.color || undefined }} />
+          <span className="relative shrink-0 flex" style={{ color: accentOf(s.color) }}>
+            <Icon size={18} />
+            {tab && (
+              <span
+                role="img"
+                aria-label={tabTitle(tab)}
+                title={tabTitle(tab)}
+                className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-[#0f0f13] ${tabDot(tab)}`}
+              />
+            )}
+          </span>
           <span className="min-w-0">
             <span className="flex items-center gap-1.5 min-w-0">
               <span className="truncate text-[13px] text-zinc-100">{s.name}</span>
               {protocolTag(s)}
             </span>
-            <span className="sm:hidden block truncate text-[11px] text-zinc-400 font-mono">{s.host}</span>
+            <span className="sm:hidden block truncate text-[11px] text-zinc-400 font-mono">{hostPort(s)}</span>
           </span>
         </div>
-        <div role="gridcell" className="hidden sm:block min-w-0 truncate pr-3 font-mono text-[12px] text-zinc-300">{s.host}</div>
+        <div role="gridcell" className="hidden sm:block min-w-0 truncate pr-3 font-mono text-[12px] text-zinc-300">{hostPort(s)}</div>
         <div role="gridcell" className="hidden sm:block min-w-0 truncate pr-3 text-[12px] text-zinc-400" title={seen ? new Date(seen).toLocaleString() : undefined}>
           {/* shortcut: re-rendered on any change only, not ticking each minute; add a timer if stale labels bother anyone. */}
           {relativeTime(seen)}
