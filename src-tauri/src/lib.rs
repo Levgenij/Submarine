@@ -6563,6 +6563,27 @@ async fn close_after_reload(app: tauri::AppHandle, _closing: tokio::sync::OwnedM
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), teardown).await;
 }
 
+/// Whether any connection is open, connecting or connected: an SSH session
+/// (with its files, forwards and terminals, telnet's too), an FTP session, a
+/// telnet connection not yet in its terminal, a built-in or external RDP
+/// screen, a VNC screen. The same places `disconnect_all_sessions` gathers
+/// from, plus the FTP and terminal maps. Android's keep-alive service runs
+/// while this is true (android_bridge::watch_connections).
+#[cfg(target_os = "android")]
+pub(crate) async fn any_connection_open(app: &tauri::AppHandle) -> bool {
+    let ssh = app.state::<SshState>();
+    if !ssh.connections.lock().await.is_empty()
+        || !ssh.ftp_sessions.lock().await.is_empty()
+        || !ssh.terminal_txs.lock().await.is_empty()
+    {
+        return true;
+    }
+    !app.state::<rdp::RdpSessions>().lock().await.is_empty()
+        || !app.state::<vnc_client::VncClients>().lock().await.is_empty()
+        || !app.state::<RdpClients>().lock().await.is_empty()
+        || !app.state::<telnet::Pending>().lock().await.is_empty()
+}
+
 /// What closing a profile takes down, see `close_profile`. `opened` is the
 /// generation of the profile that closes.
 async fn teardown_profile(
@@ -28150,6 +28171,9 @@ pub fn run() {
             gateway::hub::setup(app.handle());
             // .rdp files an earlier run left behind.
             std::thread::spawn(rdp::clear_old_files);
+            // The keep-alive service, while a connection is open.
+            #[cfg(target_os = "android")]
+            android_bridge::watch_connections(app.handle().clone());
             Ok(())
         })
         // Also the first load, when no profile is open and this does nothing.
