@@ -136,7 +136,7 @@ export const BookmarkToggle = ({
           style={{ width: GUIDE_WIDTH, ...position(guideAt), visibility: guideH ? "visible" : "hidden" }}
           className="fixed z-[9999] pointer-events-none bg-[#15151a] border border-white/10 rounded-lg shadow-2xl px-3 py-2 text-[11px] leading-snug text-zinc-300 font-sans normal-case tracking-normal"
         >
-          <div className="mb-1 text-[10px] font-bold uppercase tracking-wider text-zinc-100">Bookmark</div>
+          <div className="mb-1 text-[11px] font-semibold text-zinc-100">Bookmark</div>
           <p className="text-zinc-400">Keeps a folder one click away in the list under the arrow next to Up.</p>
           <ul className="mt-1.5 flex flex-col gap-0.5">
             {legend.map((l) => (

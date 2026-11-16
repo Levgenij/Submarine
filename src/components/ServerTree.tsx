@@ -343,7 +343,7 @@ export function ServerTree(props: {
           type="button"
           onClick={() => props.onSort(key)}
           title={active ? "Reverse the order" : `Sort by ${label.toLowerCase()}`}
-          className={`inline-flex items-center gap-1.5 h-7 px-1.5 -mx-1.5 rounded text-[11px] font-semibold uppercase tracking-wider transition-colors outline-none focus-visible:ring-2 focus-visible:ring-primary/60 ${active ? "text-zinc-200" : "text-zinc-500 hover:text-zinc-300"}`}
+          className={`inline-flex items-center gap-1.5 h-7 px-1.5 -mx-1.5 rounded text-[12px] font-semibold transition-colors outline-none focus-visible:ring-2 focus-visible:ring-primary/60 ${active ? "text-zinc-200" : "text-zinc-500 hover:text-zinc-300"}`}
         >
           {label}
           {active && <Arrow size={12} className="text-primary" />}
@@ -428,7 +428,7 @@ export function ServerTree(props: {
     if (r.kind === "ungrouped") {
       return (
         <div key={r.key} {...common} aria-expanded={r.open} aria-level={1} className={`${rowClass(r)} bg-white/[0.02]`}>
-          <div role="gridcell" className="col-span-full flex items-center gap-1.5 py-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-400" style={{ paddingLeft: PAD }}>
+          <div role="gridcell" className="col-span-full flex items-center gap-1.5 py-2 text-[12px] font-semibold text-zinc-400" style={{ paddingLeft: PAD }}>
             <ChevronDown size={13} className={`transition-transform ${r.open ? "" : "-rotate-90"}`} />
             Ungrouped <span className="text-zinc-600">·</span> <span className="text-zinc-500">{r.count}</span>
             {drag?.kind === "server" && <span className="ml-2 normal-case tracking-normal font-normal text-zinc-500">Drop here to take it out of its folder</span>}

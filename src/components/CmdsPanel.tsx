@@ -542,7 +542,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
       <div className="h-12 px-4 shrink-0 flex items-center justify-between border-b border-white/5 bg-white/5">
         <div className="flex items-center gap-2 min-w-0">
           <TabIcon size={14} className="text-primary shrink-0" />
-          <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-300 truncate">
+          <span className="text-[11px] font-semibold text-zinc-300 truncate">
             Library · {tabLabel}{tab === "node" && serverName ? ` · ${serverName}` : ""}
           </span>
         </div>
@@ -551,7 +551,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
           <button
             onClick={closeSaving}
             className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-white/5 transition-all"
-            title="Close Panel"
+            title="Close panel"
           >
             <X size={14} />
           </button>
@@ -567,7 +567,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
           <button
             key={t.id}
             onClick={() => setTab(t.id)}
-            className={`h-9 min-w-0 px-1 flex items-center justify-center gap-1.5 text-[11px] font-bold uppercase tracking-wider transition-all ${
+            className={`h-9 min-w-0 px-1 flex items-center justify-center gap-1.5 text-[12px] font-semibold transition-all ${
               tab === t.id
                 ? "text-primary bg-primary/5 border-b border-primary"
                 : "text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.03] border-b border-transparent"
@@ -602,7 +602,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
           {tab === "history" && (
             <div className="mt-2 flex items-center gap-2">
               {hasNode && (
-                <label className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-zinc-400 cursor-pointer select-none">
+                <label className="flex items-center gap-1.5 text-[11px] font-semibold text-zinc-400 cursor-pointer select-none">
                   <input
                     type="checkbox"
                     className="accent-primary"
@@ -730,7 +730,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
                         onClick={() => (form ? setAdding(null) : beginAdd(h))}
                         disabled={saved}
                         className="w-7 h-7 rounded-lg bg-white/[0.03] border border-white/10 hover:bg-white/10 hover:border-white/20 text-zinc-300 hover:text-white flex items-center justify-center transition-all disabled:text-emerald-400 disabled:border-emerald-500/30 disabled:bg-emerald-500/10 disabled:cursor-default"
-                        title={saved ? "Already in Commands" : "Add to Commands"}
+                        title={saved ? "Already in commands" : "Add to commands"}
                       >
                         {saved ? <Check size={12} /> : <BookmarkPlus size={12} />}
                       </button>
@@ -789,7 +789,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
                           onClick={() => void saveAdd()}
                           disabled={saving || !canSaveAdd(form)}
                           className="flex-1 h-7 rounded-lg bg-primary/10 text-primary border border-primary/20 hover:bg-primary hover:text-zinc-950 hover:border-primary flex items-center justify-center gap-1.5 text-[10px] font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                          title="Save to Commands (Ctrl+Enter)"
+                          title="Save to commands (Ctrl+Enter)"
                         >
                           {saving ? <RefreshCw size={11} className="animate-spin" /> : <Check size={11} />} Save
                         </button>
@@ -802,7 +802,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
           ) : (
             <div className="flex flex-col items-center justify-center py-16 text-zinc-600 text-center px-4">
               <History size={32} className="opacity-20 mb-2" />
-              <span className="text-xs font-bold text-zinc-500">{searchQuery ? "No History Found" : "No History Yet"}</span>
+              <span className="text-xs font-bold text-zinc-500">{searchQuery ? "No history found" : "No history yet"}</span>
               <p className="text-[10px] mt-1 text-zinc-600 max-w-[200px]">
                 {searchQuery ? "No matches for your search query." : "Commands you run in a terminal will appear here."}
               </p>
@@ -816,7 +816,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
               return (
                 <Fragment key={c.id}>
                 {heading && (
-                  <div className="px-1 pt-1 text-[9.5px] font-bold uppercase tracking-widest text-zinc-500" data-command-group>
+                  <div className="px-1 pt-1 text-[10.5px] font-semibold text-zinc-500" data-command-group>
                     {heading}
                   </div>
                 )}
@@ -911,7 +911,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
           ) : (
             <div className="flex flex-col items-center justify-center py-16 text-zinc-600 text-center px-4">
               <Terminal size={32} className="opacity-20 mb-2" />
-              <span className="text-xs font-bold text-zinc-500">No Commands Found</span>
+              <span className="text-xs font-bold text-zinc-500">No commands found</span>
               <p className="text-[10px] mt-1 text-zinc-600 max-w-[200px]">
                 {searchQuery ? "No matches for your search query." : "Save commands in the main app to surface them here."}
               </p>
@@ -1005,7 +1005,7 @@ export const CmdsPanel = ({ activeTab, onClose, serverId, serverName, renderHead
         ) : (
           <div className="flex flex-col items-center justify-center py-16 text-zinc-600 text-center px-4">
             <StickyNote size={32} className="opacity-20 mb-2" />
-            <span className="text-xs font-bold text-zinc-500">No Notes Found</span>
+            <span className="text-xs font-bold text-zinc-500">No notes found</span>
             <p className="text-[10px] mt-1 text-zinc-600 max-w-[200px]">
               {searchQuery ? "No matches for your search query." : "Add notes from the Notes tab to surface them here."}
             </p>

@@ -344,7 +344,7 @@ const SftpWorkspace = ({ sessionId, disabled = false, serverId = 0, mirrorsConfi
           onClick={toggleElevation}
           disabled={elevBusy || disabled}
           title="Run file operations as root (sudo)"
-          className="h-6 px-2 flex items-center gap-1 rounded text-[10px] font-bold uppercase tracking-wider bg-white/[0.04] text-zinc-300 border border-white/10 hover:bg-white/10 hover:text-white disabled:opacity-40"
+          className="h-6 px-2 flex items-center gap-1 rounded text-[11px] font-semibold bg-white/[0.04] text-zinc-300 border border-white/10 hover:bg-white/10 hover:text-white disabled:opacity-40"
         >
           <Shield size={11} /> {elevBusy ? "…" : "sudo"}
         </button>

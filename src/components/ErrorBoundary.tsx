@@ -81,8 +81,8 @@ const S: Record<string, CSSProperties> = {
   },
   card: { maxWidth: 640, width: "100%" },
   badge: {
-    fontFamily: "ui-monospace, 'Cascadia Code', monospace", fontSize: 11, letterSpacing: ".12em",
-    textTransform: "uppercase", color: "#ff8a8a", marginBottom: 14,
+    fontFamily: "ui-monospace, 'Cascadia Code', monospace", fontSize: 12,
+    color: "#ff8a8a", marginBottom: 14,
   },
   h1: { fontSize: 24, margin: "0 0 12px", letterSpacing: "-.01em", fontWeight: 700 },
   lede: { color: "#9fb2c7", fontSize: 14.5, lineHeight: 1.6, margin: "0 0 20px", maxWidth: "58ch" },
