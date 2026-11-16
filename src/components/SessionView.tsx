@@ -734,6 +734,14 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
   const [aiPending, setAiPending] = useState(0);
   // New terminals of this server log in on their own (its choice on this device).
   const [ownLoginDefault, setOwnLoginDefault] = useState(() => readOwnLogin(session.serverUuid));
+  // Opens a terminal and makes it the active one: the "+" button and key, the
+  // split item and the own-login item. Returns its id for the split item.
+  const openNewTerminal = useCallback((ownLogin: boolean = ownLoginDefault) => {
+    const newId = `${session.id}-term-${Date.now()}`;
+    setTerminals(prev => [...prev, { id: newId, title: nextTerminalNumber(prev), ownLogin }]);
+    setActiveTab(newId);
+    return newId;
+  }, [session.id, ownLoginDefault]);
   // SFTP's Follow, and the folder each terminal's shell last reported (a
   // container's terminal reports none: its folders aren't the server's).
   const [follow, setFollow] = useState(readFollow);
@@ -942,6 +950,42 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
   // panes redistributes those two panes' share and leaves the rest
   // alone. Reset (double-click a divider) flattens back to all-equal.
   const [splitRatios, setSplitRatios] = useState<number[]>([]);
+  // Closes a terminal tab: the x button and Ctrl/Cmd+Shift+W (TerminalView, which
+  // only the shell terminals have, so the key never closes the AI tab). The
+  // last shell of the server closes the session instead.
+  const closeTerminal = useCallback((id: string) => {
+    const closing = terminals.find(x => x.id === id);
+    if (!closing) return;
+    if (!closing.ai && terminals.filter(x => !x.ai).length <= 1) {
+      onClose();
+      return;
+    }
+    setTerminals(prev => prev.filter(x => x.id !== id));
+    if (activeTab === id) {
+      // A split partner first, so focus stays inside the split;
+      // otherwise the tab that takes this one's place.
+      const rest = terminals.filter(x => x.id !== id);
+      const partner = splitTerminals.find(p => p !== id);
+      setActiveTab(partner ?? rest[Math.min(terminals.indexOf(closing), rest.length - 1)].id);
+    }
+    // Closing a terminal that's participating in the split
+    // has to drop it from splitTerminals AND splitRatios or
+    // the layout keeps a hole for a torn-down partner.
+    if (splitTerminals.includes(id)) {
+      const idx = splitTerminals.indexOf(id);
+      const nextTerms = splitTerminals.filter(p => p !== id);
+      const nextRatios = splitRatios.filter((_, i) => i !== idx);
+      // Falling below 2 members collapses back to the plain
+      // absolute-overlap layout.
+      if (nextTerms.length < 2) {
+        setSplitTerminals([]);
+        setSplitRatios([]);
+      } else {
+        setSplitTerminals(nextTerms);
+        setSplitRatios(nextRatios);
+      }
+    }
+  }, [terminals, activeTab, splitTerminals, splitRatios, onClose]);
   // "+" button's secondary menu — the arrow beside "+", or a right-click /
   // long-press on "+", so the primary click stays a fast "new tab" without
   // stealing the advanced flows (split view, compare across servers).
@@ -2052,31 +2096,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
               <button
                 onClick={(e) => {
                   e.stopPropagation();
-                  setTerminals(prev => prev.filter(x => x.id !== t.id));
-                  if (activeTab === t.id) {
-                    // A split partner first, so focus stays inside the split;
-                    // otherwise the tab that takes this one's place.
-                    const rest = terminals.filter(x => x.id !== t.id);
-                    const partner = splitTerminals.find(id => id !== t.id);
-                    setActiveTab(partner ?? rest[Math.min(terminals.indexOf(t), rest.length - 1)].id);
-                  }
-                  // Closing a terminal that's participating in the split
-                  // has to drop it from splitTerminals AND splitRatios or
-                  // the layout keeps a hole for a torn-down partner.
-                  if (splitTerminals.includes(t.id)) {
-                    const idx = splitTerminals.indexOf(t.id);
-                    const nextTerms = splitTerminals.filter(id => id !== t.id);
-                    const nextRatios = splitRatios.filter((_, i) => i !== idx);
-                    // Falling below 2 members collapses back to the plain
-                    // absolute-overlap layout.
-                    if (nextTerms.length < 2) {
-                      setSplitTerminals([]);
-                      setSplitRatios([]);
-                    } else {
-                      setSplitTerminals(nextTerms);
-                      setSplitRatios(nextRatios);
-                    }
-                  }
+                  closeTerminal(t.id);
                 }}
                 aria-label="Close terminal"
                 className="absolute right-1 top-1/2 -translate-y-1/2 w-8 h-8 sm:w-6 sm:h-6 flex items-center justify-center rounded opacity-100 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100 hover:bg-white/10 hover:text-red-400 text-zinc-500 transition-all"
@@ -2096,11 +2116,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
               went unnoticed (#243); the arrow also lets the keyboard in. */}
           <div ref={plusGroupRef} className="ml-1 shrink-0 flex items-stretch rounded-lg border border-dashed border-white/10">
             <button
-              onClick={() => {
-                const newId = `${session.id}-term-${Date.now()}`;
-                setTerminals(prev => [...prev, { id: newId, title: nextTerminalNumber(prev), ownLogin: ownLoginDefault }]);
-                setActiveTab(newId);
-              }}
+              onClick={() => openNewTerminal()}
               onContextMenu={(e) => {
                 e.preventDefault();
                 openPlusMenu(false);
@@ -2252,8 +2268,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   tabIndex={-1}
                   onClick={() => {
                     closePlusMenu();
-                    const newId = `${session.id}-term-${Date.now()}`;
-                    setTerminals(prev => [...prev, { id: newId, title: nextTerminalNumber(prev), ownLogin: ownLoginDefault }]);
+                    const newId = openNewTerminal();
                     if (splitTerminals.length >= 2) {
                       setSplitTerminals(prev => [...prev, newId]);
                       setSplitRatios(prev => [...prev, 1]);
@@ -2261,7 +2276,6 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                       setSplitTerminals([insertTarget ?? activeTab, newId]);
                       setSplitRatios([1, 1]);
                     }
-                    setActiveTab(newId);
                   }}
                   className="w-full flex items-center gap-2.5 px-3 py-1.5 hover:bg-white/[0.06] focus-visible:bg-white/[0.06] outline-none text-zinc-200 hover:text-white text-left"
                 >
@@ -2307,9 +2321,7 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   tabIndex={-1}
                   onClick={() => {
                     closePlusMenu();
-                    const newId = `${session.id}-term-${Date.now()}`;
-                    setTerminals(prev => [...prev, { id: newId, title: nextTerminalNumber(prev), ownLogin: true }]);
-                    setActiveTab(newId);
+                    openNewTerminal(true);
                   }}
                   className="w-full flex items-center gap-2.5 px-3 py-1.5 hover:bg-white/[0.06] focus-visible:bg-white/[0.06] outline-none text-zinc-200 hover:text-white text-left"
                 >
@@ -2575,6 +2587,8 @@ const SessionViewImpl = ({ session, profile, onClose, addLog, onStatusChange, ch
                   ownLogin={t.ownLogin}
                   quickAuth={session.quickAuth}
                   onFolder={t.container ? undefined : onTerminalFolder}
+                  onClose={() => closeTerminal(t.id)}
+                  onNewTerminal={() => openNewTerminal()}
                 />
                 )}
                 {/* Per-pane detach affordance — pulls the pane out of
