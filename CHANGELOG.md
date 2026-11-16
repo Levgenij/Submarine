@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.5.5
+
+### Connect
+
+- The app's own commands on a server (server info, the monitor, Docker, the owner column, archives, folder delete, sudo files) run with sh, so accounts whose login shell is fish, csh or tcsh work. Before, csh could read `hostname 2>/dev/null` as a new host name.
+- FTP and FTPS servers: add one in the server form or Quick connect, open an `ftp://` link, or import FileZilla's site list. The tab opens the file browser and the mirror. It connects directly, through an SSH server or through a proxy. A certificate that the public authorities don't vouch for is shown once and pinned.
+
+### Servers
+
+- A server card shows a protocol icon in the server's colour, and a dot on it while the server has a tab, coloured by the tab's state. The address shows the port only when it is not the usual one.
+- In the server list, / goes to the search box, Enter opens the first server shown, and Escape clears the search.
+
+### Tabs
+
+- Ctrl+Tab and Ctrl+Shift+Tab move between session tabs. Drag a tab to reorder it, middle-click it to close it, or use the + after the last tab to open a saved server.
+- In a session, Ctrl+Shift+W closes the current terminal tab (on the last one, the session) and Ctrl+Shift+Plus opens a new one. After the shell has ended, Ctrl+W and Ctrl+Plus do the same.
+
+### Terminal
+
+- Clear terminal, in a terminal tab's menu or Ctrl+Shift+K, empties the screen and scrollback in the app without sending anything to the server. It waits while a full-screen program runs.
+
+### Remote desktop
+
+- The built-in RDP client tells the server the keyboard layout of this Windows computer, so Shift and the number keys type what the keys show.
+
+### AI assistant
+
+- An AI assistant in SSH and FTP tabs, with your own provider: Anthropic, OpenAI or an OpenAI-compatible server. It runs commands on a channel of its own, never in your terminal, and reads and writes files over SFTP. Each server has its own permission level, and every action goes to an activity log that can undo file changes. Its chats and provider keys are kept encrypted next to the profile, on this device only.
+- AI agents on this computer, such as Claude Code, can ask for access to a server that is open in the app. You choose the server, what the agent may do and for how long, and every operation is asked about one by one. This is off by default, desktop only, and ends when the profile locks.
+
+### Profiles
+
+- A profile can keep a copy of itself in a folder you choose. Every change replaces the copy, still locked with the profile's password. Put the folder in OneDrive, Google Drive or Dropbox and open the copy on another computer with Import.
+
+### App
+
+- An interface font setting. Paths and figures in columns use the terminal font.
+- Buttons and small headings are written in sentence case, without capitals and letter spacing.
+
+### Android
+
+- The connection keeper runs only while a connection is open, and the app asks once for permission to show its notification. The app is built for phones with 16 KB memory pages.
+- Closing the last session no longer leaves the session list open over the next one. A held arrow on the key bar keeps the keyboard up.
+
+Vault format is unchanged. Existing profiles open without a migration. The AI assistant keeps its own encrypted file next to each profile, and the interface font and folder copy are kept on this device.
+
 ## 0.5.4
 
 ### Connect
