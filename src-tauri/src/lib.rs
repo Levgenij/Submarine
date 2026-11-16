@@ -24,6 +24,7 @@ mod mirror;
 mod docker;
 mod archive;
 mod shell_sftp;
+mod remote_sh;
 mod hlc;
 mod identity;
 mod portable;
@@ -19692,6 +19693,9 @@ fn local_shell() -> Option<String> {
 // (sshd sets $SHELL to it). Sent as `sh -c '<script>' sh <shell>`: the
 // account's shell, whatever it is (fish and csh included), only runs a plain
 // command, and the path arrives as an argument, never inside the script.
+// One of the few lines the login shell gets as it is (see remote_sh): the
+// terminal's input is the shell's stdin, so the script can't come there. It
+// stays one line with no `'`, `!` or backslash inside its quotes.
 const LOGIN_SHELL_SCRIPT: &str =
     r#"if [ -x "$1" ]; then SHELL=$1; export SHELL; exec "$1" -l; fi; exec "${SHELL:-/bin/sh}" -l"#;
 
@@ -19706,12 +19710,9 @@ fn login_shell_command(shell: &str) -> String {
 // any case. Asked on a channel of its own (`run_exec_capture`), before the
 // terminal's PTY.
 async fn server_runs_login_shell(state: &SshState, session_id: &str, shell: &str) -> bool {
-    let cmd = format!(
-        "sh -c '[ -x \"$1\" ] && echo __SUB_SHELL:OK' sh {}",
-        archive::sh_quote(shell)
-    );
+    let script = remote_sh::with_args(&[shell], r#"[ -x "$1" ] && echo __SUB_SHELL:OK"#);
     matches!(
-        run_exec_capture(state, session_id, &cmd, 4).await,
+        run_exec_capture(state, session_id, &script, 4).await,
         Ok(out) if out.lines().any(|line| line.trim() == "__SUB_SHELL:OK")
     )
 }
@@ -19732,9 +19733,12 @@ mod login_shell_tests {
     fn the_script_survives_single_quote_wrapping_in_any_shell() {
         // Sent as `sh -c '<script>'` through the account's own shell: a single
         // quote would end the argument early, and `!` triggers history
-        // expansion in tcsh.
+        // expansion in tcsh. csh ends a quote at a line break, and fish
+        // reads some backslashes inside single quotes.
         assert!(!LOGIN_SHELL_SCRIPT.contains('\''));
         assert!(!LOGIN_SHELL_SCRIPT.contains('!'));
+        assert!(!LOGIN_SHELL_SCRIPT.contains('\n'));
+        assert!(!LOGIN_SHELL_SCRIPT.contains('\\'));
     }
 
     // What the script does, run by this machine's own sh, with a stand-in
@@ -20285,6 +20289,8 @@ struct InfoSectionResult {
 // Run a script through a fresh exec channel on the live SSH session and
 // return everything it printed (up to a 1 MB cap). Stays read-only — the
 // callers in this module only invoke shell built-ins and inspection tools.
+// sh reads the script, never the login shell (remote_sh): under csh,
+// `hostname 2>/dev/null` was `hostname 2` and renamed the server (#352).
 async fn run_info_script(
     state: &SshState,
     session_id: &str,
@@ -20302,7 +20308,9 @@ async fn run_info_script(
 
     let start = std::time::Instant::now();
     let channel = shell_sftp::open_session_channel(&session_arc).await?;
-    channel.exec(true, script.as_bytes()).await.map_err(|e| e.to_string())?;
+    // Sending the script and reading what it prints share the time limit.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    remote_sh::run_script(&channel, script, deadline).await?;
     let mut stream = channel.into_stream();
 
     // 1 MB cap — defends the UI against pathological output (e.g. a server
@@ -20332,7 +20340,7 @@ async fn run_info_script(
             }
         }
     };
-    tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), read_fut)
+    tokio::time::timeout_at(deadline, read_fut)
         .await
         .map_err(|_| format!("probe timed out after {}s", timeout_secs))?;
 
@@ -20386,8 +20394,8 @@ fn is_safe_systemctl_unit(unit: &str) -> bool {
 
 // `systemctl <action> <unit>` (`sudo -n` in front for the retry), for a unit
 // that passed `is_safe_systemctl_unit`. The unit goes in single quotes (that
-// check lets no quote through): the login shell reads this line, and a
-// backslash is how systemd writes a dash inside an instance name
+// check lets no quote through): sh reads this line (`run_exec_capture`), and
+// a backslash is how systemd writes a dash inside an instance name
 // (`dev-disk-by\x2duuid-....service`), which the shell would otherwise eat
 // or decode.
 fn systemctl_command(sudo: bool, action: &str, unit: &str) -> String {
@@ -20572,11 +20580,12 @@ async fn run_exec_capture(
             .ok_or_else(|| "Session not connected".to_string())?
     };
     let channel = shell_sftp::open_session_channel(&session_arc).await?;
-    channel.exec(true, cmd.as_bytes()).await.map_err(|e| e.to_string())?;
-    // No command reads stdin. Closing it lets a server that swaps every exec
-    // for sftp-server (`ForceCommand internal-sftp`) exit instead of waiting
-    // out the whole timeout for SFTP packets.
-    channel.eof().await.map_err(|e| e.to_string())?;
+    // run_script closes stdin after the script (no command reads it). That
+    // lets a server that swaps every exec for sftp-server (`ForceCommand
+    // internal-sftp`) exit instead of waiting out the whole timeout for SFTP
+    // packets.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    remote_sh::run_script(&channel, cmd, deadline).await?;
     let mut stream = channel.into_stream();
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
     let read_fut = async {
@@ -20591,7 +20600,7 @@ async fn run_exec_capture(
             }
         }
     };
-    tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), read_fut)
+    tokio::time::timeout_at(deadline, read_fut)
         .await
         .map_err(|_| format!("exec timed out after {}s", timeout_secs))?;
     Ok(String::from_utf8_lossy(&buf).into_owned())
@@ -20792,11 +20801,11 @@ const SUDO_NO_SFTP_SERVER: &str = "[SUDO] NO_SFTP_SERVER";
 const SUDO_FAILED: &str = "[SUDO] FAILED";
 const ELEVATED_SFTP_READY: &str = "__SUB_SUDO_READY__";
 
-// POSIX sh, run as `sh -c '<script>'`: no single quotes inside, and no `!`
-// (tcsh history expansion) so it survives any login shell. `SUB_MODE=pw`
-// makes sudo read the password from stdin; `-k` ignores a cached ticket so
-// the password is really checked. `sudo -l <cmd>` tests the exact command
-// we will run, which also works for sudoers rules scoped to sftp-server.
+// POSIX sh, run by `exec_with_stdin_capture` (remote_sh), so whatever the
+// login shell is. `SUB_MODE=pw` makes sudo read the password from stdin; `-k`
+// ignores a cached ticket so the password is really checked. `sudo -l <cmd>`
+// tests the exact command we will run, which also works for sudoers rules
+// scoped to sftp-server.
 const SUDO_SFTP_PROBE: &str = r#"S=
 for p in /usr/lib/openssh/sftp-server /usr/libexec/openssh/sftp-server /usr/lib/ssh/sftp-server /usr/libexec/sftp-server /usr/lib/sftp-server /usr/local/libexec/sftp-server /usr/local/lib/sftp-server /usr/lib64/misc/sftp-server; do
   if [ -x "$p" ]; then S=$p; break; fi
@@ -20854,21 +20863,21 @@ fn classify_sudo_failure(msg: &str) -> String {
     }
 }
 
-/// Run a command on its own exec channel, optionally feeding stdin, and
-/// collect stdout+stderr until the channel closes.
-async fn exec_with_stdin_capture(
-    session_arc: &SessionHandleArc,
-    cmd: &str,
+/// Run a script with sh on its own exec channel, optionally feeding its
+/// commands `stdin`, and collect stdout+stderr until the channel closes.
+async fn exec_with_stdin_capture<H: russh::client::Handler>(
+    session: &tokio::sync::RwLock<russh::client::Handle<H>>,
+    script: &str,
     stdin: Option<&[u8]>,
     timeout_secs: u64,
 ) -> Result<String, String> {
     use russh::ChannelMsg;
-    let mut channel = shell_sftp::open_session_channel(session_arc).await?;
-    channel.exec(true, cmd.as_bytes()).await.map_err(|e| e.to_string())?;
-    if let Some(input) = stdin {
-        channel.data(input).await.map_err(|e| e.to_string())?;
+    let mut channel = shell_sftp::open_session_channel(session).await?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    match stdin {
+        None => remote_sh::run_script(&channel, script, deadline).await?,
+        Some(input) => remote_sh::start_script_with_input(&channel, script, input, true, deadline).await?,
     }
-    channel.eof().await.map_err(|e| e.to_string())?;
     let mut out: Vec<u8> = Vec::new();
     let collect = async {
         while let Some(msg) = channel.wait().await {
@@ -20883,7 +20892,7 @@ async fn exec_with_stdin_capture(
             }
         }
     };
-    tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), collect)
+    tokio::time::timeout_at(deadline, collect)
         .await
         .map_err(|_| format!("exec timed out after {}s", timeout_secs))?;
     Ok(String::from_utf8_lossy(&out).into_owned())
@@ -20892,9 +20901,9 @@ async fn exec_with_stdin_capture(
 /// Find sftp-server and check sudo for it. Returns the sftp-server path.
 async fn probe_sudo_sftp(session_arc: &SessionHandleArc, password: Option<&str>) -> Result<String, String> {
     let mode = if password.is_some() { "pw" } else { "n" };
-    let cmd = format!("env SUB_MODE={} sh -c '{}'", mode, SUDO_SFTP_PROBE);
+    let script = format!("SUB_MODE={}\n{}", mode, SUDO_SFTP_PROBE);
     let stdin = password.map(|p| zeroize::Zeroizing::new(format!("{}\n", p)));
-    let out = exec_with_stdin_capture(session_arc, &cmd, stdin.as_ref().map(|s| s.as_bytes()), 25).await?;
+    let out = exec_with_stdin_capture(session_arc, &script, stdin.as_ref().map(|s| s.as_bytes()), 25).await?;
     let mut path: Option<String> = None;
     for line in out.lines() {
         let Some(rest) = line.trim().strip_prefix("__SUB_SUDO:") else { continue };
@@ -20925,9 +20934,9 @@ async fn probe_sudo_sftp(session_arc: &SessionHandleArc, password: Option<&str>)
 /// missing, so root file access can go through shell commands.
 async fn probe_sudo_shell(session_arc: &SessionHandleArc, password: Option<&str>) -> Result<(), String> {
     let mode = if password.is_some() { "pw" } else { "n" };
-    let cmd = format!("env SUB_MODE={} sh -c '{}'", mode, SUDO_SHELL_PROBE);
+    let script = format!("SUB_MODE={}\n{}", mode, SUDO_SHELL_PROBE);
     let stdin = password.map(|p| zeroize::Zeroizing::new(format!("{}\n", p)));
-    let out = exec_with_stdin_capture(session_arc, &cmd, stdin.as_ref().map(|s| s.as_bytes()), 25).await?;
+    let out = exec_with_stdin_capture(session_arc, &script, stdin.as_ref().map(|s| s.as_bytes()), 25).await?;
     for line in out.lines() {
         match line.trim().strip_prefix("__SUB_SUDO:") {
             Some("OK") => return Ok(()),
@@ -21145,22 +21154,22 @@ async fn open_elevated_sftp(
     session_arc: &SessionHandleArc,
     elevation: &ssh_manager::SftpElevation,
 ) -> Result<russh_sftp::client::SftpSession, String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncReadExt;
     if !is_safe_remote_exec_path(&elevation.server_path) {
         return Err(format!("{}: unusual sftp-server path", SUDO_FAILED));
     }
     let sudo = if elevation.password.is_some() { "sudo -S -k -p ''" } else { "sudo -n" };
-    let cmd = format!("echo {}; exec {} {}", ELEVATED_SFTP_READY, sudo, elevation.server_path);
+    let script = format!("echo {}; exec {} {}", ELEVATED_SFTP_READY, sudo, elevation.server_path);
     let channel = shell_sftp::open_session_channel(session_arc).await?;
-    channel.exec(true, cmd.as_bytes()).await.map_err(|e| e.to_string())?;
-    let mut stream = channel.into_stream();
+    // The script, the password and the ready marker, all by one deadline.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut line = zeroize::Zeroizing::new(Vec::new());
     if let Some(pw) = &elevation.password {
-        let mut line = zeroize::Zeroizing::new(Vec::with_capacity(pw.len() + 1));
         line.extend_from_slice(pw.as_bytes());
         line.push(b'\n');
-        stream.write_all(&line).await.map_err(|e| e.to_string())?;
-        stream.flush().await.map_err(|e| e.to_string())?;
     }
+    remote_sh::start_script_with_input(&channel, &script, &line, false, deadline).await?;
+    let mut stream = channel.into_stream();
     let wait_ready = async {
         let mut line: Vec<u8> = Vec::new();
         let mut byte = [0u8; 1];
@@ -21185,7 +21194,7 @@ async fn open_elevated_sftp(
             }
         }
     };
-    tokio::time::timeout(std::time::Duration::from_secs(20), wait_ready)
+    tokio::time::timeout_at(deadline, wait_ready)
         .await
         .map_err(|_| format!("{}: timed out starting sftp-server via sudo", SUDO_FAILED))??;
     russh_sftp::client::SftpSession::new_with_config(sftp_listing::counted(stream), sftp_client_config())
@@ -21237,14 +21246,19 @@ mod elevated_sftp_tests {
         assert!(!is_safe_remote_exec_path("/usr/lib/$(id)/sftp-server"));
     }
 
-    #[test]
-    fn probe_script_survives_single_quote_wrapping_in_any_shell() {
-        // It is sent as `sh -c '<script>'`: a single quote would end the
-        // argument early, and `!` triggers history expansion in tcsh.
-        assert!(!SUDO_SFTP_PROBE.contains('\''));
-        assert!(!SUDO_SFTP_PROBE.contains('!'));
-        assert!(!SUDO_SHELL_PROBE.contains('\''));
-        assert!(!SUDO_SHELL_PROBE.contains('!'));
+    // The probes go to sh whatever the login shell is (#352). A password
+    // comes after the script, for the script's sudo to read.
+    #[tokio::test]
+    async fn the_probes_go_to_sh_and_the_password_after_them() {
+        use crate::ssh_test_server::{connect, TestServer};
+        let server = TestServer::echoing_stdin();
+        let commands = Arc::clone(&server.commands);
+        let s = tokio::sync::RwLock::new(connect(server, |_| {}, build_ssh_client_config()).await.unwrap());
+        let out = exec_with_stdin_capture(&s, "id -un", None, 5).await.unwrap();
+        assert_eq!(out, remote_sh::whole("id -un"));
+        let out = exec_with_stdin_capture(&s, SUDO_SFTP_PROBE, Some(&b"pw\n"[..]), 5).await.unwrap();
+        assert_eq!(out, format!("{}pw\n", shell_sftp::encode_script(SUDO_SFTP_PROBE)));
+        assert_eq!(*commands.lock().unwrap(), vec![remote_sh::SH_STDIN.to_string(), shell_sftp::RUNNER.to_string()]);
     }
 }
 
@@ -21642,7 +21656,7 @@ async fn sftp_create_file(
 /// shortcut: the "already there" check and `cp` are two steps, so a folder
 /// someone creates at `to` in between gets the copy inside it; fine for a
 /// duplicate a person starts by hand.
-/// One line: csh/tcsh login shells reject a newline inside quotes.
+/// Kept on one line, though sh reads it (`run_exec_capture`), not the login shell.
 fn duplicate_script(from: &str, to: &str) -> String {
     format!(
         "src={src}; dst={dst}; \
@@ -21912,11 +21926,11 @@ async fn rm_rf_with_marker(state: &SshState, session_id: &str, path: &str, marke
     rm_rf_outcome(archive::run_remote_raw(state, session_id, &rm_rf_script(path, marker)).await)
 }
 
-/// The command passes through the login shell before `sh`, and `sh_quote` is
-/// only right for POSIX shells: fish reads `\'` inside single quotes as an
-/// escaped quote, and PowerShell or cmd on a Windows server parse it their own
-/// way. So `rm` runs only after the same quoting brought the path back intact
-/// (and the probe found the marker under it).
+/// `sh_quote` is only right for a POSIX sh, and the command goes to a server
+/// shell the app can't vouch for (a Windows server has no sh: PowerShell or
+/// cmd parse the quotes their own way). So `rm` runs only after the same
+/// quoting brought the path back intact (and the probe found the marker under
+/// it).
 /// The last line is compared: a chatty shell rc file may print above it.
 fn shell_echoes_path(result: Result<String, String>, path: &str) -> Result<(), String> {
     match result.map(|raw| exit_marker(&raw)) {
@@ -21928,8 +21942,8 @@ fn shell_echoes_path(result: Result<String, String>, path: &str) -> Result<(), S
     }
 }
 
-/// One line: csh/tcsh reject a newline inside quotes. The checks run again
-/// right before `rm`, in the same shell. `[ -e marker ]` and `[ -d ]` see
+/// One line, run by sh (`run_remote_raw`). The checks run again right before
+/// `rm`, in the same shell. `[ -e marker ]` and `[ -d ]` see
 /// through a link, and `rm -rf` on a link only unlinks it, so a shell path
 /// that is a link to the SFTP folder must stop here.
 fn rm_rf_script(path: &str, marker: &str) -> String {
